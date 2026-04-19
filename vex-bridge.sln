@@ -1,0 +1,32 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "plugins", "plugins", "{07D57EEB-2F50-60C4-C011-FE4FA775C9A8}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "revit-csharp", "revit-csharp", "{0C86A5F2-4A38-E9D2-63BE-D93A3EDB5D7B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VexBridgeRevit", "plugins\revit-csharp\VexBridgeRevit.csproj", "{226B525E-651C-404C-F6A6-EA1D9A940B3E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{226B525E-651C-404C-F6A6-EA1D9A940B3E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{226B525E-651C-404C-F6A6-EA1D9A940B3E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{226B525E-651C-404C-F6A6-EA1D9A940B3E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{226B525E-651C-404C-F6A6-EA1D9A940B3E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{0C86A5F2-4A38-E9D2-63BE-D93A3EDB5D7B} = {07D57EEB-2F50-60C4-C011-FE4FA775C9A8}
+		{226B525E-651C-404C-F6A6-EA1D9A940B3E} = {0C86A5F2-4A38-E9D2-63BE-D93A3EDB5D7B}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {A5580799-3B2D-4666-A2BC-E2D59D9880CE}
+	EndGlobalSection
+EndGlobal

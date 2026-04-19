@@ -1,0 +1,10 @@
+[package]
+name        = "vex-bridge-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire types shared between the vex-bridge daemon and CAD-plugin shells."
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>vex-bridge</Name>
+    <Assembly>VexBridgeRevit.dll</Assembly>
+    <FullClassName>Architur.VexBridgeRevit.VexBridgeApplication</FullClassName>
+    <ClientId>4d3b2a9c-8e8b-4a8b-9e0f-7b0f8c4a4a4a</ClientId>
+    <VendorId>ARCH</VendorId>
+    <VendorDescription>Architur</VendorDescription>
+  </AddIn>
+</RevitAddIns>
