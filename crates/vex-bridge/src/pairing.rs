@@ -26,6 +26,7 @@ struct StartResp {
 struct PollResp {
     status: String,
     key_id: Option<String>,
+    #[allow(dead_code)]
     device_label: Option<String>,
 }
 

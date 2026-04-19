@@ -57,6 +57,7 @@ pub async fn serve(state: AppState, port: u16) -> anyhow::Result<()> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::result_large_err)]
 fn require_token(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
     match headers
         .get("x-vex-bridge-token")
