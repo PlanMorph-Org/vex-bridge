@@ -52,10 +52,7 @@ where
             // Block briefly for a new event, then drain anything else.
             match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(ev) => {
-                    if matches!(
-                        ev.kind,
-                        EventKind::Create(_) | EventKind::Modify(_)
-                    ) {
+                    if matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(_)) {
                         for p in ev.paths {
                             // Replace any prior pending entry for this path
                             // with a refreshed deadline.

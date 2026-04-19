@@ -58,7 +58,10 @@ pub async fn serve(state: AppState, port: u16) -> anyhow::Result<()> {
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 fn require_token(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
-    match headers.get("x-vex-bridge-token").and_then(|v| v.to_str().ok()) {
+    match headers
+        .get("x-vex-bridge-token")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(t) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => Ok(()),
         _ => Err((
             StatusCode::UNAUTHORIZED,

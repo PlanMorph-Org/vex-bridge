@@ -36,7 +36,9 @@ pub fn spawn_all(cfg: &Config, runtime: Handle) -> Vec<WatchPipeline> {
     for entry in &cfg.watch {
         match spawn_one(cfg, runtime.clone(), entry.clone()) {
             Ok(p) => out.push(p),
-            Err(e) => warn!(project = %entry.project_id, path = %entry.path, error = %e, "watch setup failed"),
+            Err(e) => {
+                warn!(project = %entry.project_id, path = %entry.path, error = %e, "watch setup failed")
+            }
         }
     }
     info!(count = out.len(), "watchers active");

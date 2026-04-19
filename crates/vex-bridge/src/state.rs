@@ -28,7 +28,7 @@ pub enum PairingState {
     Paired {
         device_label: String,
         key_fingerprint: String,
-        key_id: String,   // architur-side UserSshKey.Id
+        key_id: String, // architur-side UserSshKey.Id
         paired_at_unix: i64,
     },
 }

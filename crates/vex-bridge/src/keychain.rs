@@ -29,8 +29,8 @@ pub fn generate_and_store() -> BridgeResult<SigningKey> {
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     let signing = SigningKey::from_bytes(&seed);
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT)
-        .map_err(|e| BridgeError::Keychain(e.to_string()))?;
+    let entry =
+        keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| BridgeError::Keychain(e.to_string()))?;
     entry
         .set_password(&base64::engine::general_purpose::STANDARD.encode(seed))
         .map_err(|e| BridgeError::Keychain(e.to_string()))?;
@@ -40,8 +40,8 @@ pub fn generate_and_store() -> BridgeResult<SigningKey> {
 /// Load the existing signing key from the keychain. Returns `Ok(None)` if no
 /// key has been generated yet — callers can decide whether to auto-generate.
 pub fn load() -> BridgeResult<Option<SigningKey>> {
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT)
-        .map_err(|e| BridgeError::Keychain(e.to_string()))?;
+    let entry =
+        keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| BridgeError::Keychain(e.to_string()))?;
     match entry.get_password() {
         Ok(b64) => {
             let bytes = base64::engine::general_purpose::STANDARD
@@ -64,8 +64,8 @@ pub fn load() -> BridgeResult<Option<SigningKey>> {
 
 /// Forget the key (used by `vex-bridge unpair`).
 pub fn forget() -> BridgeResult<()> {
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT)
-        .map_err(|e| BridgeError::Keychain(e.to_string()))?;
+    let entry =
+        keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| BridgeError::Keychain(e.to_string()))?;
     match entry.delete_password() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(BridgeError::Keychain(e.to_string())),

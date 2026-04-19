@@ -20,7 +20,11 @@ use crate::server::{self, AppState};
 use crate::state::{now_unix, PairingState, State};
 
 #[derive(Debug, Parser)]
-#[command(name = "vex-bridge", version, about = "Local CAD↔architur bridge daemon.")]
+#[command(
+    name = "vex-bridge",
+    version,
+    about = "Local CAD↔architur bridge daemon."
+)]
 struct Args {
     #[arg(global = true, long, default_value = "info")]
     log: String,
@@ -58,7 +62,10 @@ pub fn run() -> BridgeResult<()> {
     match args.cmd {
         Cmd::Start => run_start(paths),
         Cmd::Status => run_status(paths),
-        Cmd::Pair { device_label, open_browser } => run_pair(paths, device_label, open_browser),
+        Cmd::Pair {
+            device_label,
+            open_browser,
+        } => run_pair(paths, device_label, open_browser),
         Cmd::Unpair => run_unpair(paths),
     }
 }
@@ -66,8 +73,7 @@ pub fn run() -> BridgeResult<()> {
 fn init_tracing(level: &str) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| level.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| level.into()),
         )
         .with_target(false)
         .with_writer(std::io::stderr)

@@ -46,7 +46,10 @@ pub async fn start(cfg: &Config, device_label: &str) -> BridgeResult<PairingOutc
     let public_key = keychain::openssh_public(&signing);
     let fingerprint = fingerprint_for(&signing);
 
-    let url = format!("{}/api/device-pairing/start", cfg.api_base.trim_end_matches('/'));
+    let url = format!(
+        "{}/api/device-pairing/start",
+        cfg.api_base.trim_end_matches('/')
+    );
     let body = StartReq {
         device_label: device_label.to_string(),
         public_key: public_key.clone(),
@@ -59,10 +62,7 @@ pub async fn start(cfg: &Config, device_label: &str) -> BridgeResult<PairingOutc
     if !resp.status().is_success() {
         let code = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(BridgeError::UpstreamApi(format!(
-            "{code}: {}",
-            text.trim()
-        )));
+        return Err(BridgeError::UpstreamApi(format!("{code}: {}", text.trim())));
     }
     let parsed: StartResp = resp.json().await?;
 

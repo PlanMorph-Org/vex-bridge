@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("VexBridgeRevit")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+055ad25396f03bb2d469320fcc6b2db15f31c813")]
 [assembly: System.Reflection.AssemblyProductAttribute("VexBridgeRevit")]
 [assembly: System.Reflection.AssemblyTitleAttribute("VexBridgeRevit")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
