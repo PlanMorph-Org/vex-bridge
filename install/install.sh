@@ -3,7 +3,10 @@
 # setup screen in your browser so you can finish pairing in one go.
 #
 # Usage (one-liner):
-#   curl -fsSL https://github.com/vex-bim/vex-bridge/releases/latest/download/install.sh | bash
+#   curl -fsSL https://studio.planmorph.software/api/install/script.sh | bash
+#
+# Or directly from GitHub:
+#   curl -fsSL https://github.com/Planmorph-Org/vex-bridge/releases/latest/download/install.sh | bash
 #
 # Steps performed automatically:
 #   1. Detects Mac architecture (Apple Silicon or Intel).
@@ -17,8 +20,8 @@
 # Requirements: macOS 12+, curl, tar.
 set -euo pipefail
 
-REPO_VEX="vex-bim/vex"
-REPO_BRIDGE="vex-bim/vex-bridge"
+REPO_VEX="${VEX_GITHUB_REPO:-Planmorph-Org/vex}"
+REPO_BRIDGE="${VEX_BRIDGE_GITHUB_REPO:-Planmorph-Org/vex-bridge}"
 DAEMON_LABEL="com.architur.vex-bridge"
 PLIST_PATH="$HOME/Library/LaunchAgents/${DAEMON_LABEL}.plist"
 

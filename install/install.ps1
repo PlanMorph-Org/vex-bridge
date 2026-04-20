@@ -13,13 +13,15 @@
        Click Approve and this machine is ready.
 
 .EXAMPLE
-    irm https://github.com/vex-bim/vex-bridge/releases/latest/download/install.ps1 | iex
+    irm https://studio.planmorph.software/api/install/script.ps1 | iex
+.EXAMPLE
+    irm https://github.com/Planmorph-Org/vex-bridge/releases/latest/download/install.ps1 | iex
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$RepoVex    = 'vex-bim/vex'
-$RepoBridge = 'vex-bim/vex-bridge'
+$RepoVex    = if ($env:VEX_GITHUB_REPO)        { $env:VEX_GITHUB_REPO }        else { 'Planmorph-Org/vex' }
+$RepoBridge = if ($env:VEX_BRIDGE_GITHUB_REPO) { $env:VEX_BRIDGE_GITHUB_REPO } else { 'Planmorph-Org/vex-bridge' }
 $Suffix     = 'windows-x86_64'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'vex-bridge\bin'
 $TaskName   = 'vex-bridge'
