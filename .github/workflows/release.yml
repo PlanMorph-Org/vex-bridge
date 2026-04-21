@@ -124,9 +124,164 @@ jobs:
           path: ${{ env.DIRECT }}
           retention-days: 1
 
+  # ─────────────────────────────────────────────────────────────────────
+  # Native installers — the primary user-facing download.
+  #
+  # Engineers and architects on the receiving end aren't terminal users.
+  # The .exe / .pkg below is the "double-click and walk away" experience:
+  # both binaries bundled, daemon registered, browser opens to pair.
+  #
+  # Binaries needed:
+  #   • vex-bridge — built above in this workflow.
+  #   • vex        — fetched from the latest GitHub release of
+  #                   PlanMorph-Org/vex (set VEX_REPO below to override).
+  # If no vex release exists yet (very first cut-over), the installer
+  # build is skipped — the .tar.gz / .exe / .zip direct downloads still
+  # publish so users have a path forward.
+  # ─────────────────────────────────────────────────────────────────────
+
+  installer-windows:
+    name: Build Windows installer
+    needs: build
+    runs-on: windows-latest
+    env:
+      VEX_REPO: PlanMorph-Org/vex
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download vex-bridge.exe (this build)
+        uses: actions/download-artifact@v4
+        with:
+          name: vex-bridge-windows-x86_64-direct
+          path: installer-stage/
+
+      - name: Download vex.exe from latest vex release
+        id: fetch-vex
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Find the .exe asset on the latest release of the vex repo.
+          # If no release exists yet, mark the step as skipped so the
+          # downstream packaging step can short-circuit.
+          if ! tag="$(gh release view --repo "$VEX_REPO" --json tagName -q .tagName 2>/dev/null)"; then
+            echo "::warning::No published vex release on $VEX_REPO — skipping installer build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          asset="vex-${tag}-windows-x86_64.exe"
+          gh release download "$tag" --repo "$VEX_REPO" \
+            --pattern "$asset" --dir installer-stage/
+          mv "installer-stage/$asset" installer-stage/vex.exe
+          # Rename our own binary too so the .iss can refer to bare names.
+          mv "installer-stage/vex-bridge-${GITHUB_REF_NAME}-windows-x86_64.exe" \
+             installer-stage/vex-bridge.exe
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Stage installer script
+        if: steps.fetch-vex.outputs.skip != 'true'
+        shell: bash
+        run: cp installer/windows/setup.iss installer-stage/setup.iss
+
+      - name: Compile installer (Inno Setup)
+        if: steps.fetch-vex.outputs.skip != 'true'
+        shell: pwsh
+        # Inno Setup 6 (iscc.exe) is preinstalled on windows-latest images.
+        # /D defines the {#Version} preprocessor symbol used in setup.iss.
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          }
+          & "$iscc" "/DVersion=$version" "/Oinstaller-stage" installer-stage/setup.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
+          $out = "installer-stage/VexAtlasSetup.exe"
+          $renamed = "installer-stage/VexAtlasSetup-${env:GITHUB_REF_NAME}-windows-x86_64.exe"
+          Move-Item -Force $out $renamed
+          "INSTALLER=$renamed" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload installer
+        if: steps.fetch-vex.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vex-atlas-installer-windows-x86_64
+          path: ${{ env.INSTALLER }}
+          retention-days: 1
+
+  installer-macos:
+    name: Build macOS installer (${{ matrix.arch }})
+    needs: build
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            suffix: macos-arm64
+          - arch: x86_64
+            suffix: macos-x86_64
+    env:
+      VEX_REPO: PlanMorph-Org/vex
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download vex-bridge (this build)
+        uses: actions/download-artifact@v4
+        with:
+          name: vex-bridge-${{ matrix.suffix }}-bundle
+          path: installer-stage/
+
+      - name: Extract vex-bridge binary
+        run: |
+          set -euo pipefail
+          mkdir -p installer-stage/bin
+          tar -xzf "installer-stage/vex-bridge-${GITHUB_REF_NAME}-${{ matrix.suffix }}.tar.gz" \
+            -C installer-stage/
+          mv "installer-stage/vex-bridge-${GITHUB_REF_NAME}-${{ matrix.suffix }}/vex-bridge" \
+             installer-stage/bin/vex-bridge
+
+      - name: Download vex from latest vex release
+        id: fetch-vex
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! tag="$(gh release view --repo "$VEX_REPO" --json tagName -q .tagName 2>/dev/null)"; then
+            echo "::warning::No published vex release on $VEX_REPO — skipping installer build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          asset="vex-${tag}-${{ matrix.suffix }}.tar.gz"
+          gh release download "$tag" --repo "$VEX_REPO" \
+            --pattern "$asset" --dir installer-stage/
+          tar -xzf "installer-stage/$asset" -C installer-stage/
+          mv "installer-stage/vex-${tag}-${{ matrix.suffix }}/vex" installer-stage/bin/vex
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Build .pkg installer
+        if: steps.fetch-vex.outputs.skip != 'true'
+        env:
+          VERSION: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+          BIN_DIR: ${{ github.workspace }}/installer-stage/bin
+          OUT_DIR: ${{ github.workspace }}/installer-out
+        run: |
+          chmod +x installer/macos/build-pkg.sh
+          installer/macos/build-pkg.sh
+
+      - name: Upload installer
+        if: steps.fetch-vex.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vex-atlas-installer-${{ matrix.suffix }}
+          path: installer-out/*.pkg
+          retention-days: 1
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, installer-windows, installer-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -143,15 +298,17 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           # Per platform we publish:
+          #   • VexAtlasSetup-{tag}-windows-x86_64.exe (the installer)
+          #   • VexAtlas-{tag}-{arch}.pkg              (the installer)
           #   • the .tar.gz bundle (consumed by install.sh / install.ps1)
           #   • the direct-download single-file artifact (.exe on Windows,
-          #     .zip on macOS), used by the "Direct downloads" buttons on
-          #     studio.planmorph.software/install
+          #     .zip on macOS) for advanced users who want raw binaries
           # Plus the install scripts themselves (`curl | bash`, `irm | iex`).
           files: |
             dist/**/*.tar.gz
             dist/**/*.exe
             dist/**/*.zip
+            dist/**/*.pkg
             install/install.sh
             install/install.ps1
           generate_release_notes: true

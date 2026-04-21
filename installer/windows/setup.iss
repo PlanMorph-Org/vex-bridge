@@ -1,0 +1,143 @@
+; ─────────────────────────────────────────────────────────────────────────
+; Vex Atlas — Windows installer
+;
+; Built by the vex-bridge release workflow. Bundles:
+;   • vex.exe         (CLI, fetched from PlanMorph-Org/vex's latest release)
+;   • vex-bridge.exe  (local daemon, built in this repo)
+;
+; Outputs a single VexAtlasSetup.exe. Double-click → wizard → done.
+; No admin privileges required (PrivilegesRequired=lowest); installs into
+; %LOCALAPPDATA%\Programs\VexAtlas. After install:
+;   1. Adds the bin folder to the user's PATH.
+;   2. Registers a Task Scheduler task so vex-bridge auto-starts at login
+;      and is running by the time the user opens any CAD plugin.
+;   3. Launches the daemon now (no reboot).
+;   4. Opens the user's browser at studio.planmorph.software/pair?code=…
+;      so they can approve this device with one click — the only thing
+;      they have to do outside the wizard.
+;
+; The installer is unsigned for now — Windows SmartScreen will warn the
+; first user. We can add EV codesigning later by setting SignTool=… and
+; adding the certificate to the workflow.
+; ─────────────────────────────────────────────────────────────────────────
+
+#ifndef Version
+  #define Version "0.0.0-dev"
+#endif
+
+[Setup]
+AppId={{C4F1A6BC-4A18-4F09-B2E2-VEXATLAS00001}}
+AppName=Vex Atlas
+AppVersion={#Version}
+AppPublisher=PlanMorph
+AppPublisherURL=https://studio.planmorph.software
+AppSupportURL=https://studio.planmorph.software/install
+AppUpdatesURL=https://studio.planmorph.software/install
+DefaultDirName={localappdata}\Programs\VexAtlas
+DefaultGroupName=Vex Atlas
+DisableProgramGroupPage=yes
+DisableDirPage=yes
+DisableReadyPage=no
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+OutputBaseFilename=VexAtlasSetup
+Compression=lzma2/ultra
+SolidCompression=yes
+WizardStyle=modern
+ChangesEnvironment=yes
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+UninstallDisplayName=Vex Atlas
+UninstallDisplayIcon={app}\bin\vex-bridge.exe
+CloseApplications=force
+RestartApplications=no
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+; The two binaries — copied into the installer at build time. The release
+; workflow drops them into the same folder as this .iss before invoking iscc.
+Source: "vex.exe";        DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "vex-bridge.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\Vex Atlas (open studio)"; Filename: "https://studio.planmorph.software/dashboard"
+Name: "{group}\Re-pair this device";     Filename: "{app}\bin\vex-bridge.exe"; Parameters: "pair --open-browser"
+Name: "{group}\Uninstall Vex Atlas";     Filename: "{uninstallexe}"
+
+[Run]
+; ── 1. Auto-start at login ──────────────────────────────────────────────
+; Register a Task Scheduler task that runs vex-bridge under the current
+; user (no UAC prompt) at every login. /F overwrites a stale task left
+; behind by a previous install. Hidden so the elevated-looking schtasks
+; window doesn't flash on screen.
+Filename: "{cmd}"; Parameters: "/C schtasks /Create /F /SC ONLOGON /RL LIMITED /TN ""vex-bridge"" /TR ""\""""{app}\bin\vex-bridge.exe""\"" start"" "; \
+  StatusMsg: "Registering vex-bridge to start at login..."; Flags: runhidden
+
+; ── 2. Start the daemon now (no reboot needed) ──────────────────────────
+Filename: "{cmd}"; Parameters: "/C schtasks /Run /TN ""vex-bridge"""; \
+  StatusMsg: "Starting vex-bridge..."; Flags: runhidden
+
+; ── 3. Pair this device — opens the browser to studio.planmorph.software ─
+; postinstall flag means the wizard shows this as a checkbox on the
+; final page; user can untick it if they want to pair later. nowait so
+; the wizard closes immediately while the browser opens.
+Filename: "{app}\bin\vex-bridge.exe"; Parameters: "pair --device-label ""%COMPUTERNAME%"" --open-browser"; \
+  Description: "Pair this device with my Vex Atlas account"; \
+  Flags: postinstall nowait shellexec
+
+[UninstallRun]
+; Tear down the scheduled task before the files are removed.
+Filename: "{cmd}"; Parameters: "/C schtasks /End /TN ""vex-bridge"""; Flags: runhidden; RunOnceId: "StopVexBridge"
+Filename: "{cmd}"; Parameters: "/C schtasks /Delete /F /TN ""vex-bridge"""; Flags: runhidden; RunOnceId: "DeleteVexBridge"
+
+[Code]
+// ─── PATH management ──────────────────────────────────────────────────────
+// We append {app}\bin to the user's PATH so `vex` and `vex-bridge` work
+// from any new shell. Reads the current value, splits on ';', adds ours
+// only if not already present, and writes back via WriteStringInRegistry +
+// broadcasts WM_SETTINGCHANGE so already-open shells (rare) can pick it up.
+
+const
+  EnvironmentKey = 'Environment';
+
+procedure EnvAddPath(Path: string);
+var
+  Paths: string;
+begin
+  if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
+    Paths := '';
+  if Pos(';' + Uppercase(Path) + ';', ';' + Uppercase(Paths) + ';') > 0 then
+    exit;
+  if (Paths <> '') and (Paths[Length(Paths)] <> ';') then
+    Paths := Paths + ';';
+  Paths := Paths + Path;
+  RegWriteStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths);
+end;
+
+procedure EnvRemovePath(Path: string);
+var
+  Paths: string;
+  P: Integer;
+begin
+  if not RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths) then
+    exit;
+  P := Pos(';' + Uppercase(Path) + ';', ';' + Uppercase(Paths) + ';');
+  if P = 0 then
+    exit;
+  Delete(Paths, P, Length(Path) + 1);
+  RegWriteStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', Paths);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    EnvAddPath(ExpandConstant('{app}\bin'));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    EnvRemovePath(ExpandConstant('{app}\bin'));
+end;
