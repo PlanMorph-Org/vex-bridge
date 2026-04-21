@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: light dark;
+    --canvas: #0b0c0f;
+    --fg: #eeeef0;
+    --fg-muted: #9aa0a6;
+    --fg-subtle: #6b7079;
+    --accent: #d4a574;
+    --accent-strong: #e8b885;
+    --border: #2a2d35;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--fg);
+    background: linear-gradient(180deg, #06070a 0%, var(--canvas) 100%);
+    height: 100%;
+  }
+  body { padding: 28px; }
+  h1 {
+    font-family: "SF Pro Display", -apple-system, sans-serif;
+    font-weight: 600;
+    font-size: 20px;
+    margin: 0 0 14px;
+  }
+  h1 .accent { color: var(--accent-strong); }
+  p { color: var(--fg-muted); margin: 0 0 12px; }
+  p strong { color: var(--fg); font-weight: 500; }
+  ol {
+    margin: 14px 0;
+    padding-left: 22px;
+    color: var(--fg-muted);
+  }
+  ol li { padding: 4px 0; }
+  ol li b { color: var(--fg); font-weight: 500; }
+  code {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    color: var(--fg);
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+  .panel {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    background: rgba(212,165,116,0.04);
+    color: var(--fg-muted);
+    font-size: 11.5px;
+  }
+  .panel b { color: var(--fg); font-weight: 500; }
+</style>
+</head>
+<body>
+  <h1><span class="accent">All set.</span></h1>
+
+  <p>
+    Your browser should be opening to <b>studio.planmorph.software/pair</b>.
+    Approve this device there and you're done — no extra steps.
+  </p>
+
+  <ol>
+    <li><b>vex-bridge</b> is running locally and will start automatically at every login.</li>
+    <li>Your CAD plugins can now push models to <code>http://127.0.0.1:7878</code>.</li>
+    <li>Run <code>vex --help</code> in Terminal any time to see the CLI commands — or just keep using the Studio web UI.</li>
+  </ol>
+
+  <div class="panel">
+    <b>Didn't see the browser open?</b><br>
+    Visit <code>https://studio.planmorph.software/pair</code> manually,
+    or run <code>vex-bridge pair --open-browser</code> in Terminal.
+  </div>
+</body>
+</html>

@@ -118,9 +118,14 @@ pkgbuild \
   "$COMPONENT_PKG"
 
 # ── Distribution wrapper ───────────────────────────────────────────────
-# Adds a title, welcome text, and arch restriction so installer.app
-# refuses to run on the wrong CPU.
+# Adds a title, branded HTML welcome / conclusion screens, and arch
+# restriction so installer.app refuses to run on the wrong CPU.
+#
+# Resources (welcome.html, conclusion.html) live next to this script.
+# productbuild's --resources flag points at a directory and the
+# distribution.xml references files by basename.
 DIST="$WORK/distribution.xml"
+RESOURCES_SRC="$(cd "$(dirname "$0")" && pwd)/resources"
 case "$ARCH" in
   arm64)  HOST_ARCH="arm64" ;;
   x86_64) HOST_ARCH="x86_64" ;;
@@ -132,21 +137,8 @@ cat > "$DIST" <<EOF
 <installer-gui-script minSpecVersion="1">
   <title>Vex Atlas</title>
   <organization>software.planmorph</organization>
-  <welcome mime-type="text/plain"><![CDATA[
-Vex Atlas — version control for IFC and Revit models.
-
-This installs:
-  • vex          — command-line client
-  • vex-bridge   — local daemon (binds 127.0.0.1:7878 only)
-
-After install, your browser will open so you can approve this device
-with one click. No terminal commands required.
-  ]]></welcome>
-  <conclusion mime-type="text/plain"><![CDATA[
-All set. Approve this device in the page that opened in your browser
-to finish pairing. Your CAD plugins can then push models locally to
-http://127.0.0.1:7878.
-  ]]></conclusion>
+  <welcome    file="welcome.html"    mime-type="text/html"/>
+  <conclusion file="conclusion.html" mime-type="text/html"/>
   <options customize="never" require-scripts="false" hostArchitectures="${HOST_ARCH}"/>
   <choices-outline>
     <line choice="default">
@@ -166,6 +158,7 @@ OUT="$OUT_DIR/VexAtlas-${VERSION}-${ARCH}.pkg"
 productbuild \
   --distribution "$DIST" \
   --package-path "$WORK" \
+  --resources "$RESOURCES_SRC" \
   "$OUT"
 
 echo "Wrote $OUT"

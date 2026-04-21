@@ -184,6 +184,16 @@ jobs:
         shell: bash
         run: cp installer/windows/setup.iss installer-stage/setup.iss
 
+      - name: Generate wizard images
+        if: steps.fetch-vex.outputs.skip != 'true'
+        shell: pwsh
+        # Renders wizard.bmp + wizard-small.bmp from the brand palette so
+        # the installer doesn't fall back to Inno's stock teal panel.
+        run: |
+          & "${env:GITHUB_WORKSPACE}\installer\windows\gen-images.ps1" `
+            -OutDir "${env:GITHUB_WORKSPACE}\installer-stage"
+          if ($LASTEXITCODE -ne 0) { throw "gen-images.ps1 failed: $LASTEXITCODE" }
+
       - name: Compile installer (Inno Setup)
         if: steps.fetch-vex.outputs.skip != 'true'
         shell: pwsh
