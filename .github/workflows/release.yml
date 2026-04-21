@@ -51,28 +51,70 @@ jobs:
         run: cargo build --release -p vex-bridge --target ${{ matrix.target }}
 
       # ── Package ──────────────────────────────────────────────────────────
+      # We publish TWO things per platform:
+      #
+      #   1. vex-bridge-{tag}-{suffix}.tar.gz
+      #      The "scripted" bundle: contains a sub-folder with the binary and
+      #      a SHA256SUMS file. Consumed by install.sh / install.ps1, which
+      #      already know how to verify and unpack it.
+      #
+      #   2. A single-file artifact for the "Direct downloads" buttons on the
+      #      website. Tar.gz is a terrible browser-download format (Safari
+      #      half-extracts it, Windows users see "wrong format", and on every
+      #      OS you end up with a folder named like the source repo, which is
+      #      what users were complaining about).
+      #
+      #         macOS  →  vex-bridge-{tag}-{suffix}.zip
+      #                   • single binary at the zip ROOT (no nested folder)
+      #                   • Safari + Finder auto-expand .zip into the same
+      #                     directory, so the user sees a runnable `vex-bridge`
+      #                     file appear next to the download — not a folder.
+      #         Windows → vex-bridge-{tag}-windows-x86_64.exe
+      #                   • the bare .exe; double-click and it runs.
       - name: Package artifact
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
           EXE="${{ matrix.exe }}"
+          BIN="vex-bridge${EXE}"
           DIR="dist/vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}"
-          mkdir -p "$DIR"
+          mkdir -p "$DIR" dist
 
-          cp "target/${{ matrix.target }}/release/vex-bridge${EXE}" "$DIR/vex-bridge${EXE}"
+          cp "target/${{ matrix.target }}/release/${BIN}" "$DIR/${BIN}"
 
-          cd "$DIR"
-          sha256sum "vex-bridge${EXE}" > SHA256SUMS
-          cd ../..
-
+          # 1) Scripted bundle — tar.gz with SHA256SUMS, used by install scripts.
+          ( cd "$DIR" && sha256sum "${BIN}" > SHA256SUMS )
           tar -czf "${DIR}.tar.gz" -C dist "vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}"
-          echo "ARCHIVE=${DIR}.tar.gz" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+          # 2) Direct-download single-file artifact.
+          if [[ "${{ matrix.artifact_suffix }}" == windows-* ]]; then
+            DIRECT="dist/vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}.exe"
+            cp "$DIR/${BIN}" "$DIRECT"
+          else
+            # macOS: zip the single binary at the root so Finder/Safari
+            # auto-extract drops a runnable file next to the .zip instead of
+            # a folder. -j strips path components.
+            DIRECT="dist/vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}.zip"
+            ( cd "$DIR" && zip -qj "../../${DIRECT}" "${BIN}" )
+          fi
+
+          {
+            echo "ARCHIVE=${DIR}.tar.gz"
+            echo "DIRECT=${DIRECT}"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload artifact (scripted bundle)
         uses: actions/upload-artifact@v4
         with:
-          name: vex-bridge-${{ matrix.artifact_suffix }}
+          name: vex-bridge-${{ matrix.artifact_suffix }}-bundle
           path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+      - name: Upload artifact (direct download)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vex-bridge-${{ matrix.artifact_suffix }}-direct
+          path: ${{ env.DIRECT }}
           retention-days: 1
 
   release:
@@ -93,10 +135,16 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # Binary archives (one per platform) + installer scripts that users
-          # run directly from the Releases page (curl | bash / irm | iex).
+          # Per platform we publish:
+          #   • the .tar.gz bundle (consumed by install.sh / install.ps1)
+          #   • the direct-download single-file artifact (.exe on Windows,
+          #     .zip on macOS), used by the "Direct downloads" buttons on
+          #     studio.planmorph.software/install
+          # Plus the install scripts themselves (`curl | bash`, `irm | iex`).
           files: |
             dist/**/*.tar.gz
+            dist/**/*.exe
+            dist/**/*.zip
             install/install.sh
             install/install.ps1
           generate_release_notes: true

@@ -34,7 +34,7 @@ step() { bold "==> $*"; }
 ok()   { green "    ✓ $*"; }
 fail() { red   "    ✗ $*"; exit 1; }
 
-# ── Platform check ────────────────────────────────────────────────────────────
+# ── Platform check ──────────────────────────────────────────────────────────
 [[ "$(uname)" == "Darwin" ]] || fail "This script is for macOS. Use install.ps1 on Windows."
 
 ARCH="$(uname -m)"
@@ -94,7 +94,7 @@ tar -xzf "$TMP/$BRIDGE_ARCHIVE" -C "$TMP"
 install -m 755 "$TMP/vex-bridge-${BRIDGE_TAG}-${SUFFIX}/vex-bridge" "$INSTALL_DIR/vex-bridge"
 ok "Installed vex-bridge → ${INSTALL_DIR}/vex-bridge"
 
-# ── launchd agent (auto-start at every login) ────────────────────────────────
+# ── launchd agent (auto-start at every login) ───────────────────────────────
 step "Installing launchd login agent..."
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 

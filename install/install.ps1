@@ -53,24 +53,38 @@ function Get-LatestTag($repo) {
 }
 
 # ── Helper: download + extract a release archive ──────────────────────────────
+# Releases ship as .tar.gz (one format across all platforms). PowerShell's
+# Expand-Archive only handles .zip, so we shell out to bsdtar (`tar.exe`),
+# which is built into Windows 10 1803+ and Windows 11. Using Expand-Archive
+# here used to silently produce garbage files and was the source of the
+# "binary isn't in the correct format" error users were seeing.
 function Install-Release($repo, $tag, $archiveName, $binNames) {
     $url  = "https://github.com/$repo/releases/download/$tag/$archiveName"
     $tmp  = Join-Path $env:TEMP $archiveName
     Step "Downloading $archiveName ..."
     Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-    $extractDir = Join-Path $env:TEMP ([System.IO.Path]::GetFileNameWithoutExtension($archiveName))
-    # Remove any previous extraction.
-    if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
-    Expand-Archive -Path $tmp -DestinationPath $extractDir -Force
+
+    if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+        Fail 'tar.exe not found. Windows 10 build 1803 or Windows 11 is required.'
+    }
+
+    $extractDir = Join-Path $env:TEMP ("vex-extract-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+    & tar.exe -xzf $tmp -C $extractDir
+    if ($LASTEXITCODE -ne 0) { Fail "Failed to extract $archiveName (tar exit $LASTEXITCODE)." }
+
     # The archive unpacks to a single sub-folder.
     $inner = Get-ChildItem $extractDir -Directory | Select-Object -First 1
+    if (-not $inner) { Fail "Archive $archiveName had no inner folder." }
     foreach ($bin in $binNames) {
         $src  = Join-Path $inner.FullName $bin
+        if (-not (Test-Path $src)) { Fail "Expected binary '$bin' not found in archive." }
         $dest = Join-Path $InstallDir $bin
         Copy-Item -Path $src -Destination $dest -Force
         Ok "Installed $bin -> $dest"
     }
-    Remove-Item $tmp -Force
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # ── Fetch versions ────────────────────────────────────────────────────────────
