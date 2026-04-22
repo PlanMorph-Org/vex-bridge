@@ -112,8 +112,8 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
 $action  = New-ScheduledTaskAction `
-    -Execute $BridgeExe `
-    -Argument 'start' `
+    -Execute 'powershell.exe' `
+    -Argument "-WindowStyle Hidden -NoProfile -Command `"& '$BridgeExe' start`"" `
     -WorkingDirectory $InstallDir
 
 # LogonType = Interactive means "when this user logs in", no elevation required.

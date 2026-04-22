@@ -97,7 +97,7 @@
          uninstall to clean up. -->
     <CustomAction Id="RegisterTask"
                   Directory="BundleBin"
-                  ExeCommand='schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN "vex-bridge" /TR "\"[BundleBin]vex-bridge.exe\" start"'
+                  ExeCommand='schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN "vex-bridge" /TR "powershell.exe -WindowStyle Hidden -NoProfile -Command \"&amp; \\\"[BundleBin]vex-bridge.exe\\\" start\""'
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore"/>
@@ -107,6 +107,19 @@
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore"/>
+    <!-- Kick off the pairing flow in the user's session. The daemon takes
+         a moment to bind 127.0.0.1:7878 after StartTask, so we use cmd.exe
+         to wait briefly, then invoke `vex-bridge pair --open-browser`,
+         which contacts the daemon and opens the user's default browser at
+         studio.planmorph.software/pair?code=… for one-click approval.
+         Impersonate=yes so it runs as the interactive user (needed for
+         ShellExecute → default browser + %APPDATA% access). -->
+    <CustomAction Id="PairOpenBrowser"
+                  Directory="BundleBin"
+                  ExeCommand='cmd.exe /C "timeout /T 3 /NOBREAK &gt; NUL &amp;&amp; start &quot;&quot; &quot;[BundleBin]vex-bridge.exe&quot; pair --device-label &quot;%COMPUTERNAME%&quot; --open-browser"'
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore"/>
     <CustomAction Id="UnregisterTask"
                   Directory="BundleBin"
                   ExeCommand='schtasks.exe /Delete /F /TN "vex-bridge"'
@@ -115,9 +128,10 @@
                   Return="ignore"/>
 
     <InstallExecuteSequence>
-      <Custom Action="RegisterTask"  After="InstallFiles"          Condition="NOT Installed"/>
-      <Custom Action="StartTask"     After="RegisterTask"          Condition="NOT Installed"/>
-      <Custom Action="UnregisterTask" Before="RemoveFiles"         Condition="REMOVE=&quot;ALL&quot;"/>
+      <Custom Action="RegisterTask"   After="InstallFiles"  Condition="NOT Installed"/>
+      <Custom Action="StartTask"      After="RegisterTask"  Condition="NOT Installed"/>
+      <Custom Action="PairOpenBrowser" After="StartTask"    Condition="NOT Installed"/>
+      <Custom Action="UnregisterTask" Before="RemoveFiles"  Condition="REMOVE=&quot;ALL&quot;"/>
     </InstallExecuteSequence>
   </Package>
 </Wix>

@@ -89,6 +89,20 @@ Write-Host ""
 Write-Host "Bundle ready at $bundle"
 Write-Host "Bundled binaries:"
 Get-ChildItem $binDir | Format-Table Name, Length -AutoSize
+
+# ── Emit a ZIP of the bundle for cert-free direct distribution. ───────────
+# Users who don't want the MSI (no SmartScreen, no Authenticode, no admin)
+# can extract this straight into:
+#   %ProgramData%\Autodesk\ApplicationPlugins\
+# Revit picks it up on next launch. No installer, no signing required.
+$zipName = "VexBridge-bundle.zip"
+$zipPath = Join-Path (Resolve-Path $OutDir) $zipName
+if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+Write-Host ">> Packing bundle ZIP: $zipPath"
+Compress-Archive -Path $bundle -DestinationPath $zipPath -CompressionLevel Optimal
+Write-Host "   ZIP ready ($([math]::Round((Get-Item $zipPath).Length / 1MB, 1)) MiB)"
+
+Write-Host ""
 Write-Host "To install for the current user, copy it to:"
 Write-Host "    %APPDATA%\Autodesk\ApplicationPlugins\"
 Write-Host ""
