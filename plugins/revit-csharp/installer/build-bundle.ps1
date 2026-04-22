@@ -96,7 +96,7 @@ Get-ChildItem $binDir | Format-Table Name, Length -AutoSize
 #   %ProgramData%\Autodesk\ApplicationPlugins\
 # Revit picks it up on next launch. No installer, no signing required.
 $zipName = "VexBridge-bundle.zip"
-$zipPath = Join-Path (Resolve-Path $OutDir) $zipName
+$zipPath = Join-Path (Split-Path -Parent $bundle) $zipName
 if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
 Write-Host ">> Packing bundle ZIP: $zipPath"
 Compress-Archive -Path $bundle -DestinationPath $zipPath -CompressionLevel Optimal
