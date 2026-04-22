@@ -27,6 +27,7 @@ use vex_bridge_protocol as proto;
 use crate::config::{Config, Paths};
 use crate::errors::BridgeError;
 use crate::pairing;
+use crate::pipeline;
 use crate::state::{now_unix, PairingState, State as DaemonState};
 use crate::vex_cli;
 
@@ -44,6 +45,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/health", get(handle_health))
         .route("/v1/pair/status", get(handle_pair_status))
         .route("/v1/pair/start", post(handle_pair_start))
+        .route("/v1/repo/push", post(handle_repo_push))
+        .route("/v1/repo/register", post(handle_repo_register))
         .with_state(state)
 }
 
@@ -215,4 +218,128 @@ fn unix_to_civil(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
         ((time % 3600) / 60) as u32,
         (time % 60) as u32,
     )
+}
+
+/// `POST /v1/repo/push`
+///
+/// Manually triggers the same add → commit → push pipeline that the file
+/// watcher would normally run. The Revit/Rhino plug-ins call this when
+/// the architect clicks "Push to architur"; the project_id maps to a
+/// configured `[[watch]]` entry whose `path` is the local repo dir.
+async fn handle_repo_push(
+    headers: HeaderMap,
+    State(s): State<AppState>,
+    Json(req): Json<proto::PushRequest>,
+) -> Result<Json<serde_json::Value>, Response> {
+    require_token(&headers, &s.access_token)?;
+    let cfg = s.config.read().await.clone();
+    let branch = req.branch.unwrap_or_else(|| "main".to_string());
+
+    match pipeline::run_manual_push(&cfg, &req.project_id, &branch).await {
+        Ok(commit_hash) => Ok(Json(serde_json::json!({
+            "commit_hash": commit_hash,
+            "project_id":  req.project_id,
+            "branch":      branch,
+        }))),
+        Err(e) => {
+            // 404 if the project isn't configured, 502 for vex CLI failures.
+            let status = match &e {
+                BridgeError::Config(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            Err(err_response(status, e))
+        }
+    }
+}
+
+/// `POST /v1/repo/register`
+///
+/// Idempotently register or update the watch entry that maps an architur
+/// `project_id` to a local directory. Persists to `config.toml` so the
+/// next daemon restart will pick up the watcher automatically; the
+/// `manual push` path (POST /v1/repo/push) starts working immediately
+/// without a restart because it reads `cfg.watch` on every call.
+async fn handle_repo_register(
+    headers: HeaderMap,
+    State(s): State<AppState>,
+    Json(req): Json<proto::RepoRegisterRequest>,
+) -> Result<Json<proto::RepoRegisterResponse>, Response> {
+    require_token(&headers, &s.access_token)?;
+
+    if req.project_id.trim().is_empty() {
+        return Err(err_response(
+            StatusCode::BAD_REQUEST,
+            BridgeError::Config("project_id must not be empty".into()),
+        ));
+    }
+
+    // Resolve the on-disk path. If the caller didn't pin one, default to
+    // `<home>/Architur/<project_id>` — under the user's home so it
+    // survives uninstall and shows up where designers expect their files.
+    let local_path = match req.local_path {
+        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+        _ => {
+            let home = directories::UserDirs::new()
+                .map(|d| d.home_dir().to_path_buf())
+                .ok_or_else(|| {
+                    err_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        BridgeError::Config("could not resolve user home".into()),
+                    )
+                })?;
+            home.join("Architur").join(&req.project_id)
+        }
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&local_path) {
+        return Err(err_response(StatusCode::INTERNAL_SERVER_ERROR, BridgeError::Io(e)));
+    }
+
+    let include = req
+        .include
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["*.ifc".to_string()]);
+
+    let entry = crate::config::WatchEntry {
+        project_id: req.project_id.clone(),
+        path: local_path.to_string_lossy().to_string(),
+        include: include.clone(),
+    };
+
+    // Mutate, persist, and report whether we replaced an existing entry.
+    let replaced = {
+        let mut cfg = s.config.write().await;
+        let prev = cfg.watch.iter().position(|w| w.project_id == req.project_id);
+        match prev {
+            Some(i) => {
+                cfg.watch[i] = entry.clone();
+                true
+            }
+            None => {
+                cfg.watch.push(entry.clone());
+                false
+            }
+        }
+    };
+
+    {
+        let cfg = s.config.read().await;
+        if let Err(e) = cfg.save(&s.paths) {
+            return Err(err_response(StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
+    }
+
+    info!(
+        project_id = %req.project_id,
+        path = %local_path.display(),
+        replaced,
+        "registered project"
+    );
+
+    Ok(Json(proto::RepoRegisterResponse {
+        project_id: req.project_id,
+        local_path: local_path.to_string_lossy().to_string(),
+        include,
+        replaced,
+    }))
 }

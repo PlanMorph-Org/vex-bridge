@@ -173,3 +173,79 @@ fn derive_remote_url(api_base: &str, project_id: &str) -> Option<String> {
     }
     Some(format!("ssh://vex@vex.{host}:22/proj/{project_id}"))
 }
+
+/// Manually run the same add → commit → push pipeline that the watcher
+/// runs automatically, but driven by an explicit plug-in request rather
+/// than a filesystem event. The project_id is resolved against the
+/// configured `[[watch]]` entries to find the local repo dir; if no
+/// matching entry exists we return `BridgeError::Config(...)` so the
+/// HTTP handler can surface a 404.
+///
+/// Returns the resulting commit hash on success. If there were no
+/// changes to commit we still attempt the push (the remote may be
+/// behind on prior commits) and return the head hash.
+pub async fn run_manual_push(
+    cfg: &Config,
+    project_id: &str,
+    branch: &str,
+) -> BridgeResult<String> {
+    let entry = cfg
+        .watch
+        .iter()
+        .find(|w| w.project_id == project_id)
+        .ok_or_else(|| {
+            crate::errors::BridgeError::Config(format!(
+                "no [[watch]] entry registered for project_id `{project_id}`. \
+                 Add one to config.toml or configure the project from the \
+                 architur web UI before pushing."
+            ))
+        })?;
+
+    let dir = std::path::PathBuf::from(&entry.path);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
+
+    // Initialise the repo on first push, mirroring the watch path.
+    let dot_vex = dir.join(".vex");
+    if !dot_vex.is_dir() {
+        info!(path = %dir.display(), "initialising vex repo");
+        vex_cli::init_repo(&cfg.vex_bin, &dir).await?;
+        if let Some(remote_url) = derive_remote_url(&cfg.api_base, project_id) {
+            let r = vex_cli::run(
+                &cfg.vex_bin,
+                Some(&dir),
+                ["remote", "add", "origin", &remote_url],
+            )
+            .await?;
+            if !r.ok() {
+                warn!(stderr = %r.stderr.trim(), "could not register origin remote");
+            }
+        }
+    }
+
+    vex_cli::add_all(&cfg.vex_bin, &dir).await?;
+
+    let msg = format!("manual push via vex-bridge ({project_id})");
+    let author = match (cfg.default_author_name.as_deref(), cfg.default_author_email.as_deref()) {
+        (Some(n), Some(e)) => Some((n, e)),
+        _ => None,
+    };
+    let commit_hash = match vex_cli::commit(&cfg.vex_bin, &dir, &msg, author).await {
+        Ok(h) => h,
+        Err(e) => {
+            let s = e.to_string();
+            // "nothing to commit" is OK — push whatever HEAD is.
+            if !(s.contains("nothing to commit") || s.contains("no changes")) {
+                return Err(e);
+            }
+            // Best-effort head hash; if we can't get it just use a marker.
+            "HEAD".to_string()
+        }
+    };
+
+    let refspec = format!("refs/heads/{branch}");
+    vex_cli::push(&cfg.vex_bin, &dir, "origin", &refspec).await?;
+    info!(project = %project_id, commit = %commit_hash, branch, "manual push complete");
+    Ok(commit_hash)
+}

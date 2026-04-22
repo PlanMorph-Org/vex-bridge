@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    WiX Toolset v4 source for the vex-bridge Revit MSI.
+
+    Build (on Windows, with WiX 4 + .NET SDK installed):
+        powershell ../build-bundle.ps1
+        wix build -arch x64 Product.wxs -out ../../dist/VexBridgeRevit-0.2.0.msi
+        signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 ^
+                      /a ../../dist/VexBridgeRevit-0.2.0.msi
+
+    What the MSI does:
+      1. Drops the entire VexBridge.bundle folder under
+         %ProgramData%\Autodesk\ApplicationPlugins\
+         which Revit 2022+ scans on startup. The bundle ships:
+           - VexBridgeRevit.dll for each supported Revit year
+           - bin\vex.exe        (the vex CLI)
+           - bin\vex-bridge.exe (the local daemon)
+         No separate install step. No PATH munging.
+
+      2. Registers a per-user logon Scheduled Task ("vex-bridge") that runs
+         the bundled vex-bridge.exe in `start` mode at every login. This is
+         what lets non-terminal users get a working daemon immediately —
+         they install the MSI, log out + in once (or click Pair, which
+         starts the daemon on demand), and the ribbon Just Works.
+
+      3. Optionally launches the daemon at install completion via a custom
+         action so the very first session works without a logout/login.
+
+    Autodesk App Store submission notes (apps.autodesk.com):
+      * Must be Authenticode-signed. Use an EV cert for instant SmartScreen.
+      * Reviewers install on a clean Revit VM and verify the ribbon button
+        appears and does nothing catastrophic on the Sample Architectural
+        Project. Bundling vex.exe + vex-bridge.exe means the reviewers do
+        NOT need to do any extra setup — the App Store explicitly disallows
+        plug-ins that require manual download steps after install.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package
+      Name="vex-bridge for Revit"
+      Manufacturer="Architur"
+      Version="0.2.0.0"
+      UpgradeCode="C7B0A6E6-2A36-4D2C-8AAE-7D7E2F0E2F00"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of vex-bridge for Revit is already installed."/>
+
+    <MediaTemplate EmbedCab="yes"/>
+
+    <Feature Id="Main" Title="vex-bridge for Revit" Level="1">
+      <ComponentGroupRef Id="BundleFiles"/>
+      <ComponentRef Id="VexBridgeScheduledTask"/>
+    </Feature>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="AutodeskDir" Name="Autodesk">
+        <Directory Id="PluginsDir" Name="ApplicationPlugins">
+          <Directory Id="VexBridgeBundleDir" Name="VexBridge.bundle">
+            <Directory Id="BundleContents" Name="Contents">
+              <Directory Id="BundleBin" Name="bin"/>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Harvest the entire built bundle. Includes vex.exe + vex-bridge.exe
+         under Contents\bin\ as well as the per-Revit-year add-in DLLs. -->
+    <ComponentGroup Id="BundleFiles" Directory="VexBridgeBundleDir">
+      <Files Include="..\..\dist\VexBridge.bundle\**\*"/>
+    </ComponentGroup>
+
+    <!-- Per-user Scheduled Task that auto-starts vex-bridge at every login.
+         Path resolves to:
+           %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\bin\vex-bridge.exe
+
+         Trigger: AtLogon. RunLevel: LeastPrivilege so it inherits the
+         interactive user's HKCU and %APPDATA% (the daemon writes its
+         access token to %APPDATA%\vex-bridge\access-token, which is what
+         the Revit add-in reads). MultipleInstancesPolicy=IgnoreNew so a
+         second login attempt doesn't spawn a second daemon. -->
+    <Component Id="VexBridgeScheduledTask"
+               Directory="BundleBin"
+               Guid="3F5E1A2B-9D4C-4B7E-A8F2-1C6D9B0E3F11">
+      <RegistryValue Root="HKLM"
+                     Key="Software\Architur\VexBridge"
+                     Name="ScheduledTask"
+                     Type="string"
+                     Value="installed"
+                     KeyPath="yes"/>
+      <util:XmlFile Id="TaskXml"
+                    Action="createElement"
+                    ElementPath="/"
+                    Name="ignored"
+                    File="[BundleBin]task.xml"/>
+    </Component>
+
+    <!-- The actual schtasks.exe registration — easier and more portable
+         than util:ScheduledTask which requires WiX util extension wiring.
+         Runs once at install end (deferred, system context) and once at
+         uninstall to clean up. -->
+    <CustomAction Id="RegisterTask"
+                  Directory="BundleBin"
+                  ExeCommand='schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN "vex-bridge" /TR "\"[BundleBin]vex-bridge.exe\" start"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore"/>
+    <CustomAction Id="StartTask"
+                  Directory="BundleBin"
+                  ExeCommand='schtasks.exe /Run /TN "vex-bridge"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore"/>
+    <CustomAction Id="UnregisterTask"
+                  Directory="BundleBin"
+                  ExeCommand='schtasks.exe /Delete /F /TN "vex-bridge"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore"/>
+
+    <InstallExecuteSequence>
+      <Custom Action="RegisterTask"  After="InstallFiles"          Condition="NOT Installed"/>
+      <Custom Action="StartTask"     After="RegisterTask"          Condition="NOT Installed"/>
+      <Custom Action="UnregisterTask" Before="RemoveFiles"         Condition="REMOVE=&quot;ALL&quot;"/>
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

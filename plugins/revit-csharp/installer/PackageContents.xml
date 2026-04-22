@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Autodesk Bundle manifest for the vex-bridge Revit plug-in.
+
+    Reference: Autodesk ApplicationPlugins bundle format
+        https://aps.autodesk.com/en/docs/exchange/v1/reference/PackageContents
+        https://help.autodesk.com/view/RVT/2025/ENU/?guid=GUID-... (Add-In Integration)
+
+    The OS auto-discovers any folder ending in ".bundle" under one of:
+        %ProgramData%\Autodesk\ApplicationPlugins   (machine-wide install)
+        %APPDATA%\Autodesk\ApplicationPlugins        (per-user install)
+
+    The Components blocks below tell Revit which .addin file to load for
+    which Revit version. Each Contents/{year}/ folder ships its own
+    VexBridgeRevit.dll built against that year's RevitAPI.
+-->
+<ApplicationPackage
+    SchemaVersion="1.0"
+    AutodeskProduct="Revit"
+    ProductType="Application"
+    Name="vex-bridge for Revit"
+    Description="Push Revit models to architur with one click."
+    AppVersion="0.2.0"
+    FriendlyVersion="0.2.0"
+    SupportedLocales="Enu"
+    ProductCode="{4D3B2A9C-8E8B-4A8B-9E0F-7B0F8C4A4A4A}"
+    UpgradeCode="{C7B0A6E6-2A36-4D2C-8AAE-7D7E2F0E2F00}"
+    Author="Architur"
+    HelpFile="./Contents/Resources/ReadMe.html"
+    OnlineDocumentation="https://architur.com/docs/revit"
+    Icon="./Contents/Resources/icon.png">
+
+  <CompanyDetails
+      Name="Architur"
+      Url="https://architur.com"
+      Email="support@architur.com"
+      Phone=""/>
+
+  <RuntimeRequirements
+      OS="Win64"
+      Platform="Revit"
+      SeriesMin="R2022"
+      SeriesMax="R2025"/>
+
+  <!-- One Components block per supported Revit version. The path is
+       relative to the bundle root. Revit 2024+ is .NET 4.8; older
+       versions ship the same managed binary because the API surface we
+       use (IExternalApplication, ribbon panel, IExternalCommand) has
+       been stable for many releases. -->
+  <Components Description="vex-bridge ribbon for Revit 2022">
+    <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2022" SeriesMax="R2022"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.0"
+                    ModuleName="./Contents/2022/VexBridgeRevit.addin"
+                    AppDescription="Push Revit models to architur."/>
+  </Components>
+  <Components Description="vex-bridge ribbon for Revit 2023">
+    <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2023" SeriesMax="R2023"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.0"
+                    ModuleName="./Contents/2023/VexBridgeRevit.addin"
+                    AppDescription="Push Revit models to architur."/>
+  </Components>
+  <Components Description="vex-bridge ribbon for Revit 2024">
+    <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2024" SeriesMax="R2024"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.0"
+                    ModuleName="./Contents/2024/VexBridgeRevit.addin"
+                    AppDescription="Push Revit models to architur."/>
+  </Components>
+  <Components Description="vex-bridge ribbon for Revit 2025">
+    <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2025" SeriesMax="R2025"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.0"
+                    ModuleName="./Contents/2025/VexBridgeRevit.addin"
+                    AppDescription="Push Revit models to architur."/>
+  </Components>
+</ApplicationPackage>

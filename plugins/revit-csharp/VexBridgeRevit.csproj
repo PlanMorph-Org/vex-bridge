@@ -7,8 +7,13 @@
     <AssemblyName>VexBridgeRevit</AssemblyName>
     <RootNamespace>Architur.VexBridgeRevit</RootNamespace>
     <UseWPF>false</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <PlatformTarget>x64</PlatformTarget>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <Version>0.2.0</Version>
+    <Company>Architur</Company>
+    <Product>vex-bridge for Revit</Product>
+    <Copyright>Copyright © Architur</Copyright>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,11 +26,15 @@
       <HintPath>$(ProgramW6432)\Autodesk\Revit $(RevitVersion)\RevitAPIUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="System.Net.Http" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="Application.cs" />
     <Compile Include="PushCommand.cs" />
+    <Compile Include="PairCommand.cs" />
+    <Compile Include="BridgeClient.cs" />
+    <Compile Include="ProjectPickerDialog.cs" />
     <None Include="VexBridgeRevit.addin" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

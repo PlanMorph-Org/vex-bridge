@@ -98,6 +98,30 @@ pub struct PushRequest {
     pub branch: Option<String>, // default: current branch
 }
 
+/// `POST /v1/repo/register` — tell the daemon which local directory backs
+/// a given architur project. Idempotent: sending the same `project_id`
+/// twice replaces the previous entry. The architur web UI calls this on
+/// the user's behalf when they open a project for the first time, so the
+/// architect never has to hand-edit `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoRegisterRequest {
+    pub project_id: String,
+    /// Where on disk to put the repo. If absent, the daemon picks the
+    /// default under `<home>/Architur/<project_id>`.
+    pub local_path: Option<String>,
+    /// File globs to commit. Defaults to `["*.ifc"]` if omitted.
+    pub include: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoRegisterResponse {
+    pub project_id: String,
+    pub local_path: String,
+    pub include: Vec<String>,
+    /// True if a previous entry for this project_id was replaced.
+    pub replaced: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PushEvent {
