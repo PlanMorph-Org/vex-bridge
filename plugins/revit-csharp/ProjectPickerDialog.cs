@@ -39,7 +39,7 @@ internal sealed class ProjectPickerDialog : Form
         {
             Left = 16, Top = 90, Width = 408, Height = 40,
             ForeColor = System.Drawing.SystemColors.GrayText,
-            Text = "Find the project ID on architur.com under Project ▸ Settings. " +
+            Text = "Find the project ID on studio.planmorph.software under Project ▸ Settings. " +
                    "Leave branch as 'main' for normal saves.",
         };
 

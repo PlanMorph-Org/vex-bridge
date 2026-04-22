@@ -27,13 +27,13 @@
     UpgradeCode="{C7B0A6E6-2A36-4D2C-8AAE-7D7E2F0E2F00}"
     Author="Architur"
     HelpFile="./Contents/Resources/ReadMe.html"
-    OnlineDocumentation="https://architur.com/docs/revit"
+    OnlineDocumentation="https://studio.planmorph.software/docs/revit"
     Icon="./Contents/Resources/icon.png">
 
   <CompanyDetails
       Name="Architur"
-      Url="https://architur.com"
-      Email="support@architur.com"
+      Url="https://studio.planmorph.software"
+      Email="support@planmorph.software"
       Phone=""/>
 
   <RuntimeRequirements

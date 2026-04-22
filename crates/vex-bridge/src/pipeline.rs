@@ -156,7 +156,7 @@ async fn run_pipeline(
     Ok(())
 }
 
-/// Convert `https://api.architur.com` → `ssh://vex@vex.architur.com:22/proj/<uuid>`.
+/// Convert `https://api.planmorph.software` → `ssh://vex@vex.planmorph.software:22/proj/<uuid>`.
 /// Returns `None` if the api_base can't be parsed; the caller treats this as
 /// a non-fatal "user must register the remote manually".
 fn derive_remote_url(api_base: &str, project_id: &str) -> Option<String> {

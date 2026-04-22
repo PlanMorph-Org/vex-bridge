@@ -12,7 +12,7 @@ vex-bridge for Revit
 One-click semantic version control for Revit models — push to architur, see meaningful diffs.
 
 ## Short description (max 500 chars)
-Push the model you have open to architur, the cloud platform for semantic version control of BIM. The plugin is a tiny ribbon button that talks to a local daemon (vex-bridge) over loopback — no cloud calls from Revit itself. Pair the machine once, then every Push commits the current model and ships it. On architur.com your team sees meaningful diffs ("wall moved 200 mm", "fire-rating added") instead of byte changes, and reviews them in a browser-based 2D/3D viewer. No Navisworks license required.
+Push the model you have open to architur, the cloud platform for semantic version control of BIM. The plugin is a tiny ribbon button that talks to a local daemon (vex-bridge) over loopback — no cloud calls from Revit itself. Pair the machine once, then every Push commits the current model and ships it. On studio.planmorph.software your team sees meaningful diffs ("wall moved 200 mm", "fire-rating added") instead of byte changes, and reviews them in a browser-based 2D/3D viewer. No Navisworks license required.
 
 ## Long description
 Architects, engineers, and owners have lived without real version control for BIM long enough.
@@ -21,7 +21,7 @@ Architects, engineers, and owners have lived without real version control for BI
 ### What it does
 - Adds two buttons to a *vex-bridge* ribbon panel: **Push to architur** and **Pair this device**.
 - *Push* prompts for an architur project ID and branch (defaults to `main`), then hands off to the local vex-bridge daemon. The daemon does the real work: commit the model with the [vex](https://github.com/PlanMorph-Org/vex) CLI, push it over SSH to your team's architur instance.
-- *Pair* opens the daemon's pairing flow so a one-time approval on architur.com binds this Windows account to your architur identity.
+- *Pair* opens the daemon's pairing flow so a one-time approval on studio.planmorph.software binds this Windows account to your architur identity.
 
 ### What it does **not** do
 - Talk to the internet from inside Revit. The Revit process only touches `http://127.0.0.1:7878` — the local daemon, on loopback. Network egress is the daemon's job and it uses an SSH key that never leaves your machine in plaintext.
@@ -36,7 +36,7 @@ Revit 2022, 2023, 2024, 2025 (Win64).
 
 ### Required separate install
 The vex-bridge desktop daemon (free, open source, Apache-2.0).
-Download from <https://architur.com/install>.
+Download from <https://studio.planmorph.software/install>.
 
 ## Category
 Collaboration / Project Management
@@ -51,13 +51,13 @@ No (free)
 English
 
 ## Help URL
-https://architur.com/docs/revit
+https://studio.planmorph.software/docs/revit
 
 ## Support email
-support@architur.com
+support@planmorph.software
 
 ## Privacy policy URL
-https://architur.com/legal/privacy
+https://studio.planmorph.software/legal/privacy
 
 ## Screenshots required
 1. **Ribbon panel** — Revit ribbon showing the two vex-bridge buttons. (1280×800 PNG)

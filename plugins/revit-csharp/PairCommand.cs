@@ -74,7 +74,7 @@ public sealed class PairCommand : IExternalCommand
             {
                 MainInstruction      = $"Confirm code in your browser: {start.Code}",
                 MainContent          =
-                    "A browser tab has opened on architur.com. Approve this device " +
+                    "A browser tab has opened on studio.planmorph.software. Approve this device " +
                     "to finish pairing.\n\n" +
                     "If the tab did not open, copy this URL into your browser:\n" +
                     start.PairUrl,

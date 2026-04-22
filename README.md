@@ -22,7 +22,7 @@ language can do `vex push` without ever touching a terminal.
                                                             ▼
                                                   ┌────────────────────┐
                                                   │  vex-serve on      │
-                                                  │  api.architur.com  │
+                                                  │  api.planmorph.software  │
                                                   └────────────────────┘
 ```
 
