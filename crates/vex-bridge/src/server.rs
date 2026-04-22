@@ -292,7 +292,10 @@ async fn handle_repo_register(
     };
 
     if let Err(e) = std::fs::create_dir_all(&local_path) {
-        return Err(err_response(StatusCode::INTERNAL_SERVER_ERROR, BridgeError::Io(e)));
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BridgeError::Io(e),
+        ));
     }
 
     let include = req
@@ -309,7 +312,10 @@ async fn handle_repo_register(
     // Mutate, persist, and report whether we replaced an existing entry.
     let replaced = {
         let mut cfg = s.config.write().await;
-        let prev = cfg.watch.iter().position(|w| w.project_id == req.project_id);
+        let prev = cfg
+            .watch
+            .iter()
+            .position(|w| w.project_id == req.project_id);
         match prev {
             Some(i) => {
                 cfg.watch[i] = entry.clone();

@@ -184,11 +184,7 @@ fn derive_remote_url(api_base: &str, project_id: &str) -> Option<String> {
 /// Returns the resulting commit hash on success. If there were no
 /// changes to commit we still attempt the push (the remote may be
 /// behind on prior commits) and return the head hash.
-pub async fn run_manual_push(
-    cfg: &Config,
-    project_id: &str,
-    branch: &str,
-) -> BridgeResult<String> {
+pub async fn run_manual_push(cfg: &Config, project_id: &str, branch: &str) -> BridgeResult<String> {
     let entry = cfg
         .watch
         .iter()
@@ -227,7 +223,10 @@ pub async fn run_manual_push(
     vex_cli::add_all(&cfg.vex_bin, &dir).await?;
 
     let msg = format!("manual push via vex-bridge ({project_id})");
-    let author = match (cfg.default_author_name.as_deref(), cfg.default_author_email.as_deref()) {
+    let author = match (
+        cfg.default_author_name.as_deref(),
+        cfg.default_author_email.as_deref(),
+    ) {
         (Some(n), Some(e)) => Some((n, e)),
         _ => None,
     };
