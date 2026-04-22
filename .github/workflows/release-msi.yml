@@ -1,0 +1,145 @@
+name: release-msi
+
+# Builds the self-contained Autodesk Bundle MSI for vex-bridge for Revit.
+#
+# What it does on every push to main / tag / PR:
+#   1. Compiles vex.exe (sibling repo PlanMorph-Org/vex)
+#   2. Compiles vex-bridge.exe (this repo)
+#   3. Builds the .NET Revit add-in DLLs for Revit 2022/2023/2024/2025
+#   4. Composes the Autodesk Bundle (Contents/bin/vex.exe + vex-bridge.exe
+#      + per-Revit-year DLLs) via build-bundle.ps1
+#   5. Wraps it in a WiX 4 MSI
+#   6. (Tags only) Authenticode-signs the MSI via Azure Trusted Signing
+#   7. Uploads the (signed) MSI as a workflow artifact
+#   8. (Tags only) Attaches the signed MSI to the GitHub Release
+#
+# Signing is GATED on the AZURE_TENANT_ID secret being present, so the
+# workflow keeps producing unsigned MSIs today and starts producing
+# signed ones the moment Azure Trusted Signing identity validation
+# completes and you paste the three secrets in:
+#   AZURE_TENANT_ID
+#   AZURE_CLIENT_ID
+#   AZURE_CLIENT_SECRET
+# (created via `az ad sp create-for-rbac --role 'Trusted Signing
+# Certificate Profile Signer' --scopes <profile-resource-id>`).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach asset to release
+
+env:
+  TS_ACCOUNT: planmorph-signing
+  TS_PROFILE: vex-bridge-prod
+  TS_ENDPOINT: https://eus.codesigning.azure.net/
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout vex-bridge
+        uses: actions/checkout@v4
+        with:
+          path: vex-bridge
+
+      - name: Checkout vex (sibling repo, for vex.exe)
+        uses: actions/checkout@v4
+        with:
+          repository: PlanMorph-Org/vex
+          path: vex
+          ssh-key: ${{ secrets.VEX_DEPLOY_KEY }}
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Set up WiX 4
+        run: dotnet tool install --global wix --version 4.0.5
+
+      - name: Cargo build vex.exe
+        working-directory: vex
+        run: cargo build --release --bin vex
+
+      - name: Cargo build vex-bridge.exe
+        working-directory: vex-bridge
+        run: cargo build --release -p vex-bridge
+
+      - name: Compose Autodesk bundle
+        working-directory: vex-bridge/plugins/revit-csharp/installer
+        run: |
+          ./build-bundle.ps1 `
+            -Versions 2022,2023,2024,2025 `
+            -VexBin       "$env:GITHUB_WORKSPACE\vex\target\release\vex.exe" `
+            -VexBridgeBin "$env:GITHUB_WORKSPACE\vex-bridge\target\release\vex-bridge.exe"
+
+      - name: Build MSI (WiX)
+        working-directory: vex-bridge/plugins/revit-csharp/installer
+        run: |
+          New-Item -ItemType Directory -Force -Path ../../../dist | Out-Null
+          wix build -arch x64 wix/Product.wxs -out ../../../dist/VexBridgeRevit-${{ github.ref_name }}.msi
+
+      - name: Verify signing secrets are present
+        id: signing
+        run: |
+          if ($env:AZURE_TENANT_ID -and $env:AZURE_CLIENT_ID -and $env:AZURE_CLIENT_SECRET) {
+            "available=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "Azure Trusted Signing secrets present — MSI will be signed."
+          } else {
+            "available=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            Write-Host "::warning::Azure Trusted Signing secrets not configured — producing UNSIGNED MSI."
+          }
+        env:
+          AZURE_TENANT_ID:     ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID:     ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Authenticode-sign MSI via Azure Trusted Signing
+        if: steps.signing.outputs.available == 'true'
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id:                  ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id:                  ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret:              ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint:                         ${{ env.TS_ENDPOINT }}
+          trusted-signing-account-name:    ${{ env.TS_ACCOUNT }}
+          certificate-profile-name:        ${{ env.TS_PROFILE }}
+          files-folder:                    vex-bridge/dist
+          files-folder-filter:             msi
+          file-digest:                     SHA256
+          timestamp-rfc3161:               http://timestamp.acs.microsoft.com
+          timestamp-digest:                SHA256
+
+      - name: Verify signature (signtool /verify)
+        if: steps.signing.outputs.available == 'true'
+        working-directory: vex-bridge/dist
+        run: |
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+                       Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
+          & $signtool verify /pa /v "VexBridgeRevit-${{ github.ref_name }}.msi"
+
+      - name: Upload MSI as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VexBridgeRevit-${{ github.ref_name }}-msi
+          path: vex-bridge/dist/*.msi
+          if-no-files-found: error
+
+      - name: Attach MSI to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vex-bridge/dist/*.msi
+          fail_on_unmatched_files: true
