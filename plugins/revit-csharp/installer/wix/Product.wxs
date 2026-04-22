@@ -2,9 +2,9 @@
 <!--
     WiX Toolset v4 source for the vex-bridge Revit MSI.
 
-    Build (on Windows, with WiX 4 + .NET SDK installed):
+    Build (on Windows, with WiX 5 + .NET SDK installed):
         powershell ../build-bundle.ps1
-        wix build -arch x64 Product.wxs -out ../../dist/VexBridgeRevit-0.2.0.msi
+        wix build -arch x64 -ext WixToolset.Util.wixext Product.wxs -out ../../dist/VexBridgeRevit-0.2.0.msi
         signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 ^
                       /a ../../dist/VexBridgeRevit-0.2.0.msi
 
@@ -89,11 +89,6 @@
                      Type="string"
                      Value="installed"
                      KeyPath="yes"/>
-      <util:XmlFile Id="TaskXml"
-                    Action="createElement"
-                    ElementPath="/"
-                    Name="ignored"
-                    File="[BundleBin]task.xml"/>
     </Component>
 
     <!-- The actual schtasks.exe registration — easier and more portable
