@@ -56,11 +56,11 @@ cargo build --release -p vex-bridge   # → ..\target\release\vex-bridge.exe
 
 # Then in this directory
 cd installer
-.\build-bundle.ps1 -Versions 2022,2023,2024,2025
+.\build-bundle.ps1 -Versions 2022,2023,2024
 # → dist/VexBridge.bundle/
 #       Contents\bin\vex.exe
 #       Contents\bin\vex-bridge.exe
-#       Contents\{2022,2023,2024,2025}\VexBridgeRevit.dll
+#       Contents\{2022,2023,2024}\VexBridgeRevit.dll
 ```
 
 Copy the bundle to either of these locations and Revit auto-discovers it:

@@ -5,7 +5,9 @@ name: release-msi
 # What it does on every push to main / tag / PR:
 #   1. Compiles vex.exe (sibling repo PlanMorph-Org/vex)
 #   2. Compiles vex-bridge.exe (this repo)
-#   3. Builds the .NET Revit add-in DLLs for Revit 2022/2023/2024/2025
+#   3. Builds the .NET Revit add-in DLLs for Revit 2022/2023/2024
+#      (Revit 2025 dropped .NET Framework 4.8 in favor of .NET 8 — once we
+#      add a net8.0 TargetFramework to the csproj we can re-enable it.)
 #   4. Composes the Autodesk Bundle (Contents/bin/vex.exe + vex-bridge.exe
 #      + per-Revit-year DLLs) via build-bundle.ps1
 #   5. Wraps it in a WiX 4 MSI
@@ -81,7 +83,7 @@ jobs:
         working-directory: vex-bridge/plugins/revit-csharp/installer
         run: |
           ./build-bundle.ps1 `
-            -Versions 2022,2023,2024,2025 `
+            -Versions 2022,2023,2024 `
             -VexBin       "$env:GITHUB_WORKSPACE\vex\target\release\vex.exe" `
             -VexBridgeBin "$env:GITHUB_WORKSPACE\vex-bridge\target\release\vex-bridge.exe"
 

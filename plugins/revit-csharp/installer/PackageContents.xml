@@ -40,7 +40,7 @@
       OS="Win64"
       Platform="Revit"
       SeriesMin="R2022"
-      SeriesMax="R2025"/>
+      SeriesMax="R2024"/>
 
   <!-- One Components block per supported Revit version. The path is
        relative to the bundle root. Revit 2024+ is .NET 4.8; older
@@ -66,13 +66,6 @@
     <ComponentEntry AppName="vex-bridge"
                     Version="0.2.0"
                     ModuleName="./Contents/2024/VexBridgeRevit.addin"
-                    AppDescription="Push Revit models to architur."/>
-  </Components>
-  <Components Description="vex-bridge ribbon for Revit 2025">
-    <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2025" SeriesMax="R2025"/>
-    <ComponentEntry AppName="vex-bridge"
-                    Version="0.2.0"
-                    ModuleName="./Contents/2025/VexBridgeRevit.addin"
                     AppDescription="Push Revit models to architur."/>
   </Components>
 </ApplicationPackage>

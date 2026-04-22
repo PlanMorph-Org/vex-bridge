@@ -25,7 +25,7 @@
 
 [CmdletBinding()]
 param(
-    [string[]] $Versions      = @('2022', '2023', '2024', '2025'),
+    [string[]] $Versions      = @('2022', '2023', '2024'),
     [string]   $Configuration = 'Release',
     [string]   $OutDir        = 'dist',
     # Paths to the prebuilt CLI / daemon binaries. Defaults look in the

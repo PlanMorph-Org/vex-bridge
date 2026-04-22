@@ -32,7 +32,7 @@ Architects, engineers, and owners have lived without real version control for BI
 Architur stores Revit/IFC models as a property graph and produces semantic diffs — *"wall W-203 moved 200 mm east, slab gained a fire-rating pset"* — instead of byte deltas. Reviewers see the change in a side-by-side 3D viewer in the browser, no plugin needed on their end. Permitting officials, owners, insurers, and consultants can finally participate in BIM coordination without buying a desktop license.
 
 ### Compatibility
-Revit 2022, 2023, 2024, 2025 (Win64).
+Revit 2022, 2023, 2024 (Win64). Revit 2025 support coming soon.
 
 ### Required separate install
 The vex-bridge desktop daemon (free, open source, Apache-2.0).
