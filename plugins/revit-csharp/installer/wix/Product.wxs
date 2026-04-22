@@ -109,11 +109,12 @@
                   Return="ignore"/>
     <!-- Kick off the pairing flow in the user's session. The daemon takes
          a moment to bind 127.0.0.1:7878 after StartTask, so we use cmd.exe
-         to wait briefly, then invoke `vex-bridge pair --open-browser`,
-         which contacts the daemon and opens the user's default browser at
-         studio.planmorph.software/pair?code=… for one-click approval.
-         Impersonate=yes so it runs as the interactive user (needed for
-         ShellExecute → default browser + %APPDATA% access). -->
+         to wait briefly, then invoke vex-bridge with the pair subcommand
+         and the open-browser flag. That contacts the daemon and opens the
+         user's default browser at studio.planmorph.software/pair?code=…
+         for one-click approval. Impersonate=yes so it runs as the
+         interactive user (needed for ShellExecute → default browser +
+         %APPDATA% access). -->
     <CustomAction Id="PairOpenBrowser"
                   Directory="BundleBin"
                   ExeCommand='cmd.exe /C "timeout /T 3 /NOBREAK &gt; NUL &amp;&amp; start &quot;&quot; &quot;[BundleBin]vex-bridge.exe&quot; pair --device-label &quot;%COMPUTERNAME%&quot; --open-browser"'
