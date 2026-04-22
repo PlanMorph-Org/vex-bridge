@@ -30,11 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="Application.cs" />
-    <Compile Include="PushCommand.cs" />
-    <Compile Include="PairCommand.cs" />
-    <Compile Include="BridgeClient.cs" />
-    <Compile Include="ProjectPickerDialog.cs" />
+    <!-- Compile items are picked up implicitly by the SDK from the project directory. -->
     <None Include="VexBridgeRevit.addin" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
