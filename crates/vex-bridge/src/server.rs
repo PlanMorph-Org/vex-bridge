@@ -277,7 +277,46 @@ async fn handle_repo_register(
     // `<home>/Architur/<project_id>` — under the user's home so it
     // survives uninstall and shows up where designers expect their files.
     let local_path = match req.local_path {
-        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+        Some(p) if !p.trim().is_empty() => {
+            let candidate = std::path::PathBuf::from(p.trim());
+            if !candidate.is_absolute()
+                || candidate
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(err_response(
+                    StatusCode::BAD_REQUEST,
+                    BridgeError::Config(
+                        "local_path must be an absolute path without '..'".into(),
+                    ),
+                ));
+            }
+
+            let base = candidate
+                .parent()
+                .unwrap_or(candidate.as_path())
+                .canonicalize()
+                .map_err(|_| {
+                    err_response(
+                        StatusCode::BAD_REQUEST,
+                        BridgeError::Config(
+                            "local_path must have an existing parent directory".into(),
+                        ),
+                    )
+                })?;
+            let resolved = base.join(
+                candidate
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("")),
+            );
+            if !resolved.starts_with(&base) {
+                return Err(err_response(
+                    StatusCode::BAD_REQUEST,
+                    BridgeError::Config("invalid local_path".into()),
+                ));
+            }
+            resolved
+        }
         _ => {
             let home = directories::UserDirs::new()
                 .map(|d| d.home_dir().to_path_buf())
