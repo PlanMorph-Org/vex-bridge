@@ -68,6 +68,12 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Compute safe version label
+        id: vars
+        run: |
+          $safe = '${{ github.ref_name }}' -replace '[^0-9A-Za-z._-]', '-'
+          "safe_ref_name=$safe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Set up WiX 5
         run: |
           dotnet tool install --global wix --version 5.0.2
@@ -93,7 +99,7 @@ jobs:
         working-directory: vex-bridge/plugins/revit-csharp/installer
         run: |
           New-Item -ItemType Directory -Force -Path ../../../dist | Out-Null
-          wix build -arch x64 -ext WixToolset.Util.wixext wix/Product.wxs -out ../../../dist/VexBridgeRevit-${{ github.ref_name }}.msi
+          wix build -arch x64 -ext WixToolset.Util.wixext wix/Product.wxs -out ../../../dist/VexBridgeRevit-${{ steps.vars.outputs.safe_ref_name }}.msi
 
       - name: Verify signing secrets are present
         id: signing
@@ -132,19 +138,19 @@ jobs:
         run: |
           $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
                        Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
-          & $signtool verify /pa /v "VexBridgeRevit-${{ github.ref_name }}.msi"
+          & $signtool verify /pa /v "VexBridgeRevit-${{ steps.vars.outputs.safe_ref_name }}.msi"
 
       - name: Upload MSI as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VexBridgeRevit-${{ github.ref_name }}-msi
+          name: VexBridgeRevit-${{ steps.vars.outputs.safe_ref_name }}-msi
           path: vex-bridge/dist/*.msi
           if-no-files-found: error
 
       - name: Upload cert-free bundle ZIP as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VexBridge-bundle-${{ github.ref_name }}
+          name: VexBridge-bundle-${{ steps.vars.outputs.safe_ref_name }}
           path: vex-bridge/plugins/revit-csharp/dist/VexBridge-bundle.zip
           if-no-files-found: error
 
