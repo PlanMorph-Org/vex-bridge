@@ -5,9 +5,10 @@ name: release-msi
 # What it does on every push to main / tag / PR:
 #   1. Compiles vex.exe (sibling repo PlanMorph-Org/vex)
 #   2. Compiles vex-bridge.exe (this repo)
-#   3. Builds the .NET Revit add-in DLLs for Revit 2022/2023/2024
-#      (Revit 2025 dropped .NET Framework 4.8 in favor of .NET 8 — once we
-#      add a net8.0 TargetFramework to the csproj we can re-enable it.)
+#   3. Builds the .NET Revit add-in DLLs for Revit 2022/2023/2024 (net48)
+#      and Revit 2027 (net10.0-windows). Revit 2025/2026 (net8) are not
+#      shipped yet — add them to -Versions once we have someone to test on
+#      those exact installs.
 #   4. Composes the Autodesk Bundle (Contents/bin/vex.exe + vex-bridge.exe
 #      + per-Revit-year DLLs) via build-bundle.ps1
 #   5. Wraps it in a WiX 4 MSI
@@ -63,10 +64,15 @@ jobs:
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up .NET 8 SDK
+      - name: Set up .NET SDKs (8 + 10)
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          # 8.0.x is no longer strictly required (no year ships net8 yet)
+          # but kept so 2025/2026 can be turned on without another CI edit.
+          # 10.0.x is needed for the Revit 2027 (net10.0-windows) DLL.
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Compute safe version label
         id: vars
@@ -91,7 +97,7 @@ jobs:
         working-directory: vex-bridge/plugins/revit-csharp/installer
         run: |
           ./build-bundle.ps1 `
-            -Versions 2022,2023,2024 `
+            -Versions 2022,2023,2024,2027 `
             -VexBin       "$env:GITHUB_WORKSPACE\vex\target\release\vex.exe" `
             -VexBridgeBin "$env:GITHUB_WORKSPACE\vex-bridge\target\release\vex-bridge.exe"
 

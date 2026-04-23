@@ -19,13 +19,13 @@
 #       2022/ VexBridgeRevit.dll  VexBridgeRevit.addin
 #       2023/ ...
 #       2024/ ...
-#       2025/ ...
+#       2027/ ...    (Revit 2027 = .NET 10 — see csproj TFM mapping)
 #
 # The wrapping MSI lives in installer/wix/Product.wxs.
 
 [CmdletBinding()]
 param(
-    [string[]] $Versions      = @('2022', '2023', '2024'),
+    [string[]] $Versions      = @('2022', '2023', '2024', '2027'),
     [string]   $Configuration = 'Release',
     [string]   $OutDir        = 'dist',
     # Paths to the prebuilt CLI / daemon binaries. Defaults look in the
