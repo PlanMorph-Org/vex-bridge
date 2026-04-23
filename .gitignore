@@ -3,3 +3,7 @@ target/
 .DS_Store
 .idea/
 .vscode/
+
+# .NET build output
+bin/
+obj/
