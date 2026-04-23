@@ -141,9 +141,23 @@ jobs:
           path: vex-bridge/dist/*.msi
           if-no-files-found: error
 
+      - name: Upload cert-free bundle ZIP as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VexBridge-bundle-${{ github.ref_name }}
+          path: vex-bridge/plugins/revit-csharp/dist/VexBridge-bundle.zip
+          if-no-files-found: error
+
       - name: Attach MSI to GitHub Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: vex-bridge/dist/*.msi
+          fail_on_unmatched_files: true
+
+      - name: Attach cert-free bundle ZIP to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vex-bridge/plugins/revit-csharp/dist/VexBridge-bundle.zip
           fail_on_unmatched_files: true

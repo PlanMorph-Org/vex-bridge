@@ -316,7 +316,8 @@ jobs:
           #   • the .tar.gz bundle (consumed by install.sh / install.ps1)
           #   • the direct-download single-file artifact (.exe on Windows,
           #     .zip on macOS) for advanced users who want raw binaries
-          # Plus the install scripts themselves (`curl | bash`, `irm | iex`).
+          # Plus the install scripts themselves (`curl | bash`, `irm | iex`)
+          # and the cert-free Revit installer + uninstaller.
           files: |
             dist/**/*.tar.gz
             dist/**/*.exe
@@ -324,6 +325,8 @@ jobs:
             dist/**/*.pkg
             install/install.sh
             install/install.ps1
+            install/install-revit.ps1
+            install/uninstall.ps1
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
