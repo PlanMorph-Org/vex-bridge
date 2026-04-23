@@ -10,25 +10,26 @@ use crate::config::Config;
 use crate::errors::{BridgeError, BridgeResult};
 use crate::keychain;
 
-// architur's API is ASP.NET Core with the default PascalCase JSON contract
-// (System.Text.Json defaults). Serde otherwise emits snake_case and the
-// server rejects the body with `DeviceLabel and PublicKey are required.`
+// architur's API is ASP.NET Core Minimal APIs with the default
+// System.Text.Json contract: camelCase on output, case-insensitive on
+// input. So we send + receive camelCase (`deviceLabel`, `publicKey`,
+// `code`, `expiresAt`, `status`, `keyId`, `deviceLabel`).
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 struct StartReq {
     device_label: String,
     public_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 struct StartResp {
     code: String,
     expires_at: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[serde(rename_all = "camelCase")]
 struct PollResp {
     status: String,
     key_id: Option<String>,
