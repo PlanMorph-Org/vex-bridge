@@ -20,10 +20,10 @@ language can do `vex push` without ever touching a terminal.
                                                        └────┬───────┘
                                                             │ SSH ed25519
                                                             ▼
-                                                  ┌────────────────────┐
-                                                  │  vex-serve on      │
-                                                  │  api.planmorph.software  │
-                                                  └────────────────────┘
+                                                  ┌──────────────────────┐
+                                                  │  vex-serve on        │
+                                                  │  vex.planmorph.software │
+                                                  └──────────────────────┘
 ```
 
 ## Why a daemon, not "AI rewrites the binary for each CAD"?
