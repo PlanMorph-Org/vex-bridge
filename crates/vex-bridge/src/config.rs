@@ -58,7 +58,7 @@ impl Paths {
 /// User-editable settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Base URL of the architur API, e.g. `https://api.planmorph.software`.
+    /// Base URL of the architur API, e.g. `https://studio.planmorph.software`.
     #[serde(default = "default_api_base")]
     pub api_base: String,
 
@@ -93,7 +93,7 @@ pub struct WatchEntry {
 }
 
 fn default_api_base() -> String {
-    "https://api.planmorph.software".into()
+    "https://studio.planmorph.software".into()
 }
 fn default_vex_bin() -> String {
     "vex".into()

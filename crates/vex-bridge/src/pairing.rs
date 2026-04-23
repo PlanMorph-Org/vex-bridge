@@ -69,10 +69,7 @@ pub async fn start(cfg: &Config, device_label: &str) -> BridgeResult<PairingOutc
 
     let pair_url = format!(
         "{}/pair?code={}",
-        cfg.api_base
-            .trim_end_matches('/')
-            .replace("api.", "app.")
-            .replace("//api.", "//app."),
+        cfg.api_base.trim_end_matches('/'),
         parsed.code
     );
 

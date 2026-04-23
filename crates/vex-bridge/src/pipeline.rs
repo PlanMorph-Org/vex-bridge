@@ -156,9 +156,15 @@ async fn run_pipeline(
     Ok(())
 }
 
-/// Convert `https://api.planmorph.software` → `ssh://vex@vex.planmorph.software:22/proj/<uuid>`.
-/// Returns `None` if the api_base can't be parsed; the caller treats this as
-/// a non-fatal "user must register the remote manually".
+/// Convert the configured api_base (e.g. `https://studio.planmorph.software`)
+/// into the SSH push URL on the architur droplet
+/// (`ssh://vex@vex.planmorph.software:22/proj/<uuid>`).
+///
+/// We strip the leftmost subdomain label (`studio.`, `api.`, `app.`, …) so
+/// the SSH host always lands on `vex.<root-domain>`, which is the
+/// `vex-sshd` listener on the DO droplet. Returns `None` if the api_base
+/// can't be parsed; the caller treats this as a non-fatal "user must
+/// register the remote manually".
 fn derive_remote_url(api_base: &str, project_id: &str) -> Option<String> {
     let host = api_base
         .strip_prefix("https://")
@@ -166,12 +172,18 @@ fn derive_remote_url(api_base: &str, project_id: &str) -> Option<String> {
         .split('/')
         .next()?
         .split(':')
-        .next()?
-        .trim_start_matches("api.");
+        .next()?;
     if host.is_empty() {
         return None;
     }
-    Some(format!("ssh://vex@vex.{host}:22/proj/{project_id}"))
+    // Strip the leftmost label if there's at least one dot remaining after
+    // it (i.e. host has 3+ labels like `studio.planmorph.software`). For a
+    // bare apex like `planmorph.software` we leave it untouched.
+    let root = match host.split_once('.') {
+        Some((_, rest)) if rest.contains('.') => rest,
+        _ => host,
+    };
+    Some(format!("ssh://vex@vex.{root}:22/proj/{project_id}"))
 }
 
 /// Manually run the same add → commit → push pipeline that the watcher
