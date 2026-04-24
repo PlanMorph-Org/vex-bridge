@@ -55,9 +55,20 @@ enum Cmd {
 
 pub fn run() -> BridgeResult<()> {
     let args = Args::parse();
-    init_tracing(&args.log);
     let paths = Paths::discover()?;
     paths.ensure_dirs()?;
+
+    // The `start` subcommand runs as a long-lived background daemon launched
+    // by Task Scheduler / launchd / systemd-user. Logging to stderr there is
+    // useless (and on Windows, ANY stderr write would force a console window
+    // to materialise behind the user's back at every login — bug #44). Send
+    // its logs to a real file under the per-user data dir instead. Every
+    // other subcommand is a short-lived CLI invocation the user typed, so
+    // stderr is the right destination there.
+    match &args.cmd {
+        Cmd::Start => init_tracing_to_file(&args.log, &paths.log_file)?,
+        _ => init_tracing(&args.log),
+    }
 
     match args.cmd {
         Cmd::Start => run_start(paths),
@@ -78,6 +89,25 @@ fn init_tracing(level: &str) {
         .with_target(false)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+fn init_tracing_to_file(level: &str, log_file: &std::path::Path) -> BridgeResult<()> {
+    if let Some(parent) = log_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)?;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| level.into()),
+        )
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(file))
+        .try_init();
+    Ok(())
 }
 
 fn ensure_access_token(paths: &Paths) -> BridgeResult<String> {

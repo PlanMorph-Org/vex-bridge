@@ -94,10 +94,19 @@
     <!-- The actual schtasks.exe registration — easier and more portable
          than util:ScheduledTask which requires WiX util extension wiring.
          Runs once at install end (deferred, system context) and once at
-         uninstall to clean up. -->
+         uninstall to clean up.
+
+         The /TR command invokes `wscript.exe vex-bridge-launch.vbs`. That
+         .vbs is shipped by build-bundle.ps1 next to vex-bridge.exe and
+         calls WshShell.Run with windowStyle = 0 (SW_HIDE) so the daemon
+         starts at every logon WITHOUT a console window flash. Using
+         `powershell.exe -WindowStyle Hidden -Command "& vex-bridge.exe start"`
+         (the previous approach) still pops a conhost window every login
+         on Windows 10/11 because the child console-subsystem app gets
+         its own conhost regardless of the powershell host's window style. -->
     <CustomAction Id="RegisterTask"
                   Directory="BundleBin"
-                  ExeCommand='schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN "vex-bridge" /TR "powershell.exe -WindowStyle Hidden -NoProfile -Command \"&amp; \\\"[BundleBin]vex-bridge.exe\\\" start\""'
+                  ExeCommand='schtasks.exe /Create /F /SC ONLOGON /RL LIMITED /TN "vex-bridge" /TR "wscript.exe \"[BundleBin]vex-bridge-launch.vbs\""'
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore"/>

@@ -111,9 +111,23 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 # Remove any stale task silently.
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
+# Drop a tiny VBScript launcher next to the binary. wscript.exe + WshShell.Run
+# with windowStyle = 0 (SW_HIDE) is the ONLY reliable way to launch a Windows
+# console-subsystem binary at logon with no console window flash. Earlier
+# revisions used `powershell.exe -WindowStyle Hidden -Command "& 'vex-bridge.exe' start"`
+# which still pops a conhost window every login on Windows 10/11 because the
+# child console app gets its own conhost regardless of the powershell host's
+# window style. Logs are written by the daemon itself to %APPDATA%\vex-bridge\
+# vex-bridge.log, so nothing useful is lost by hiding the window.
+$LaunchVbs = Join-Path $InstallDir 'vex-bridge-launch.vbs'
+@"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """$BridgeExe""" & " start", 0, False
+"@ | Out-File -FilePath $LaunchVbs -Encoding ASCII -Force
+
 $action  = New-ScheduledTaskAction `
-    -Execute 'powershell.exe' `
-    -Argument "-WindowStyle Hidden -NoProfile -Command `"& '$BridgeExe' start`"" `
+    -Execute 'wscript.exe' `
+    -Argument "`"$LaunchVbs`"" `
     -WorkingDirectory $InstallDir
 
 # LogonType = Interactive means "when this user logs in", no elevation required.

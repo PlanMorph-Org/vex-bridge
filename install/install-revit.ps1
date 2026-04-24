@@ -78,7 +78,19 @@ Ok "Bundle extracted."
 # ── Scheduled Task — start vex-bridge at every login ──────────────────────────
 Step "Registering Scheduled Task '$TaskName' (start at login)..."
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-$action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-WindowStyle Hidden -NoProfile -Command `"& '$(Join-Path $BinDir 'vex-bridge.exe')' start`"" -WorkingDirectory $BinDir
+
+# Hidden launcher — see install.ps1 for the rationale. Dropping a .vbs into
+# the bundle bin dir and invoking it via wscript.exe is the only Windows
+# pattern that NEVER flashes a console window at logon. Powershell with
+# -WindowStyle Hidden does NOT cover the child console app's own conhost.
+$BridgeExe = Join-Path $BinDir 'vex-bridge.exe'
+$LaunchVbs = Join-Path $BinDir 'vex-bridge-launch.vbs'
+@"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run """$BridgeExe""" & " start", 0, False
+"@ | Out-File -FilePath $LaunchVbs -Encoding ASCII -Force
+
+$action  = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$LaunchVbs`"" -WorkingDirectory $BinDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited

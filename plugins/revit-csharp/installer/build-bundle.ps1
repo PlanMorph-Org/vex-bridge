@@ -80,6 +80,28 @@ Copy-Item $VexBin       (Join-Path $binDir 'vex.exe')        -Force
 Write-Host ">> Bundling vex-bridge: $VexBridgeBin"
 Copy-Item $VexBridgeBin (Join-Path $binDir 'vex-bridge.exe') -Force
 
+# Ship a tiny VBScript launcher alongside the binaries. The MSI registers a
+# Scheduled Task that invokes `wscript.exe vex-bridge-launch.vbs`, which uses
+# WshShell.Run with windowStyle = 0 (SW_HIDE) to start the daemon at every
+# user logon WITHOUT flashing a console window. Doing this via
+# `powershell.exe -WindowStyle Hidden -Command "& 'vex-bridge.exe' start"`
+# (the previous approach) still pops a conhost window every login on Windows
+# 10/11 because the child console-subsystem app gets its own conhost. The
+# daemon writes its logs to %APPDATA%\vex-bridge\vex-bridge.log so nothing
+# useful is hidden by suppressing the window.
+$launchVbs = Join-Path $binDir 'vex-bridge-launch.vbs'
+@'
+' Launches vex-bridge.exe (located next to this .vbs) with the daemon
+' subcommand and ZERO console window. Invoked at user logon by the
+' Scheduled Task registered by the MSI. Path-independent so the bundle
+' can live under either %ProgramData% or %APPDATA%.
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set sh  = CreateObject("WScript.Shell")
+exe = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "vex-bridge.exe")
+sh.Run """" & exe & """ start", 0, False
+'@ | Out-File -FilePath $launchVbs -Encoding ASCII -Force
+Write-Host ">> Bundling launcher:   $launchVbs"
+
 foreach ($v in $Versions) {
     Write-Host ">> Building add-in for Revit $v ..."
     $verDir = Join-Path $contents $v
