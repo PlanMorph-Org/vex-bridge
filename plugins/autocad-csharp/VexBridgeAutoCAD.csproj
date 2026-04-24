@@ -28,7 +28,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <PlatformTarget>x64</PlatformTarget>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <Version>0.2.11</Version>
+    <Version>0.2.12</Version>
     <Company>Architur</Company>
     <Product>vex-bridge for AutoCAD</Product>
     <Copyright>Copyright © Architur</Copyright>
@@ -47,9 +47,5 @@
          net8/net10 already ship both in the BCL. -->
     <PackageReference Include="System.Text.Json" Version="8.0.5" Condition=" '$(TargetFramework)' == 'net48' " />
     <Reference Include="System.Net.Http" Condition=" '$(TargetFramework)' == 'net48' " />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Include="VexBridgeAutoCAD.bundle" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
