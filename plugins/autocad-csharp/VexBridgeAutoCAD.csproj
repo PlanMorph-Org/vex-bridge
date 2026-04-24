@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!--
+      Per-AutoCAD-year build. AutoCAD 2025 was the first release on .NET 8;
+      2024 and earlier are .NET Framework 4.8. Override on the cmdline via
+      -p:AcadVersion=2026 to build for that year.
+
+      Year → AutoCAD release-number mapping (used in PackageContents.xml):
+        2024 = R24.3   2025 = R25.0   2026 = R25.1   2027 = R26.0
+    -->
+    <AcadVersion Condition=" '$(AcadVersion)' == '' ">2025</AcadVersion>
+    <TargetFramework Condition=" $([MSBuild]::ValueOrDefault('$(AcadVersion)','0')) &lt; 2025 ">net48</TargetFramework>
+    <TargetFramework Condition=" $([MSBuild]::ValueOrDefault('$(AcadVersion)','0')) &gt;= 2025 AND $([MSBuild]::ValueOrDefault('$(AcadVersion)','0')) &lt; 2027 ">net8.0-windows</TargetFramework>
+    <TargetFramework Condition=" $([MSBuild]::ValueOrDefault('$(AcadVersion)','0')) &gt;= 2027 ">net10.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>VexBridgeAutoCAD</AssemblyName>
+    <RootNamespace>Architur.VexBridgeAutoCAD</RootNamespace>
+    <UseWPF>false</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>x64</PlatformTarget>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <Version>0.2.8</Version>
+    <Company>Architur</Company>
+    <Product>vex-bridge for AutoCAD</Product>
+    <Copyright>Copyright © Architur</Copyright>
+  </PropertyGroup>
+
+  <!-- AutoCAD managed API references via NuGet. AutoCAD.NET.Core.<year>
+       publishes AcMgd.dll / AcCoreMgd.dll / AcDbMgd.dll for that release.
+       The "*" floor lets NuGet pick the lowest published patch. -->
+  <ItemGroup>
+    <PackageReference Include="AutoCAD.NET.Core"          Version="$(AcadVersion).*" IncludeAssets="compile; build" PrivateAssets="all" />
+    <PackageReference Include="AutoCAD.NET.Model"         Version="$(AcadVersion).*" IncludeAssets="compile; build" PrivateAssets="all" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="VexBridgeAutoCAD.bundle" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

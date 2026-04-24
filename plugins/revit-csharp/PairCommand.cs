@@ -27,6 +27,7 @@ public sealed class PairCommand : IExternalCommand
     {
         try
         {
+            if (!Eula.EnsureAccepted()) return Result.Cancelled;
             BundledBin.EnsureDaemonRunning();
 
             using var bridge = BridgeClient.TryCreate();

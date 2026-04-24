@@ -3,28 +3,21 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 
-namespace Architur.VexBridgeRevit;
+namespace Architur.VexBridgeAutoCAD;
 
 /// <summary>
-/// Locates the binaries we ship inside the Autodesk bundle. The Revit
+/// Locates the binaries shipped inside the Autodesk bundle. The AutoCAD
 /// add-in is loaded from:
-///   %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\{year}\VexBridgeRevit.dll
-/// so the bundled CLI + daemon live one directory up at:
+///   %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\AutoCAD\{year}\VexBridgeAutoCAD.dll
+/// so the bundled CLI + daemon live two directories up at:
 ///   %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\bin\
-///
-/// Falls back to whatever's on PATH (named `vex.exe` / `vex-bridge.exe`)
-/// for developer machines that ran build-bundle.ps1 on the file system
-/// directly without going through the MSI.
+/// (Same bin/ folder that the Revit plug-in uses — there's only one daemon.)
 /// </summary>
 internal static class BundledBin
 {
     public static string VexBridgeExe => Resolve("vex-bridge.exe");
     public static string VexExe       => Resolve("vex.exe");
 
-    /// <summary>
-    /// Best-effort: returns true if vex-bridge appears to be running by
-    /// pinging the loopback /v1/health endpoint with a short timeout.
-    /// </summary>
     public static bool IsDaemonRunning()
     {
         try
@@ -47,9 +40,8 @@ internal static class BundledBin
     public static void EnsureDaemonRunning()
     {
         if (IsDaemonRunning()) return;
-
         var exe = VexBridgeExe;
-        if (string.IsNullOrEmpty(exe)) return; // best-effort
+        if (string.IsNullOrEmpty(exe)) return;
 
         var psi = new ProcessStartInfo(exe, "start")
         {
@@ -61,8 +53,6 @@ internal static class BundledBin
         };
         try { Process.Start(psi); } catch { /* best-effort */ }
 
-        // Give it a moment to bind 127.0.0.1:7878. We poll instead of
-        // sleeping a fixed time so a fast daemon doesn't waste a second.
         var deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline)
         {
@@ -73,29 +63,19 @@ internal static class BundledBin
 
     private static string Resolve(string fileName)
     {
-        // 1. Sibling Contents\bin\ inside the Autodesk bundle.
-        //    DLL path: …\Contents\Revit\{year}\VexBridgeRevit.dll
-        //    Bin path: …\Contents\bin\{fileName}
-        // Walk up looking for a directory named "Contents" so the lookup
-        // keeps working if the bundle layout changes (e.g. legacy
-        // Contents\{year}\ from <0.2.8 still works for in-place upgrades).
         var asm = Assembly.GetExecutingAssembly().Location;
         if (!string.IsNullOrEmpty(asm))
         {
-            var dir = Path.GetDirectoryName(asm);
-            for (var i = 0; i < 6 && !string.IsNullOrEmpty(dir); i++)
+            // …\Contents\AutoCAD\{year}\VexBridgeAutoCAD.dll → …\Contents\bin\
+            var yearDir    = Path.GetDirectoryName(asm);
+            var productDir = Path.GetDirectoryName(yearDir);
+            var contentsDir = Path.GetDirectoryName(productDir);
+            if (!string.IsNullOrEmpty(contentsDir))
             {
-                if (string.Equals(Path.GetFileName(dir), "Contents", StringComparison.OrdinalIgnoreCase))
-                {
-                    var bundled = Path.Combine(dir, "bin", fileName);
-                    if (File.Exists(bundled)) return bundled;
-                    break;
-                }
-                dir = Path.GetDirectoryName(dir);
+                var bundled = Path.Combine(contentsDir, "bin", fileName);
+                if (File.Exists(bundled)) return bundled;
             }
         }
-
-        // 2. Fall back to whatever's on PATH.
         return fileName;
     }
 }

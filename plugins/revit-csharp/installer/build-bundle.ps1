@@ -1,11 +1,11 @@
-# Build a fully-formed Autodesk Bundle (.bundle) for vex-bridge for Revit.
+# Build a fully-formed Autodesk Bundle (.bundle) for vex-bridge.
 #
 # This script produces a SELF-CONTAINED bundle that ships the vex CLI, the
-# vex-bridge daemon, and the Revit add-in DLL together. After the MSI
-# installs, the user does NOT need to download or install anything else,
-# and does NOT need to touch a terminal — the daemon is auto-started by a
-# per-user Scheduled Task (registered by the MSI in Product.wxs) and the
-# Pair button drives the whole pairing flow in-process.
+# vex-bridge daemon, AND the Revit + AutoCAD add-in DLLs together. After
+# the MSI installs, the user does NOT need to download or install anything
+# else, and does NOT need to touch a terminal — the daemon is auto-started
+# by a per-user Scheduled Task (registered by the MSI in Product.wxs) and
+# the in-CAD Pair button drives the whole pairing flow in-process.
 #
 #   PowerShell:   .\build-bundle.ps1
 #                 .\build-bundle.ps1 -VexBin C:\path\to\vex.exe -VexBridgeBin C:\path\to\vex-bridge.exe
@@ -15,43 +15,49 @@
 #     PackageContents.xml
 #     Contents/
 #       Resources/icon.png  ReadMe.html  LICENSE.txt
-#       bin/vex.exe          vex-bridge.exe         <-- shipped, not downloaded
-#       2022/ VexBridgeRevit.dll  VexBridgeRevit.addin
-#       2023/ ...
-#       2024/ ...
-#       2027/ ...    (Revit 2027 = .NET 10 — see csproj TFM mapping)
+#       bin/vex.exe          vex-bridge.exe   vex-bridge-launch.vbs
+#       Revit/2022/ VexBridgeRevit.dll  VexBridgeRevit.addin
+#       Revit/2023/ ...
+#       Revit/2027/ ...    (Revit 2027 = .NET 10 — see csproj TFM mapping)
+#       AutoCAD/2024/ VexBridgeAutoCAD.dll
+#       AutoCAD/2025/ ...
+#       AutoCAD/2027/ ...
 #
 # The wrapping MSI lives in installer/wix/Product.wxs.
 
 [CmdletBinding()]
 param(
-    # Every Revit major version we ship a per-year add-in DLL for. Revit
-    # itself only honors SeriesMin (exact match) in PackageContents.xml —
-    # SeriesMax is ignored by the loader — so each Revit year MUST have
-    # its own Contents/<year>/ folder AND its own <Components> block in
+    # Every Revit major version we ship a per-year add-in DLL for. Both
+    # Revit and AutoCAD only honor SeriesMin (exact match) in
+    # PackageContents.xml — SeriesMax is ignored — so each year MUST have
+    # its own per-year folder AND its own <Components> block in
     # PackageContents.xml or it simply won't show up in that release.
     # See: https://blog.autodesk.io/revit-api-understanding-the-role-of-seriesmin-and-seriesmax-in-plugin-deployment/
-    # When Autodesk ships a new Revit year, add it here AND in
-    # installer/PackageContents.xml. The csproj's TFM mapping
+    # When Autodesk ships a new year, add it here AND in
+    # installer/PackageContents.xml. The csproj TFM mappings
     # (net48 < 2025, net8.0-windows 2025–2026, net10.0-windows 2027+)
-    # auto-selects the right framework via -p:RevitVersion=<year>.
-    [string[]] $Versions      = @('2022', '2023', '2024', '2025', '2026', '2027'),
-    [string]   $Configuration = 'Release',
-    [string]   $OutDir        = 'dist',
+    # auto-select the right framework via -p:RevitVersion / -p:AcadVersion.
+    [string[]] $RevitVersions = @('2022', '2023', '2024', '2025', '2026', '2027'),
+    [string[]] $AcadVersions  = @('2024', '2025', '2026', '2027'),
+    [string]   $Configuration  = 'Release',
+    [string]   $OutDir         = 'dist',
     # Paths to the prebuilt CLI / daemon binaries. Defaults look in the
     # workspace target/release dirs so a clean checkout + cargo build
     # at the workspace root produces a working bundle.
-    [string]   $VexBin        = '',
-    [string]   $VexBridgeBin  = ''
+    [string]   $VexBin         = '',
+    [string]   $VexBridgeBin   = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $root      = Split-Path -Parent $PSScriptRoot
-$projFile  = Join-Path $root 'VexBridgeRevit.csproj'
+$revitProj = Join-Path $root 'VexBridgeRevit.csproj'
+$acadProj  = Join-Path (Split-Path -Parent $root) 'autocad-csharp\VexBridgeAutoCAD.csproj'
 $bundle    = Join-Path $root "$OutDir/VexBridge.bundle"
 $contents  = Join-Path $bundle 'Contents'
 $resources = Join-Path $contents 'Resources'
 $binDir    = Join-Path $contents 'bin'
+$revitDir  = Join-Path $contents 'Revit'
+$acadDir   = Join-Path $contents 'AutoCAD'
 
 # Resolve binary paths. If not provided, try standard cargo output locations.
 if (-not $VexBin) {
@@ -102,12 +108,12 @@ sh.Run """" & exe & """ start", 0, False
 '@ | Out-File -FilePath $launchVbs -Encoding ASCII -Force
 Write-Host ">> Bundling launcher:   $launchVbs"
 
-foreach ($v in $Versions) {
+foreach ($v in $RevitVersions) {
     Write-Host ">> Building add-in for Revit $v ..."
-    $verDir = Join-Path $contents $v
-    New-Item -ItemType Directory -Path $verDir | Out-Null
+    $verDir = Join-Path $revitDir $v
+    New-Item -ItemType Directory -Force -Path $verDir | Out-Null
 
-    & dotnet build $projFile `
+    & dotnet build $revitProj `
         -c $Configuration `
         -p:RevitVersion=$v `
         -p:OutputPath="$verDir/" `
@@ -115,6 +121,19 @@ foreach ($v in $Versions) {
     if ($LASTEXITCODE -ne 0) { throw "build failed for Revit $v" }
 
     Copy-Item (Join-Path $root 'VexBridgeRevit.addin') $verDir -Force
+}
+
+foreach ($v in $AcadVersions) {
+    Write-Host ">> Building add-in for AutoCAD $v ..."
+    $verDir = Join-Path $acadDir $v
+    New-Item -ItemType Directory -Force -Path $verDir | Out-Null
+
+    & dotnet build $acadProj `
+        -c $Configuration `
+        -p:AcadVersion=$v `
+        -p:OutputPath="$verDir/" `
+        --nologo
+    if ($LASTEXITCODE -ne 0) { throw "build failed for AutoCAD $v" }
 }
 
 Write-Host ""

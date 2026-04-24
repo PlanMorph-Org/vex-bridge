@@ -1,33 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Autodesk Bundle manifest for the vex-bridge Revit plug-in.
+    Autodesk Bundle manifest for vex-bridge (Revit + AutoCAD).
 
     Reference: Autodesk ApplicationPlugins bundle format
         https://aps.autodesk.com/en/docs/exchange/v1/reference/PackageContents
-        https://help.autodesk.com/view/RVT/2025/ENU/?guid=GUID-... (Add-In Integration)
 
     The OS auto-discovers any folder ending in ".bundle" under one of:
         %ProgramData%\Autodesk\ApplicationPlugins   (machine-wide install)
         %APPDATA%\Autodesk\ApplicationPlugins        (per-user install)
 
-    The Components blocks below tell Revit which .addin file to load for
-    which Revit version. Each Contents/{year}/ folder ships its own
-    VexBridgeRevit.dll built against that year's RevitAPI.
+    A single bundle ships add-ins for BOTH Revit and AutoCAD by declaring
+    a separate <Components> block per product per release. The shared
+    daemon + CLI live under Contents/bin/ so there's only one copy of
+    vex-bridge.exe / vex.exe regardless of how many CADs the user has.
+
+    IMPORTANT: Both Revit and AutoCAD only honor SeriesMin (and require
+    an exact match) — SeriesMax is ignored by the bundle loader. So
+    every supported product-year needs its OWN <Components> block, or
+    the add-in silently won't appear in that release. When Autodesk
+    ships a new year, add a block below AND extend $RevitVersions /
+    $AcadVersions in installer/build-bundle.ps1.
+    Ref: https://blog.autodesk.io/revit-api-understanding-the-role-of-seriesmin-and-seriesmax-in-plugin-deployment/
+
+    Year → release-number reference:
+      Revit:    {year}        e.g. R2024, R2025, R2026, R2027
+      AutoCAD:  R24.3 = 2024, R25.0 = 2025, R25.1 = 2026, R26.0 = 2027
 -->
 <ApplicationPackage
     SchemaVersion="1.0"
-    AutodeskProduct="Revit"
     ProductType="Application"
-    Name="vex-bridge for Revit"
-    Description="Push Revit models to architur with one click."
-    AppVersion="0.2.7"
-    FriendlyVersion="0.2.7"
+    Name="vex-bridge for Revit and AutoCAD"
+    Description="Push Revit models and AutoCAD drawings to architur with one click."
+    AppVersion="0.2.8"
+    FriendlyVersion="0.2.8"
     SupportedLocales="Enu"
     ProductCode="{4D3B2A9C-8E8B-4A8B-9E0F-7B0F8C4A4A4A}"
     UpgradeCode="{C7B0A6E6-2A36-4D2C-8AAE-7D7E2F0E2F00}"
     Author="Architur"
     HelpFile="./Contents/Resources/ReadMe.html"
-    OnlineDocumentation="https://studio.planmorph.software/docs/revit"
+    OnlineDocumentation="https://studio.planmorph.software/docs"
     Icon="./Contents/Resources/icon.png">
 
   <CompanyDetails
@@ -36,69 +47,92 @@
       Email="support@planmorph.software"
       Phone=""/>
 
-  <RuntimeRequirements
-      OS="Win64"
-      Platform="Revit"
-      SeriesMin="R2022"
-      SeriesMax="R2027"/>
-
-  <!-- One Components block per supported Revit version. The path is
-       relative to the bundle root. Each Contents/{year}/ folder ships
-       its own VexBridgeRevit.dll built against that year's RevitAPI
-       (TFM mapping in VexBridgeRevit.csproj: net48 for <2025,
-       net8.0-windows for 2025–2026, net10.0-windows for 2027+).
-
-       IMPORTANT: Revit only honors SeriesMin (and requires an exact
-       match) — SeriesMax is ignored by the bundle loader. That means
-       every Revit major version needs its OWN <Components> block here
-       or the add-in will silently not appear in that release. When a
-       new Revit year ships, add a block below AND add the year to
-       installer/build-bundle.ps1 $Versions.
-       Ref: https://blog.autodesk.io/revit-api-understanding-the-role-of-seriesmin-and-seriesmax-in-plugin-deployment/ -->
+  <!-- ─── Revit components ────────────────────────────────────────────── -->
+  <!-- TFM mapping in plugins/revit-csharp/VexBridgeRevit.csproj:
+         net48 for <2025, net8.0-windows for 2025–2026, net10.0-windows for 2027+ -->
   <Components Description="vex-bridge ribbon for Revit 2022">
     <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2022" SeriesMax="R2022"/>
     <ComponentEntry AppName="vex-bridge"
-                    Version="0.2.7"
-                    ModuleName="./Contents/2022/VexBridgeRevit.addin"
+                    Version="0.2.8"
+                    ModuleName="./Contents/Revit/2022/VexBridgeRevit.addin"
                     AppDescription="Push Revit models to architur."/>
   </Components>
   <Components Description="vex-bridge ribbon for Revit 2023">
     <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2023" SeriesMax="R2023"/>
     <ComponentEntry AppName="vex-bridge"
-                    Version="0.2.7"
-                    ModuleName="./Contents/2023/VexBridgeRevit.addin"
+                    Version="0.2.8"
+                    ModuleName="./Contents/Revit/2023/VexBridgeRevit.addin"
                     AppDescription="Push Revit models to architur."/>
   </Components>
   <Components Description="vex-bridge ribbon for Revit 2024">
     <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2024" SeriesMax="R2024"/>
     <ComponentEntry AppName="vex-bridge"
-                    Version="0.2.7"
-                    ModuleName="./Contents/2024/VexBridgeRevit.addin"
+                    Version="0.2.8"
+                    ModuleName="./Contents/Revit/2024/VexBridgeRevit.addin"
                     AppDescription="Push Revit models to architur."/>
   </Components>
-  <!-- Revit 2025 was the first year to drop .NET Framework 4.8 in
-       favor of .NET 8; the per-year DLL is built net8.0-windows. -->
   <Components Description="vex-bridge ribbon for Revit 2025">
     <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2025" SeriesMax="R2025"/>
     <ComponentEntry AppName="vex-bridge"
-                    Version="0.2.7"
-                    ModuleName="./Contents/2025/VexBridgeRevit.addin"
+                    Version="0.2.8"
+                    ModuleName="./Contents/Revit/2025/VexBridgeRevit.addin"
                     AppDescription="Push Revit models to architur."/>
   </Components>
   <Components Description="vex-bridge ribbon for Revit 2026">
     <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2026" SeriesMax="R2026"/>
     <ComponentEntry AppName="vex-bridge"
-                    Version="0.2.7"
-                    ModuleName="./Contents/2026/VexBridgeRevit.addin"
+                    Version="0.2.8"
+                    ModuleName="./Contents/Revit/2026/VexBridgeRevit.addin"
                     AppDescription="Push Revit models to architur."/>
   </Components>
-  <!-- Revit 2027 ships on .NET 10; the per-year DLL is built against
-       net10.0-windows by the csproj's RevitVersion-conditional TFM. -->
   <Components Description="vex-bridge ribbon for Revit 2027">
     <RuntimeRequirements OS="Win64" Platform="Revit" SeriesMin="R2027" SeriesMax="R2027"/>
     <ComponentEntry AppName="vex-bridge"
-                    Version="0.2.7"
-                    ModuleName="./Contents/2027/VexBridgeRevit.addin"
+                    Version="0.2.8"
+                    ModuleName="./Contents/Revit/2027/VexBridgeRevit.addin"
                     AppDescription="Push Revit models to architur."/>
+  </Components>
+
+  <!-- ─── AutoCAD components ─────────────────────────────────────────── -->
+  <!-- AutoCAD's ComponentEntry points directly at the managed DLL (no
+       separate .addin file). LoadOnAutoCADStartup auto-NETLOADs the
+       assembly. AppType="ManagedPlugin" is mandatory for .NET assemblies.
+       TFM mapping in plugins/autocad-csharp/VexBridgeAutoCAD.csproj:
+         net48 for <2025, net8.0-windows for 2025–2026, net10.0-windows for 2027+ -->
+  <Components Description="vex-bridge for AutoCAD 2024">
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R24.3" SeriesMax="R24.3"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.8"
+                    ModuleName="./Contents/AutoCAD/2024/VexBridgeAutoCAD.dll"
+                    AppType="ManagedPlugin"
+                    LoadOnAutoCADStartup="True"
+                    AppDescription="Push AutoCAD drawings to architur."/>
+  </Components>
+  <Components Description="vex-bridge for AutoCAD 2025">
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R25.0" SeriesMax="R25.0"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.8"
+                    ModuleName="./Contents/AutoCAD/2025/VexBridgeAutoCAD.dll"
+                    AppType="ManagedPlugin"
+                    LoadOnAutoCADStartup="True"
+                    AppDescription="Push AutoCAD drawings to architur."/>
+  </Components>
+  <Components Description="vex-bridge for AutoCAD 2026">
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R25.1" SeriesMax="R25.1"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.8"
+                    ModuleName="./Contents/AutoCAD/2026/VexBridgeAutoCAD.dll"
+                    AppType="ManagedPlugin"
+                    LoadOnAutoCADStartup="True"
+                    AppDescription="Push AutoCAD drawings to architur."/>
+  </Components>
+  <Components Description="vex-bridge for AutoCAD 2027">
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R26.0" SeriesMax="R26.0"/>
+    <ComponentEntry AppName="vex-bridge"
+                    Version="0.2.8"
+                    ModuleName="./Contents/AutoCAD/2027/VexBridgeAutoCAD.dll"
+                    AppType="ManagedPlugin"
+                    LoadOnAutoCADStartup="True"
+                    AppDescription="Push AutoCAD drawings to architur."/>
   </Components>
 </ApplicationPackage>
