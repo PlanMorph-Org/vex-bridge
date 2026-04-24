@@ -3,6 +3,10 @@ using System.Diagnostics;
 using System.Threading;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Runtime;
+// Disambiguate: `Application` is the AcCoreMgd static and `Exception` is the
+// Autodesk.AutoCAD.Runtime type — both clash with `using Autodesk.AutoCAD.Runtime`.
+using AcadApp     = Autodesk.AutoCAD.ApplicationServices.Application;
+using SysException = System.Exception;
 
 namespace Architur.VexBridgeAutoCAD;
 
@@ -22,7 +26,7 @@ public sealed class Commands
     [CommandMethod("VEXPUSH", CommandFlags.Modal)]
     public void Push()
     {
-        var doc = Application.DocumentManager.MdiActiveDocument;
+        var doc = AcadApp.DocumentManager.MdiActiveDocument;
         var ed  = doc?.Editor;
         if (ed is null) return;
 
@@ -47,7 +51,7 @@ public sealed class Commands
 
             var last = Environment.GetEnvironmentVariable(LastProjectKey);
             using var dlg = new ProjectPickerDialog(last);
-            if (Application.ShowModalDialog(dlg) != System.Windows.Forms.DialogResult.OK)
+            if (AcadApp.ShowModalDialog(dlg) != System.Windows.Forms.DialogResult.OK)
             {
                 ed.WriteMessage("\nVEXPUSH cancelled.\n");
                 return;
@@ -68,7 +72,7 @@ public sealed class Commands
         {
             ed.WriteMessage($"\nPush failed: HTTP {bex.StatusCode}\n{bex.Message}\n");
         }
-        catch (Exception ex)
+        catch (SysException ex)
         {
             ed.WriteMessage($"\nPush failed: {ex.Message}\n");
         }
@@ -77,7 +81,7 @@ public sealed class Commands
     [CommandMethod("VEXPAIR", CommandFlags.Modal)]
     public void Pair()
     {
-        var doc = Application.DocumentManager.MdiActiveDocument;
+        var doc = AcadApp.DocumentManager.MdiActiveDocument;
         var ed  = doc?.Editor;
         if (ed is null) return;
 
@@ -119,7 +123,7 @@ public sealed class Commands
         {
             ed.WriteMessage($"\nPairing failed: HTTP {bex.StatusCode}\n{bex.Message}\n");
         }
-        catch (Exception ex)
+        catch (SysException ex)
         {
             ed.WriteMessage($"\nPairing failed: {ex.Message}\n");
         }

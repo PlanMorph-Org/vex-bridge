@@ -9,6 +9,8 @@ using System;
 using System.Reflection;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.Runtime;
+// Disambiguate against Autodesk.AutoCAD.Runtime types.
+using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 [assembly: ExtensionApplication(typeof(Architur.VexBridgeAutoCAD.VexBridgeApplication))]
 [assembly: CommandClass(typeof(Architur.VexBridgeAutoCAD.Commands))]
@@ -29,7 +31,7 @@ public sealed class VexBridgeApplication : IExtensionApplication
         try
         {
             System.Threading.Tasks.Task.Run(() => BundledBin.EnsureDaemonRunning());
-            var doc = Application.DocumentManager.MdiActiveDocument;
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
             doc?.Editor.WriteMessage(
                 "\nvex-bridge loaded. Type VEXPUSH to push, VEXPAIR to pair this device.\n");
         }
