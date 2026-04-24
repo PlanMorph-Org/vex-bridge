@@ -25,7 +25,17 @@
 
 [CmdletBinding()]
 param(
-    [string[]] $Versions      = @('2022', '2023', '2024', '2027'),
+    # Every Revit major version we ship a per-year add-in DLL for. Revit
+    # itself only honors SeriesMin (exact match) in PackageContents.xml —
+    # SeriesMax is ignored by the loader — so each Revit year MUST have
+    # its own Contents/<year>/ folder AND its own <Components> block in
+    # PackageContents.xml or it simply won't show up in that release.
+    # See: https://blog.autodesk.io/revit-api-understanding-the-role-of-seriesmin-and-seriesmax-in-plugin-deployment/
+    # When Autodesk ships a new Revit year, add it here AND in
+    # installer/PackageContents.xml. The csproj's TFM mapping
+    # (net48 < 2025, net8.0-windows 2025–2026, net10.0-windows 2027+)
+    # auto-selects the right framework via -p:RevitVersion=<year>.
+    [string[]] $Versions      = @('2022', '2023', '2024', '2025', '2026', '2027'),
     [string]   $Configuration = 'Release',
     [string]   $OutDir        = 'dist',
     # Paths to the prebuilt CLI / daemon binaries. Defaults look in the
