@@ -40,7 +40,7 @@
   <Package
       Name="vex-bridge for Revit"
       Manufacturer="Architur"
-      Version="0.2.13.0"
+      Version="0.2.14.0"
       UpgradeCode="C7B0A6E6-2A36-4D2C-8AAE-7D7E2F0E2F00"
       Scope="perMachine"
       Compressed="yes">
