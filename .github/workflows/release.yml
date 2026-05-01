@@ -182,7 +182,9 @@ jobs:
       - name: Stage installer script
         if: steps.fetch-vex.outputs.skip != 'true'
         shell: bash
-        run: cp installer/windows/setup.iss installer-stage/setup.iss
+        run: |
+          cp installer/windows/setup.iss installer-stage/setup.iss
+          cp plugins/revit-csharp/marketplace/EarlyAccessInstall.html installer-stage/EarlyAccessInstall.html
 
       - name: Generate wizard images
         if: steps.fetch-vex.outputs.skip != 'true'
@@ -327,6 +329,8 @@ jobs:
             install/install.ps1
             install/install-revit.ps1
             install/uninstall.ps1
+            plugins/revit-csharp/marketplace/EarlyAccessInstall.html
+            docs/early-access-distribution.md
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

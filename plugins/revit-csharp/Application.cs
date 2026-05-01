@@ -1,5 +1,8 @@
 using System;
+using System.IO;
 using Autodesk.Revit.UI;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace Architur.VexBridgeRevit;
 
@@ -25,6 +28,7 @@ public sealed class VexBridgeApplication : IExternalApplication
 
         var panel = app.CreateRibbonPanel("vex-bridge");
         var asm = typeof(VexBridgeApplication).Assembly.Location;
+        var ribbonIcon = LoadRibbonIcon(asm);
 
         var pushBtn = new PushButtonData(
             name:        "VexBridgePush",
@@ -46,10 +50,42 @@ public sealed class VexBridgeApplication : IExternalApplication
             ToolTip = "Pair this machine with your architur account.",
         };
 
+        if (ribbonIcon is not null)
+        {
+            pushBtn.Image = ribbonIcon;
+            pushBtn.LargeImage = ribbonIcon;
+            pairBtn.Image = ribbonIcon;
+            pairBtn.LargeImage = ribbonIcon;
+        }
+
         panel.AddItem(pushBtn);
         panel.AddItem(pairBtn);
         return Result.Succeeded;
     }
 
     public Result OnShutdown(UIControlledApplication _) => Result.Succeeded;
+
+    private static ImageSource? LoadRibbonIcon(string assemblyPath)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(assemblyPath);
+            if (string.IsNullOrEmpty(dir)) return null;
+
+            var iconPath = Path.Combine(dir, "assets", "vex-ribbon-32.png");
+            if (!File.Exists(iconPath)) return null;
+
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.UriSource = new Uri(iconPath, UriKind.Absolute);
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

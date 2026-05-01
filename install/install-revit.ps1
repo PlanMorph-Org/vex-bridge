@@ -12,6 +12,11 @@
     3. Registers a per-user Scheduled Task to start vex-bridge at login.
     4. Starts the daemon now and opens the pairing page in the browser.
 
+    If the default Autodesk folder is missing, the installer offers a
+    per-user fallback and can open a folder picker. Use -Browse to show the
+    picker immediately after default-path detection fails, or -InstallRoot to
+    point directly at an Autodesk ApplicationPlugins folder.
+
     This is the path for users who don't want to deal with the unsigned-MSI
     SmartScreen warning. It's identical to what the MSI does, minus the
     installer wrapper.
@@ -22,32 +27,95 @@
 .EXAMPLE
     # Install only for the current user (no admin needed at all):
     iex "& { $(irm https://github.com/PlanMorph-Org/vex-bridge/releases/latest/download/install-revit.ps1) } -PerUser"
+
+.EXAMPLE
+    # Browse for a custom Autodesk ApplicationPlugins folder if needed:
+    iex "& { $(irm https://github.com/PlanMorph-Org/vex-bridge/releases/latest/download/install-revit.ps1) } -Browse"
+
+.EXAMPLE
+    # Install into an explicit ApplicationPlugins folder:
+    iex "& { $(irm https://github.com/PlanMorph-Org/vex-bridge/releases/latest/download/install-revit.ps1) } -InstallRoot 'D:\Autodesk\ApplicationPlugins'"
 #>
 [CmdletBinding()]
 param(
     [switch] $PerUser,
+    [switch] $Browse,
+    [string] $InstallRoot,
     [string] $Repo = $(if ($env:VEX_BRIDGE_GITHUB_REPO) { $env:VEX_BRIDGE_GITHUB_REPO } else { 'PlanMorph-Org/vex-bridge' })
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$TaskName  = 'vex-bridge'
-$ZipName   = 'VexBridge-bundle.zip'
-
-if ($PerUser) {
-    $InstallRoot = Join-Path $env:APPDATA      'Autodesk\ApplicationPlugins'
-} else {
-    $InstallRoot = Join-Path $env:ProgramData  'Autodesk\ApplicationPlugins'
-}
-$BundleDir = Join-Path $InstallRoot 'VexBridge.bundle'
-$BinDir    = Join-Path $BundleDir   'Contents\bin'
+$TaskName = 'vex-bridge'
+$ZipName  = 'VexBridge-bundle.zip'
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "    $([char]0x2713) $m" -ForegroundColor Green }
 function Fail($m) { Write-Error "    $([char]0x2717) $m"; exit 1 }
 
+function Normalize-InstallRoot([string] $Path) {
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path).TrimEnd('\')
+    if ([IO.Path]::GetFileName($expanded) -ieq 'VexBridge.bundle') {
+        return Split-Path -Parent $expanded
+    }
+    if ([IO.Path]::GetFileName($expanded) -ieq 'Autodesk') {
+        return Join-Path $expanded 'ApplicationPlugins'
+    }
+    return $expanded
+}
+
+function Select-InstallRoot([string] $InitialPath) {
+    if (-not [Environment]::UserInteractive) { return $null }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = 'Choose the Autodesk ApplicationPlugins folder. The installer will create VexBridge.bundle inside it.'
+        $dlg.SelectedPath = $InitialPath
+        $dlg.ShowNewFolderButton = $true
+        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            return Normalize-InstallRoot $dlg.SelectedPath
+        }
+    } catch {
+        Write-Warning "Folder picker was not available: $($_.Exception.Message)"
+    }
+    return $null
+}
+
+function Resolve-InstallRoot {
+    $machineRoot = Join-Path $env:ProgramData 'Autodesk\ApplicationPlugins'
+    $userRoot    = Join-Path $env:APPDATA     'Autodesk\ApplicationPlugins'
+
+    if ($InstallRoot) { return Normalize-InstallRoot $InstallRoot }
+    if ($PerUser)     { return $userRoot }
+
+    $machineAutodesk = Join-Path $env:ProgramData 'Autodesk'
+    if ((Test-Path $machineAutodesk) -or (Test-Path $machineRoot)) {
+        return $machineRoot
+    }
+
+    Write-Warning "Default Autodesk folder was not found at $machineAutodesk."
+    if ($Browse) {
+        $picked = Select-InstallRoot $machineRoot
+        if ($picked) { return $picked }
+    }
+
+    if ([Environment]::UserInteractive) {
+        $choice = Read-Host "Press Enter to install per-user at $userRoot, or type B to browse"
+        if ($choice -match '^[Bb]') {
+            $picked = Select-InstallRoot $machineRoot
+            if ($picked) { return $picked }
+        }
+    }
+
+    return $userRoot
+}
+
 if ($env:OS -ne 'Windows_NT') { Fail 'Windows-only.' }
+
+$InstallRoot = Resolve-InstallRoot
+$BundleDir   = Join-Path $InstallRoot 'VexBridge.bundle'
+$BinDir      = Join-Path $BundleDir   'Contents\bin'
 
 # ── Download the bundle ───────────────────────────────────────────────────────
 Step "Fetching latest release from $Repo ..."
@@ -67,7 +135,18 @@ if (Test-Path $BundleDir) {
     Start-Sleep -Seconds 1
     Remove-Item -Recurse -Force $BundleDir
 }
-New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+try {
+    New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+} catch {
+    if ($PerUser -or $InstallRoot.StartsWith($env:APPDATA, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw
+    }
+    Write-Warning "Could not write to $InstallRoot ($($_.Exception.Message)). Falling back to per-user install."
+    $InstallRoot = Join-Path $env:APPDATA 'Autodesk\ApplicationPlugins'
+    $BundleDir   = Join-Path $InstallRoot 'VexBridge.bundle'
+    $BinDir      = Join-Path $BundleDir   'Contents\bin'
+    New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+}
 Expand-Archive -Path $tmpZip -DestinationPath $InstallRoot -Force
 Remove-Item -Force $tmpZip
 if (-not (Test-Path (Join-Path $BinDir 'vex-bridge.exe'))) {
@@ -106,6 +185,15 @@ Ok "Daemon started."
 Step "Opening pairing page in your browser ..."
 & (Join-Path $BinDir 'vex-bridge.exe') pair --device-label $env:COMPUTERNAME --open-browser
 
+$Guide = Join-Path $BundleDir 'Contents\Resources\EarlyAccessInstall.html'
+if (Test-Path $Guide) {
+    Step "Opening install guide ..."
+    Start-Process $Guide
+}
+
 Write-Host ""
 Write-Host "==> Done. Launch Revit — the Vex Atlas ribbon will appear under Add-Ins." -ForegroundColor Green
+Write-Host "    Installed bundle: $BundleDir"
+Write-Host "    Account setup:    https://studio.planmorph.software/register"
+Write-Host "    Sign in:          https://studio.planmorph.software/login"
 Write-Host ""

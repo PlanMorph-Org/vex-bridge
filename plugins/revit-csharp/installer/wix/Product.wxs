@@ -35,11 +35,12 @@
         plug-ins that require manual download steps after install.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+  xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package
       Name="vex-bridge for Revit"
       Manufacturer="Architur"
-      Version="0.2.12.0"
+      Version="0.2.13.0"
       UpgradeCode="C7B0A6E6-2A36-4D2C-8AAE-7D7E2F0E2F00"
       Scope="perMachine"
       Compressed="yes">
@@ -47,6 +48,8 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of vex-bridge for Revit is already installed."/>
 
     <MediaTemplate EmbedCab="yes"/>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="PluginsDir"/>
 
     <Feature Id="Main" Title="vex-bridge for Revit" Level="1">
       <ComponentGroupRef Id="BundleFiles"/>
@@ -130,6 +133,12 @@
                   Execute="deferred"
                   Impersonate="yes"
                   Return="ignore"/>
+        <CustomAction Id="OpenInstallGuide"
+                Directory="VexBridgeBundleDir"
+                ExeCommand='cmd.exe /C start &quot;&quot; &quot;[VexBridgeBundleDir]Contents\Resources\EarlyAccessInstall.html&quot;'
+                Execute="deferred"
+                Impersonate="yes"
+                Return="ignore"/>
     <CustomAction Id="UnregisterTask"
                   Directory="BundleBin"
                   ExeCommand='schtasks.exe /Delete /F /TN "vex-bridge"'
@@ -141,6 +150,7 @@
       <Custom Action="RegisterTask"   After="InstallFiles"  Condition="NOT Installed"/>
       <Custom Action="StartTask"      After="RegisterTask"  Condition="NOT Installed"/>
       <Custom Action="PairOpenBrowser" After="StartTask"    Condition="NOT Installed"/>
+      <Custom Action="OpenInstallGuide" After="PairOpenBrowser" Condition="NOT Installed"/>
       <Custom Action="UnregisterTask" Before="RemoveFiles"  Condition="REMOVE=&quot;ALL&quot;"/>
     </InstallExecuteSequence>
   </Package>

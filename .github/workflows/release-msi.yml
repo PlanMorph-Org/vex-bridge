@@ -85,6 +85,7 @@ jobs:
         run: |
           dotnet tool install --global wix --version 5.0.2
           wix extension add -g WixToolset.Util.wixext/5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
 
       - name: Cargo build vex.exe
         working-directory: vex
@@ -107,7 +108,7 @@ jobs:
         working-directory: vex-bridge/plugins/revit-csharp/installer
         run: |
           New-Item -ItemType Directory -Force -Path ../../../dist | Out-Null
-          wix build -arch x64 -ext WixToolset.Util.wixext wix/Product.wxs -out ../../../dist/VexBridgeRevit-${{ steps.vars.outputs.safe_ref_name }}.msi
+          wix build -arch x64 -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext wix/Product.wxs -out ../../../dist/VexBridgeRevit-${{ steps.vars.outputs.safe_ref_name }}.msi
 
       - name: Verify signing secrets are present
         id: signing

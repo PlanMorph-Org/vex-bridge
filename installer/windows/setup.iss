@@ -84,6 +84,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; workflow drops them into the same folder as this .iss before invoking iscc.
 Source: "vex.exe";        DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "vex-bridge.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "EarlyAccessInstall.html"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Vex Atlas (open studio)"; Filename: "https://studio.planmorph.software/dashboard"
@@ -110,6 +111,9 @@ Filename: "{cmd}"; Parameters: "/C schtasks /Run /TN ""vex-bridge"""; \
 Filename: "{app}\bin\vex-bridge.exe"; Parameters: "pair --device-label ""%COMPUTERNAME%"" --open-browser"; \
   Description: "Pair this device with my Vex Atlas account"; \
   Flags: postinstall nowait shellexec
+
+Filename: "{app}\docs\EarlyAccessInstall.html"; Description: "Open the Vex Atlas install and account guide"; \
+  Flags: postinstall shellexec skipifsilent
 
 [UninstallRun]
 ; Tear down the scheduled task before the files are removed.

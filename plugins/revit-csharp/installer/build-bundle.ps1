@@ -76,8 +76,10 @@ New-Item -ItemType Directory -Path $bundle, $contents, $resources, $binDir | Out
 
 Copy-Item (Join-Path $PSScriptRoot 'PackageContents.xml') $bundle
 Copy-Item (Join-Path $PSScriptRoot '../marketplace/ReadMe.html') $resources -ErrorAction SilentlyContinue
+Copy-Item (Join-Path $PSScriptRoot '../marketplace/EarlyAccessInstall.html') $resources -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $PSScriptRoot '../marketplace/LICENSE.txt') $resources -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $PSScriptRoot '../marketplace/icon.png')    $resources -ErrorAction SilentlyContinue
+Copy-Item (Join-Path $PSScriptRoot '../assets/vex-ribbon-32.png') $resources -ErrorAction SilentlyContinue
 
 # Ship the actual binaries the daemon + plugin shell out to. These end up
 # at: %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\bin\

@@ -72,6 +72,7 @@ plugins/
   generic-watch-folder/  ← Tier 3 instructions
 docs/
   adding-a-cad.md        ← how to add a new CAD adapter
+  early-access-distribution.md ← direct GitHub Release distribution plan
 ```
 
 ## Local API (v1)
