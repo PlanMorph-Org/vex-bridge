@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.2.14"
+version      = "0.2.15"
 edition      = "2021"
 license      = "Apache-2.0"
 authors      = ["Architur"]
@@ -36,7 +36,7 @@ sha2               = "0.10"
 base64             = "0.22"
 
 # OS integration
-keyring            = "2"          # cross-platform secret storage
+keyring            = "3"          # cross-platform secret storage
 directories        = "5"          # ~/.config/vex-bridge etc.
 # Use platform-native backends: kqueue on macOS, ReadDirectoryChangesW on Windows.
 # Default features auto-select the best backend per platform.

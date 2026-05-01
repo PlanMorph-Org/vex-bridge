@@ -66,7 +66,7 @@ pub fn load() -> BridgeResult<Option<SigningKey>> {
 pub fn forget() -> BridgeResult<()> {
     let entry =
         keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| BridgeError::Keychain(e.to_string()))?;
-    match entry.delete_password() {
+    match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(BridgeError::Keychain(e.to_string())),
     }
