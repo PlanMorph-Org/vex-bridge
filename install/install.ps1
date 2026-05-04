@@ -7,9 +7,10 @@
 .DESCRIPTION
     1. Downloads the latest vex and vex-bridge binaries from GitHub Releases.
     2. Installs both to %LOCALAPPDATA%\vex-bridge\bin and adds that to PATH.
-    3. Registers vex-bridge as a Task Scheduler task (auto-start at every login).
-    4. Starts the daemon immediately.
-    5. Opens your browser to the Architur setup/pairing page.
+    3. Installs Revit 2022-2027 add-ins to Autodesk's AddIns folders when possible.
+    4. Registers vex-bridge as a Task Scheduler task (auto-start at every login).
+    5. Starts the daemon immediately.
+    6. Opens your browser to the Architur setup/pairing page.
        Click Approve and this machine is ready.
 
 .EXAMPLE
@@ -25,6 +26,7 @@ $RepoBridge = if ($env:VEX_BRIDGE_GITHUB_REPO) { $env:VEX_BRIDGE_GITHUB_REPO } e
 $Suffix     = 'windows-x86_64'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'vex-bridge\bin'
 $TaskName   = 'vex-bridge'
+$RevitVersions = @('2022', '2023', '2024', '2025', '2026', '2027')
 
 function Step($msg)  { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Ok($msg)    { Write-Host "    $([char]0x2713) $msg" -ForegroundColor Green }
@@ -87,6 +89,81 @@ function Install-Release($repo, $tag, $archiveName, $binNames) {
     Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+function Find-ExtractedBundle([string] $ExtractDir) {
+    $direct = Join-Path $ExtractDir 'VexBridge.bundle'
+    if (Test-Path $direct) { return $direct }
+
+    $found = Get-ChildItem $ExtractDir -Directory -Filter 'VexBridge.bundle' -Recurse |
+        Select-Object -First 1 -ExpandProperty FullName
+    return $found
+}
+
+function Install-RevitAddInPayload($bundleDir, $version) {
+    $machineRoot = Join-Path $env:ProgramFiles "Autodesk\Revit $version\AddIns"
+    $userRoot    = Join-Path $env:APPDATA     "Autodesk\Revit\Addins\$version"
+    $revitRoot   = Split-Path -Parent $machineRoot
+    $installRoot = if ((Test-Path $revitRoot) -or (Test-Path $machineRoot)) { $machineRoot } else { $userRoot }
+    $addInDir    = Join-Path $installRoot 'VexBridge'
+    $binDir      = Join-Path $addInDir 'bin'
+    $rootAddIn   = Join-Path $installRoot 'VexBridgeRevit.addin'
+
+    $revitPayload = Join-Path $bundleDir "Contents\Revit\$version"
+    $bundleBin    = Join-Path $bundleDir 'Contents\bin'
+    if (-not (Test-Path $revitPayload)) { Fail "Bundle is missing Revit $version payload." }
+    if (-not (Test-Path (Join-Path $bundleBin 'vex-bridge.exe'))) { Fail 'Bundle is missing vex-bridge.exe.' }
+
+    try {
+        New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+    } catch {
+        if ($installRoot -ne $userRoot) {
+            Write-Warning "Could not write to $installRoot ($($_.Exception.Message)). Falling back to per-user Revit Addins install."
+            $installRoot = $userRoot
+            $addInDir    = Join-Path $installRoot 'VexBridge'
+            $binDir      = Join-Path $addInDir 'bin'
+            $rootAddIn   = Join-Path $installRoot 'VexBridgeRevit.addin'
+            New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+        } else {
+            throw
+        }
+    }
+
+    if (Test-Path $addInDir) { Remove-Item -Recurse -Force $addInDir }
+    New-Item -ItemType Directory -Force -Path $addInDir, $binDir | Out-Null
+    Copy-Item (Join-Path $revitPayload '*') $addInDir -Recurse -Force
+    Copy-Item (Join-Path $bundleBin '*') $binDir -Recurse -Force
+    $resources = Join-Path $bundleDir 'Contents\Resources'
+    if (Test-Path $resources) { Copy-Item $resources $addInDir -Recurse -Force }
+
+    $manifest = Get-Content (Join-Path $revitPayload 'VexBridgeRevit.addin') -Raw
+    $manifest = $manifest -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridge\VexBridgeRevit.dll</Assembly>'
+    $manifest | Out-File -FilePath $rootAddIn -Encoding UTF8 -Force
+
+    Ok "Installed Revit $version add-in -> $addInDir"
+}
+
+function Install-RevitAddIns($repo, $tag) {
+    $zipName = 'VexBridge-bundle.zip'
+    $url = "https://github.com/$repo/releases/download/$tag/$zipName"
+    $tmpZip = Join-Path $env:TEMP $zipName
+    $extractDir = Join-Path $env:TEMP ("vex-bridge-bundle-" + [Guid]::NewGuid().ToString('N'))
+
+    Step "Downloading Revit add-in bundle..."
+    Invoke-WebRequest -Uri $url -OutFile $tmpZip -UseBasicParsing
+    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+    Expand-Archive -Path $tmpZip -DestinationPath $extractDir -Force
+    Remove-Item $tmpZip -Force -ErrorAction SilentlyContinue
+
+    $bundleDir = Find-ExtractedBundle $extractDir
+    if (-not $bundleDir -or -not (Test-Path $bundleDir)) { Fail 'Extracted ZIP is missing VexBridge.bundle.' }
+
+    foreach ($version in $RevitVersions) {
+        Step "Installing Revit $version add-in..."
+        Install-RevitAddInPayload $bundleDir $version
+    }
+
+    Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+}
+
 # ── Fetch versions ────────────────────────────────────────────────────────────
 Step 'Fetching latest release versions...'
 $VexTag    = Get-LatestTag $RepoVex
@@ -100,6 +177,9 @@ Ok "vex-bridge $BridgeTag"
 Install-Release $RepoVex    $VexTag    "vex-$VexTag-$Suffix.tar.gz"        @('vex.exe')
 # ── Install vex-bridge ────────────────────────────────────────────────────────
 Install-Release $RepoBridge $BridgeTag "vex-bridge-$BridgeTag-$Suffix.tar.gz" @('vex-bridge.exe')
+
+# ── Install Revit add-in ──────────────────────────────────────────────────────
+Install-RevitAddIns $RepoBridge $BridgeTag
 
 # ── Task Scheduler — run vex-bridge at login ──────────────────────────────────
 Step 'Registering Task Scheduler task (auto-start at login)...'

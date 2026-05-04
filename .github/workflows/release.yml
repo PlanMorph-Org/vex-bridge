@@ -179,6 +179,40 @@ jobs:
              installer-stage/vex-bridge.exe
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
+      - name: Set up .NET SDKs for Revit add-ins
+        if: steps.fetch-vex.outputs.skip != 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Stage Revit add-ins
+        if: steps.fetch-vex.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revitVersions = @('2022', '2023', '2024', '2025', '2026', '2027')
+          foreach ($version in $revitVersions) {
+            $payload = Join-Path $env:GITHUB_WORKSPACE "installer-stage\revit\$version\VexBridge"
+            $bin = Join-Path $payload 'bin'
+            New-Item -ItemType Directory -Force -Path $payload, $bin | Out-Null
+
+            dotnet build "${env:GITHUB_WORKSPACE}\plugins\revit-csharp\VexBridgeRevit.csproj" `
+              -c Release `
+              -p:RevitVersion=$version `
+              -p:OutputPath="$payload\" `
+              --nologo
+            if ($LASTEXITCODE -ne 0) { throw "Revit $version add-in build failed: $LASTEXITCODE" }
+
+            Copy-Item -Force "${env:GITHUB_WORKSPACE}\installer-stage\vex.exe"        (Join-Path $bin 'vex.exe')
+            Copy-Item -Force "${env:GITHUB_WORKSPACE}\installer-stage\vex-bridge.exe" (Join-Path $bin 'vex-bridge.exe')
+
+            $addin = Get-Content "${env:GITHUB_WORKSPACE}\plugins\revit-csharp\VexBridgeRevit.addin" -Raw
+            $addin = $addin -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridge\VexBridgeRevit.dll</Assembly>'
+            Set-Content -Path "${env:GITHUB_WORKSPACE}\installer-stage\revit\$version\VexBridgeRevit.addin" -Value $addin -Encoding UTF8
+          }
+
       - name: Stage installer script
         if: steps.fetch-vex.outputs.skip != 'true'
         shell: bash

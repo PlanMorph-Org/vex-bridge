@@ -10,15 +10,15 @@
 
       - Stops + unregisters the 'vex-bridge' Scheduled Task
       - Calls 'vex-bridge unpair' to revoke the device key with the server
-      - Removes the Revit bundle from %ProgramData%\Autodesk\ApplicationPlugins
-        and %APPDATA%\Autodesk\ApplicationPlugins
+            - Removes Revit add-ins from C:\Program Files\Autodesk\Revit {year}\AddIns,
+                the per-user Revit Addins fallback, and legacy Autodesk ApplicationPlugins
       - Removes %LOCALAPPDATA%\vex-bridge (binaries + logs)
       - Removes %APPDATA%\vex-bridge (config + state + token) when -Purge
       - Removes %LOCALAPPDATA%\vex-bridge\bin from the user PATH
 
-    Per-user. No admin required (unless the Revit bundle was installed to
-    %ProgramData%, in which case admin is needed only to remove that one
-    folder — the script will tell you and skip it gracefully if not).
+    Per-user. No admin required unless the Revit add-in was installed to
+    Program Files or the legacy bundle was installed to %ProgramData%; the
+    script will tell you and skip those paths gracefully if not elevated.
 
 .PARAMETER Purge
     Also delete %APPDATA%\vex-bridge (config, state, access token,
@@ -51,6 +51,15 @@ $CliBinDir      = Join-Path $CliInstallDir    'bin'
 $DataDir        = Join-Path $env:APPDATA      'vex-bridge'
 $BundleSystem   = Join-Path $env:ProgramData  'Autodesk\ApplicationPlugins\VexBridge.bundle'
 $BundleUser     = Join-Path $env:APPDATA      'Autodesk\ApplicationPlugins\VexBridge.bundle'
+$RevitVersions  = @('2022', '2023', '2024', '2025', '2026', '2027')
+$RevitAddInPaths = foreach ($version in $RevitVersions) {
+    $systemRoot = Join-Path $env:ProgramFiles "Autodesk\Revit $version\AddIns"
+    $userRoot   = Join-Path $env:APPDATA      "Autodesk\Revit\Addins\$version"
+    Join-Path $systemRoot 'VexBridgeRevit.addin'
+    Join-Path $systemRoot 'VexBridge'
+    Join-Path $userRoot   'VexBridgeRevit.addin'
+    Join-Path $userRoot   'VexBridge'
+}
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 function Banner {
@@ -76,6 +85,9 @@ Banner
 $found = @()
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { $found += "Scheduled Task '$TaskName'" }
 if (Test-Path $CliBinDir)    { $found += "CLI            $CliBinDir" }
+foreach ($path in $RevitAddInPaths) {
+    if (Test-Path $path) { $found += "Revit add-in   $path" }
+}
 if (Test-Path $BundleSystem) { $found += "Revit bundle   $BundleSystem" }
 if (Test-Path $BundleUser)   { $found += "Revit bundle   $BundleUser" }
 if (Test-Path $DataDir)      { $found += "Config + keys  $DataDir" }
@@ -112,7 +124,7 @@ foreach ($candidate in @(
     (Join-Path $CliBinDir   'vex-bridge.exe'),
     (Join-Path $BundleSystem 'Contents\bin\vex-bridge.exe'),
     (Join-Path $BundleUser   'Contents\bin\vex-bridge.exe')
-)) {
+) + ($RevitAddInPaths | Where-Object { $_ -like '*\VexBridge' } | ForEach-Object { Join-Path $_ 'bin\vex-bridge.exe' })) {
     if (Test-Path $candidate) { $bridgeExe = $candidate; break }
 }
 if ($bridgeExe) {
@@ -161,9 +173,20 @@ if (Test-Path $CliInstallDir) {
     Skip 'Not installed'
 }
 
-# ── 5. Remove Revit bundle(s) ─────────────────────────────────────────────────
-Step 'Removing Revit add-in bundle(s)'
+# ── 5. Remove Revit add-in(s) ─────────────────────────────────────────────────
+Step 'Removing Revit add-in(s)'
 $removed = 0
+foreach ($path in $RevitAddInPaths) {
+    if (Test-Path $path) {
+        try {
+            Remove-Item -Recurse -Force $path -ErrorAction Stop
+            Ok "Removed $path"
+            $removed++
+        } catch {
+            Warn "Could not remove $path — needs admin. Run: Remove-Item -Recurse -Force '$path'"
+        }
+    }
+}
 foreach ($b in @($BundleSystem, $BundleUser)) {
     if (Test-Path $b) {
         try {
@@ -175,7 +198,7 @@ foreach ($b in @($BundleSystem, $BundleUser)) {
         }
     }
 }
-if ($removed -eq 0) { Skip 'No Revit bundle installed' }
+if ($removed -eq 0) { Skip 'No Revit add-in installed' }
 
 # ── 6. Remove from user PATH ──────────────────────────────────────────────────
 Step 'Cleaning user PATH'

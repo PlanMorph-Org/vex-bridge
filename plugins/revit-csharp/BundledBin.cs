@@ -6,10 +6,11 @@ using System.Reflection;
 namespace Architur.VexBridgeRevit;
 
 /// <summary>
-/// Locates the binaries we ship inside the Autodesk bundle. The Revit
-/// add-in is loaded from:
-///   %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\{year}\VexBridgeRevit.dll
-/// so the bundled CLI + daemon live one directory up at:
+/// Locates the binaries we ship beside the Revit add-in. Supported layouts:
+///   C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\VexBridgeRevit.dll
+///   C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\bin\
+/// and the legacy Autodesk bundle layout:
+///   %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\Revit\{year}\VexBridgeRevit.dll
 ///   %ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\Contents\bin\
 ///
 /// Falls back to whatever's on PATH (named `vex.exe` / `vex-bridge.exe`)
@@ -73,13 +74,26 @@ internal static class BundledBin
 
     private static string Resolve(string fileName)
     {
-        // 1. Sibling Contents\bin\ inside the Autodesk bundle.
+        // 1. Sibling bin\ inside the Revit AddIns payload.
+        //    DLL path: …\AddIns\VexBridge\VexBridgeRevit.dll
+        //    Bin path: …\AddIns\VexBridge\bin\{fileName}
+        var asm = Assembly.GetExecutingAssembly().Location;
+        if (!string.IsNullOrEmpty(asm))
+        {
+            var addInDir = Path.GetDirectoryName(asm);
+            if (!string.IsNullOrEmpty(addInDir))
+            {
+                var localBin = Path.Combine(addInDir, "bin", fileName);
+                if (File.Exists(localBin)) return localBin;
+            }
+        }
+
+        // 2. Sibling Contents\bin\ inside the Autodesk bundle.
         //    DLL path: …\Contents\Revit\{year}\VexBridgeRevit.dll
         //    Bin path: …\Contents\bin\{fileName}
         // Walk up looking for a directory named "Contents" so the lookup
         // keeps working if the bundle layout changes (e.g. legacy
         // Contents\{year}\ from <0.2.8 still works for in-place upgrades).
-        var asm = Assembly.GetExecutingAssembly().Location;
         if (!string.IsNullOrEmpty(asm))
         {
             var dir = Path.GetDirectoryName(asm);
@@ -95,7 +109,7 @@ internal static class BundledBin
             }
         }
 
-        // 2. Fall back to whatever's on PATH.
+        // 3. Fall back to whatever's on PATH.
         return fileName;
     }
 }

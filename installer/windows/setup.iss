@@ -6,19 +6,24 @@
 ;   • vex-bridge.exe  (local daemon, built in this repo)
 ;
 ; Outputs a single VexAtlasSetup.exe. Double-click → wizard → done.
-; No admin privileges required (PrivilegesRequired=lowest); installs into
+; Admin approval is required because Autodesk's Revit AddIns folders live
+; under Program Files. The CLI/daemon still install into
 ; %LOCALAPPDATA%\Programs\VexAtlas. After install:
 ;   1. Adds the bin folder to the user's PATH.
 ;   2. Registers a Task Scheduler task so vex-bridge auto-starts at login
 ;      and is running by the time the user opens any CAD plugin.
-;   3. Launches the daemon now (no reboot).
-;   4. Opens the user's browser at studio.planmorph.software/pair?code=…
+;   3. Installs add-ins for detected Revit 2022-2027 versions under
+;      C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge.
+;   4. Launches the daemon now (no reboot).
+;   5. Opens the user's browser at studio.planmorph.software/pair?code=…
 ;      so they can approve this device with one click — the only thing
 ;      they have to do outside the wizard.
 ;
 ; The installer is unsigned for now — Windows SmartScreen will warn the
 ; first user. We can add EV codesigning later by setting SignTool=… and
-; adding the certificate to the workflow.
+; adding the certificate to the workflow. Admin privileges are required so
+; the Revit add-ins can be installed into Autodesk's Program Files AddIns
+; directory.
 ; ─────────────────────────────────────────────────────────────────────────
 
 #ifndef Version
@@ -41,8 +46,7 @@ DisableProgramGroupPage=yes
 DisableDirPage=yes
 DisableReadyPage=no
 DisableWelcomePage=no
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequired=admin
 OutputBaseFilename=VexAtlasSetup
 Compression=lzma2/ultra
 SolidCompression=yes
@@ -66,12 +70,12 @@ ShowLanguageDialog=no
 ; not like a generic Windows installer. The {\tab} is intentional — Inno
 ; uses pipe-separated paragraphs in WelcomeLabel2 / FinishedLabel.
 WelcomeLabel1=Welcome to Vex Atlas
-WelcomeLabel2=This will install %1 on your computer.%n%nVex Atlas is version control for IFC and Revit models. The installer sets up the [code]vex[/code] CLI, starts the local [code]vex-bridge[/code] daemon, and opens your browser so you can pair this device — no terminal required.%n%nClick Next to continue.
+WelcomeLabel2=This will install %1 on your computer.%n%nVex Atlas is version control for IFC and Revit models. The installer sets up the [code]vex[/code] CLI, installs Revit 2022-2027 add-ins under Autodesk AddIns, starts the local [code]vex-bridge[/code] daemon, and opens your browser so you can pair this device — no terminal required.%n%nClick Next to continue.
 FinishedLabelNoIcons=Vex Atlas is installed. The pairing page is opening in your browser — approve this device once and you're done.
 FinishedLabel=Vex Atlas is installed. The pairing page is opening in your browser — approve this device once and you're done.
 ClickFinish=Click Finish to close the installer.
 ReadyLabel1=Ready to install
-ReadyLabel2a=Setup will now install Vex Atlas, register the daemon to start at every login, and open the pairing page in your browser.
+ReadyLabel2a=Setup will now install Vex Atlas, copy Revit add-ins to Autodesk AddIns, register the daemon to start at every login, and open the pairing page in your browser.
 ReadyMemoUserInfo=User information:
 ReadyMemoDir=Install location:
 ReadyMemoTasks=Additional tasks:
@@ -85,6 +89,32 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "vex.exe";        DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "vex-bridge.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "EarlyAccessInstall.html"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "revit\2022\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2022}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2022')
+Source: "revit\2022\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2022}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2022')
+Source: "revit\2023\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2023}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2023')
+Source: "revit\2023\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2023}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2023')
+Source: "revit\2024\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2024}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2024')
+Source: "revit\2024\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2024}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2024')
+Source: "revit\2025\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2025}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2025')
+Source: "revit\2025\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2025}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2025')
+Source: "revit\2026\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2026}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2026')
+Source: "revit\2026\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2026}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2026')
+Source: "revit\2027\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2027}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2027')
+Source: "revit\2027\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2027}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2027')
+
+[Dirs]
+Name: "{code:GetRevitAddInsDir|2022}"; Check: ShouldInstallRevitAddIn('2022')
+Name: "{code:GetRevitAddInPayloadDir|2022}"; Check: ShouldInstallRevitAddIn('2022')
+Name: "{code:GetRevitAddInsDir|2023}"; Check: ShouldInstallRevitAddIn('2023')
+Name: "{code:GetRevitAddInPayloadDir|2023}"; Check: ShouldInstallRevitAddIn('2023')
+Name: "{code:GetRevitAddInsDir|2024}"; Check: ShouldInstallRevitAddIn('2024')
+Name: "{code:GetRevitAddInPayloadDir|2024}"; Check: ShouldInstallRevitAddIn('2024')
+Name: "{code:GetRevitAddInsDir|2025}"; Check: ShouldInstallRevitAddIn('2025')
+Name: "{code:GetRevitAddInPayloadDir|2025}"; Check: ShouldInstallRevitAddIn('2025')
+Name: "{code:GetRevitAddInsDir|2026}"; Check: ShouldInstallRevitAddIn('2026')
+Name: "{code:GetRevitAddInPayloadDir|2026}"; Check: ShouldInstallRevitAddIn('2026')
+Name: "{code:GetRevitAddInsDir|2027}"; Check: ShouldInstallRevitAddIn('2027')
+Name: "{code:GetRevitAddInPayloadDir|2027}"; Check: ShouldInstallRevitAddIn('2027')
 
 [Icons]
 Name: "{group}\Vex Atlas (open studio)"; Filename: "https://studio.planmorph.software/dashboard"
@@ -120,6 +150,20 @@ Filename: "{app}\docs\EarlyAccessInstall.html"; Description: "Open the Vex Atlas
 Filename: "{cmd}"; Parameters: "/C schtasks /End /TN ""vex-bridge"""; Flags: runhidden; RunOnceId: "StopVexBridge"
 Filename: "{cmd}"; Parameters: "/C schtasks /Delete /F /TN ""vex-bridge"""; Flags: runhidden; RunOnceId: "DeleteVexBridge"
 
+[UninstallDelete]
+Type: files; Name: "{code:GetRevitAddInsDir|2022}\VexBridgeRevit.addin"
+Type: filesandordirs; Name: "{code:GetRevitAddInPayloadDir|2022}"
+Type: files; Name: "{code:GetRevitAddInsDir|2023}\VexBridgeRevit.addin"
+Type: filesandordirs; Name: "{code:GetRevitAddInPayloadDir|2023}"
+Type: files; Name: "{code:GetRevitAddInsDir|2024}\VexBridgeRevit.addin"
+Type: filesandordirs; Name: "{code:GetRevitAddInPayloadDir|2024}"
+Type: files; Name: "{code:GetRevitAddInsDir|2025}\VexBridgeRevit.addin"
+Type: filesandordirs; Name: "{code:GetRevitAddInPayloadDir|2025}"
+Type: files; Name: "{code:GetRevitAddInsDir|2026}\VexBridgeRevit.addin"
+Type: filesandordirs; Name: "{code:GetRevitAddInPayloadDir|2026}"
+Type: files; Name: "{code:GetRevitAddInsDir|2027}\VexBridgeRevit.addin"
+Type: filesandordirs; Name: "{code:GetRevitAddInPayloadDir|2027}"
+
 [Code]
 // ─── PATH management ──────────────────────────────────────────────────────
 // We append {app}\bin to the user's PATH so `vex` and `vex-bridge` work
@@ -129,6 +173,27 @@ Filename: "{cmd}"; Parameters: "/C schtasks /Delete /F /TN ""vex-bridge"""; Flag
 
 const
   EnvironmentKey = 'Environment';
+  RevitAddInFolder = 'VexBridge';
+
+function GetRevitRoot(Param: string): string;
+begin
+  Result := ExpandConstant('{commonpf}\Autodesk\Revit ' + Param);
+end;
+
+function GetRevitAddInsDir(Param: string): string;
+begin
+  Result := GetRevitRoot(Param) + '\AddIns';
+end;
+
+function GetRevitAddInPayloadDir(Param: string): string;
+begin
+  Result := GetRevitAddInsDir(Param) + '\' + RevitAddInFolder;
+end;
+
+function ShouldInstallRevitAddIn(Year: string): Boolean;
+begin
+  Result := DirExists(GetRevitRoot(Year)) or DirExists(GetRevitAddInsDir(Year));
+end;
 
 procedure EnvAddPath(Path: string);
 var

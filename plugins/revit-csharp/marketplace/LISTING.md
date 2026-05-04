@@ -75,6 +75,6 @@ Place final PNGs in `marketplace/screenshots/` before submission.
 - [ ] MSI installs cleanly into a clean Windows VM with Revit 2024 only.
 - [ ] After install, Revit shows the vex-bridge ribbon panel on the *Add-Ins* tab.
 - [ ] Clicking *Push* with no daemon running shows the documented error, not a crash.
-- [ ] Uninstalling via Add/Remove Programs leaves no files behind under `%ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle`.
+- [ ] Uninstalling via Add/Remove Programs leaves no files behind under `C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge` or `%ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle`.
 - [ ] `ReadMe.html` opens in the default browser when the App Store reviewer clicks Help.
 - [ ] App passes Autodesk's automated AVA (App Validation App) tooling.

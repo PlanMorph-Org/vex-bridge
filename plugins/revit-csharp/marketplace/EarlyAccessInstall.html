@@ -18,7 +18,7 @@
 </head>
 <body>
   <h1>Vex Atlas early access install</h1>
-  <p>This installer sets up the local <code>vex</code> CLI, the <code>vex-bridge</code> daemon, and the Revit/AutoCAD bundle used by the ribbon commands. Restart Revit after install; the <strong>vex-bridge</strong> panel appears on the Add-Ins tab.</p>
+  <p>This installer sets up the local <code>vex</code> CLI, the <code>vex-bridge</code> daemon, and the Revit add-in used by the ribbon commands. Restart Revit after install; the <strong>vex-bridge</strong> panel appears on the Add-Ins tab.</p>
 
   <div class="note">
     <strong>Unsigned early access build:</strong> Windows may show SmartScreen because the installer is not code-signed yet. Click <strong>More info</strong>, then <strong>Run anyway</strong>. This is expected for the early access release.
@@ -36,8 +36,9 @@
   <h2>Install locations</h2>
   <table>
     <tr><th>Scope</th><th>Folder</th></tr>
-    <tr><td>Machine-wide</td><td><code>C:\ProgramData\Autodesk\ApplicationPlugins\VexBridge.bundle\</code></td></tr>
-    <tr><td>Per-user fallback</td><td><code>%APPDATA%\Autodesk\ApplicationPlugins\VexBridge.bundle\</code></td></tr>
+    <tr><td>Machine-wide Revit 2022-2027 add-in</td><td><code>C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\</code></td></tr>
+    <tr><td>Machine-wide Revit 2022-2027 manifest</td><td><code>C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridgeRevit.addin</code></td></tr>
+    <tr><td>Per-user fallback</td><td><code>%APPDATA%\Autodesk\Revit\Addins\{year}\VexBridge\</code></td></tr>
     <tr><td>Daemon data</td><td><code>%APPDATA%\vex-bridge\</code></td></tr>
   </table>
 
