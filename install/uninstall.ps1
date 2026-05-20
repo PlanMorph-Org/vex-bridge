@@ -56,8 +56,10 @@ $RevitAddInPaths = foreach ($version in $RevitVersions) {
     $systemRoot = Join-Path $env:ProgramFiles "Autodesk\Revit $version\AddIns"
     $userRoot   = Join-Path $env:APPDATA      "Autodesk\Revit\Addins\$version"
     Join-Path $systemRoot 'VexBridgeRevit.addin'
+    Join-Path $systemRoot 'VexBridge\VexBridgeRevit.addin'
     Join-Path $systemRoot 'VexBridge'
     Join-Path $userRoot   'VexBridgeRevit.addin'
+    Join-Path $userRoot   'VexBridge\VexBridgeRevit.addin'
     Join-Path $userRoot   'VexBridge'
 }
 

@@ -105,7 +105,7 @@ function Install-RevitAddInPayload($bundleDir, $version) {
     $installRoot = if ((Test-Path $revitRoot) -or (Test-Path $machineRoot)) { $machineRoot } else { $userRoot }
     $addInDir    = Join-Path $installRoot 'VexBridge'
     $binDir      = Join-Path $addInDir 'bin'
-    $rootAddIn   = Join-Path $installRoot 'VexBridgeRevit.addin'
+    $folderAddIn = Join-Path $addInDir    'VexBridgeRevit.addin'
 
     $revitPayload = Join-Path $bundleDir "Contents\Revit\$version"
     $bundleBin    = Join-Path $bundleDir 'Contents\bin'
@@ -120,7 +120,7 @@ function Install-RevitAddInPayload($bundleDir, $version) {
             $installRoot = $userRoot
             $addInDir    = Join-Path $installRoot 'VexBridge'
             $binDir      = Join-Path $addInDir 'bin'
-            $rootAddIn   = Join-Path $installRoot 'VexBridgeRevit.addin'
+            $folderAddIn = Join-Path $addInDir    'VexBridgeRevit.addin'
             New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
         } else {
             throw
@@ -135,8 +135,9 @@ function Install-RevitAddInPayload($bundleDir, $version) {
     if (Test-Path $resources) { Copy-Item $resources $addInDir -Recurse -Force }
 
     $manifest = Get-Content (Join-Path $revitPayload 'VexBridgeRevit.addin') -Raw
-    $manifest = $manifest -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridge\VexBridgeRevit.dll</Assembly>'
-    $manifest | Out-File -FilePath $rootAddIn -Encoding UTF8 -Force
+    $manifest = $manifest -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridgeRevit.dll</Assembly>'
+    $manifest | Out-File -FilePath $folderAddIn -Encoding UTF8 -Force
+    Remove-Item (Join-Path $installRoot 'VexBridgeRevit.addin') -Force -ErrorAction SilentlyContinue
 
     Ok "Installed Revit $version add-in -> $addInDir"
 }

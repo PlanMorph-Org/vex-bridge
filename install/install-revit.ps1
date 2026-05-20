@@ -155,7 +155,7 @@ foreach ($version in $RevitVersions) {
     $InstallRoot = Resolve-InstallRoot $version
     $AddInDir    = Join-Path $InstallRoot 'VexBridge'
     $BinDir      = Join-Path $AddInDir    'bin'
-    $RootAddIn   = Join-Path $InstallRoot 'VexBridgeRevit.addin'
+    $FolderAddIn = Join-Path $AddInDir    'VexBridgeRevit.addin'
     $RevitPayload = Join-Path $BundleDir "Contents\Revit\$version"
 
     Step "Installing Revit $version add-in to $AddInDir ..."
@@ -176,7 +176,7 @@ foreach ($version in $RevitVersions) {
         $InstallRoot = Join-Path $env:APPDATA "Autodesk\Revit\Addins\$version"
         $AddInDir    = Join-Path $InstallRoot 'VexBridge'
         $BinDir      = Join-Path $AddInDir    'bin'
-        $RootAddIn   = Join-Path $InstallRoot 'VexBridgeRevit.addin'
+        $FolderAddIn = Join-Path $AddInDir    'VexBridgeRevit.addin'
         New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
     }
 
@@ -189,9 +189,10 @@ foreach ($version in $RevitVersions) {
     }
 
     $manifest = Get-Content (Join-Path $RevitPayload 'VexBridgeRevit.addin') -Raw
-    $manifest = $manifest -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridge\VexBridgeRevit.dll</Assembly>'
-    $manifest | Out-File -FilePath $RootAddIn -Encoding UTF8 -Force
-    $InstalledAddIns += [pscustomobject]@{ Version = $version; RootAddIn = $RootAddIn; AddInDir = $AddInDir; BinDir = $BinDir }
+    $manifest = $manifest -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridgeRevit.dll</Assembly>'
+    $manifest | Out-File -FilePath $FolderAddIn -Encoding UTF8 -Force
+    Remove-Item (Join-Path $InstallRoot 'VexBridgeRevit.addin') -Force -ErrorAction SilentlyContinue
+    $InstalledAddIns += [pscustomobject]@{ Version = $version; Manifest = $FolderAddIn; AddInDir = $AddInDir; BinDir = $BinDir }
     Ok "Revit $version add-in extracted."
 }
 
@@ -240,7 +241,7 @@ if (Test-Path $Guide) {
 Write-Host ""
 Write-Host "==> Done. Launch Revit — the Vex Atlas ribbon will appear under Add-Ins." -ForegroundColor Green
 foreach ($install in $InstalledAddIns) {
-    Write-Host "    Revit $($install.Version) manifest: $($install.RootAddIn)"
+    Write-Host "    Revit $($install.Version) manifest: $($install.Manifest)"
     Write-Host "    Revit $($install.Version) folder:   $($install.AddInDir)"
 }
 Write-Host "    Account setup:    https://studio.planmorph.software/register"

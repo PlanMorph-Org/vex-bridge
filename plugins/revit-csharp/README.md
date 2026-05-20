@@ -48,15 +48,14 @@ per-year Revit payloads and installs them into Autodesk's Revit AddIns
 folders for every detected Revit version from 2022 through 2027:
 
 ```text
-C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridgeRevit.addin
 C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\VexBridgeRevit.dll
+C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\VexBridgeRevit.addin
 C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\bin\vex.exe
 C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\bin\vex-bridge.exe
 ```
 
-The root `.addin` manifest points at `VexBridge\VexBridgeRevit.dll` so Revit
-loads the add-in from the standard Autodesk AddIns path, while `BundledBin`
-finds the daemon and CLI in the sibling `bin` folder.
+The `.addin` manifest lives inside the same `VexBridge` folder as the add-in
+DLLs, while `BundledBin` finds the daemon and CLI in the sibling `bin` folder.
 
 ## Build (Autodesk Bundle, what real users install)
 

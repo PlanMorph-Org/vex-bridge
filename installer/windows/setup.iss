@@ -12,7 +12,8 @@
 ;   1. Adds the bin folder to the user's PATH.
 ;   2. Registers a Task Scheduler task so vex-bridge auto-starts at login
 ;      and is running by the time the user opens any CAD plugin.
-;   3. Installs add-ins for detected Revit 2022-2027 versions under
+;   3. Installs self-contained add-in folders for detected Revit
+;      2022-2027 versions under
 ;      C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge.
 ;   4. Launches the daemon now (no reboot).
 ;   5. Opens the user's browser at studio.planmorph.software/pair?code=…
@@ -75,7 +76,7 @@ FinishedLabelNoIcons=Vex Atlas is installed. The pairing page is opening in your
 FinishedLabel=Vex Atlas is installed. The pairing page is opening in your browser — approve this device once and you're done.
 ClickFinish=Click Finish to close the installer.
 ReadyLabel1=Ready to install
-ReadyLabel2a=Setup will now install Vex Atlas, copy Revit add-ins to Autodesk AddIns, register the daemon to start at every login, and open the pairing page in your browser.
+ReadyLabel2a=Setup will now install Vex Atlas, copy each Revit add-in folder to Autodesk AddIns, register the daemon to start at every login, and open the pairing page in your browser.
 ReadyMemoUserInfo=User information:
 ReadyMemoDir=Install location:
 ReadyMemoTasks=Additional tasks:
@@ -90,17 +91,11 @@ Source: "vex.exe";        DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "vex-bridge.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "EarlyAccessInstall.html"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "revit\2022\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2022}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2022')
-Source: "revit\2022\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2022}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2022')
 Source: "revit\2023\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2023}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2023')
-Source: "revit\2023\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2023}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2023')
 Source: "revit\2024\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2024}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2024')
-Source: "revit\2024\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2024}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2024')
 Source: "revit\2025\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2025}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2025')
-Source: "revit\2025\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2025}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2025')
 Source: "revit\2026\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2026}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2026')
-Source: "revit\2026\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2026}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2026')
 Source: "revit\2027\VexBridge\*"; DestDir: "{code:GetRevitAddInPayloadDir|2027}"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallRevitAddIn('2027')
-Source: "revit\2027\VexBridgeRevit.addin"; DestDir: "{code:GetRevitAddInsDir|2027}"; Flags: ignoreversion; Check: ShouldInstallRevitAddIn('2027')
 
 [Dirs]
 Name: "{code:GetRevitAddInsDir|2022}"; Check: ShouldInstallRevitAddIn('2022')
@@ -151,6 +146,8 @@ Filename: "{cmd}"; Parameters: "/C schtasks /End /TN ""vex-bridge"""; Flags: run
 Filename: "{cmd}"; Parameters: "/C schtasks /Delete /F /TN ""vex-bridge"""; Flags: runhidden; RunOnceId: "DeleteVexBridge"
 
 [UninstallDelete]
+; Remove the self-contained add-in folder. The root manifest entries are
+; retained as best-effort cleanup for older installer builds.
 Type: files; Name: "{code:GetRevitAddInsDir|2022}\VexBridgeRevit.addin"
 Type: filesandordirs; Name: "{code:GetRevitAddInPayloadDir|2022}"
 Type: files; Name: "{code:GetRevitAddInsDir|2023}\VexBridgeRevit.addin"

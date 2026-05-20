@@ -209,8 +209,8 @@ jobs:
             Copy-Item -Force "${env:GITHUB_WORKSPACE}\installer-stage\vex-bridge.exe" (Join-Path $bin 'vex-bridge.exe')
 
             $addin = Get-Content "${env:GITHUB_WORKSPACE}\plugins\revit-csharp\VexBridgeRevit.addin" -Raw
-            $addin = $addin -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridge\VexBridgeRevit.dll</Assembly>'
-            Set-Content -Path "${env:GITHUB_WORKSPACE}\installer-stage\revit\$version\VexBridgeRevit.addin" -Value $addin -Encoding UTF8
+            $addin = $addin -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridgeRevit.dll</Assembly>'
+            Set-Content -Path (Join-Path $payload 'VexBridgeRevit.addin') -Value $addin -Encoding UTF8
           }
 
       - name: Stage installer script
