@@ -290,7 +290,8 @@ async fn handle_project_history(
 ) -> Result<Json<proto::ProjectHistoryResponse>, Response> {
     require_token(&headers, &state.access_token)?;
     let cfg = state.config.read().await.clone();
-    let entry = find_watch_entry(&cfg, &project_id)?;
+    let entry =
+        find_watch_entry(&cfg, &project_id).ok_or_else(|| unknown_project_response(&project_id))?;
     let dir = PathBuf::from(&entry.path);
     let log = vex_cli::log_json(&cfg.vex_bin, &dir)
         .await
@@ -311,7 +312,8 @@ async fn handle_project_changes(
     require_token(&headers, &state.access_token)?;
     let cfg = state.config.read().await.clone();
     let daemon_state = state.state.read().await.clone();
-    let entry = find_watch_entry(&cfg, &project_id)?;
+    let entry =
+        find_watch_entry(&cfg, &project_id).ok_or_else(|| unknown_project_response(&project_id))?;
     let dir = PathBuf::from(&entry.path);
     let log = vex_cli::log_json(&cfg.vex_bin, &dir)
         .await
@@ -596,17 +598,18 @@ fn watch_status_from(
     }
 }
 
-fn find_watch_entry(cfg: &Config, project_id: &str) -> Result<crate::config::WatchEntry, Response> {
+fn find_watch_entry(cfg: &Config, project_id: &str) -> Option<crate::config::WatchEntry> {
     cfg.watch
         .iter()
         .find(|watch| watch.project_id == project_id)
         .cloned()
-        .ok_or_else(|| {
-            err_response(
-                StatusCode::NOT_FOUND,
-                BridgeError::Config(format!("unknown project_id `{project_id}`")),
-            )
-        })
+}
+
+fn unknown_project_response(project_id: &str) -> Response {
+    err_response(
+        StatusCode::NOT_FOUND,
+        BridgeError::Config(format!("unknown project_id `{project_id}`")),
+    )
 }
 
 fn commits_from_log(value: serde_json::Value) -> Vec<proto::CommitSummary> {

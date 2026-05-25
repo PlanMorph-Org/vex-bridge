@@ -38,6 +38,26 @@ pub struct WatchPipeline {
     _handle: WatchHandle,
 }
 
+struct PipelineRun {
+    bin: String,
+    dir: PathBuf,
+    api_base: String,
+    entry: WatchEntry,
+    changed: PathBuf,
+    author_name: Option<String>,
+    author_email: Option<String>,
+    state: Arc<RwLock<State>>,
+    paths: Arc<Paths>,
+}
+
+struct ActivityDetails {
+    kind: proto::ActivityKind,
+    commit_hash: Option<String>,
+    content_hash: Option<String>,
+    message: String,
+    detail: Option<String>,
+}
+
 /// Spin up one debounced watcher per `[[watch]]` entry. Returns the live
 /// handles so the caller can keep them alive.
 pub fn spawn_all(
@@ -104,17 +124,17 @@ pub fn spawn_entry(
         let paths = paths.clone();
         runtime.spawn(async move {
             let _g = lock.lock().await;
-            if let Err(e) = run_pipeline(
-                &bin,
-                &dir,
-                &api_base,
-                &entry,
-                &changed,
-                author_name.as_deref(),
-                author_email.as_deref(),
-                state.clone(),
-                paths.clone(),
-            )
+            if let Err(e) = run_pipeline(PipelineRun {
+                bin: bin.clone(),
+                dir: dir.clone(),
+                api_base: api_base.clone(),
+                entry: entry.clone(),
+                changed: changed.clone(),
+                author_name: author_name.clone(),
+                author_email: author_email.clone(),
+                state: state.clone(),
+                paths: paths.clone(),
+            })
             .await
             {
                 record_activity(
@@ -124,11 +144,13 @@ pub fn spawn_entry(
                         &entry,
                         &dir,
                         &changed,
-                        proto::ActivityKind::Error,
-                        None,
-                        None,
-                        format!("Could not process {}", file_label(&changed)),
-                        Some(e.to_string()),
+                        ActivityDetails {
+                            kind: proto::ActivityKind::Error,
+                            commit_hash: None,
+                            content_hash: None,
+                            message: format!("Could not process {}", file_label(&changed)),
+                            detail: Some(e.to_string()),
+                        },
                     ),
                 )
                 .await;
@@ -144,17 +166,26 @@ pub fn spawn_entry(
     })
 }
 
-async fn run_pipeline(
-    bin: &str,
-    dir: &Path,
-    api_base: &str,
-    entry: &WatchEntry,
-    changed: &Path,
-    author_name: Option<&str>,
-    author_email: Option<&str>,
-    state: Arc<RwLock<State>>,
-    paths: Arc<Paths>,
-) -> BridgeResult<()> {
+async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
+    let PipelineRun {
+        bin,
+        dir,
+        api_base,
+        entry,
+        changed,
+        author_name,
+        author_email,
+        state,
+        paths,
+    } = run;
+    let bin = bin.as_str();
+    let dir = dir.as_path();
+    let api_base = api_base.as_str();
+    let changed = changed.as_path();
+    let author_name = author_name.as_deref();
+    let author_email = author_email.as_deref();
+    let entry = &entry;
+
     wait_for_stable_file(changed).await?;
 
     record_activity(
@@ -164,11 +195,13 @@ async fn run_pipeline(
             entry,
             dir,
             changed,
-            proto::ActivityKind::ProcessingStarted,
-            None,
-            None,
-            format!("Processing {}", file_label(changed)),
-            None,
+            ActivityDetails {
+                kind: proto::ActivityKind::ProcessingStarted,
+                commit_hash: None,
+                content_hash: None,
+                message: format!("Processing {}", file_label(changed)),
+                detail: None,
+            },
         ),
     )
     .await;
@@ -183,11 +216,13 @@ async fn run_pipeline(
                 entry,
                 dir,
                 changed,
-                proto::ActivityKind::DuplicateSkipped,
-                None,
-                Some(content_hash.clone()),
-                format!("Skipped duplicate {}", file_label(changed)),
-                None,
+                ActivityDetails {
+                    kind: proto::ActivityKind::DuplicateSkipped,
+                    commit_hash: None,
+                    content_hash: Some(content_hash.clone()),
+                    message: format!("Skipped duplicate {}", file_label(changed)),
+                    detail: None,
+                },
             ),
         )
         .await;
@@ -214,15 +249,17 @@ async fn run_pipeline(
                 entry,
                 dir,
                 changed,
-                proto::ActivityKind::RouteSkipped,
-                None,
-                Some(content_hash.clone()),
-                format!("Skipped unmatched IFC {}", file_label(changed)),
-                Some(format!(
-                    "expected {:?}, actual {:?}",
-                    entry.ifc_project_guid,
-                    intake.routing_key()
-                )),
+                ActivityDetails {
+                    kind: proto::ActivityKind::RouteSkipped,
+                    commit_hash: None,
+                    content_hash: Some(content_hash.clone()),
+                    message: format!("Skipped unmatched IFC {}", file_label(changed)),
+                    detail: Some(format!(
+                        "expected {:?}, actual {:?}",
+                        entry.ifc_project_guid,
+                        intake.routing_key()
+                    )),
+                },
             ),
         )
         .await;
@@ -253,11 +290,13 @@ async fn run_pipeline(
                         entry,
                         dir,
                         changed,
-                        proto::ActivityKind::NoChanges,
-                        None,
-                        Some(content_hash.clone()),
-                        format!("No changes in {}", file_label(changed)),
-                        None,
+                        ActivityDetails {
+                            kind: proto::ActivityKind::NoChanges,
+                            commit_hash: None,
+                            content_hash: Some(content_hash.clone()),
+                            message: format!("No changes in {}", file_label(changed)),
+                            detail: None,
+                        },
                     ),
                 )
                 .await;
@@ -284,11 +323,13 @@ async fn run_pipeline(
             entry,
             dir,
             changed,
-            proto::ActivityKind::CommitCreated,
-            Some(hash.clone()),
-            Some(content_hash.clone()),
-            msg.clone(),
-            Some(format!("pushed {hash}")),
+            ActivityDetails {
+                kind: proto::ActivityKind::CommitCreated,
+                commit_hash: Some(hash.clone()),
+                content_hash: Some(content_hash.clone()),
+                message: msg.clone(),
+                detail: Some(format!("pushed {hash}")),
+            },
         ));
         state.save(&paths)?;
     }
@@ -370,12 +411,15 @@ fn activity_event(
     entry: &WatchEntry,
     dir: &Path,
     changed: &Path,
-    kind: proto::ActivityKind,
-    commit_hash: Option<String>,
-    content_hash: Option<String>,
-    message: String,
-    detail: Option<String>,
+    details: ActivityDetails,
 ) -> proto::ActivityEvent {
+    let ActivityDetails {
+        kind,
+        commit_hash,
+        content_hash,
+        message,
+        detail,
+    } = details;
     let caught_at_unix = crate::state::now_unix();
     let event_nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
