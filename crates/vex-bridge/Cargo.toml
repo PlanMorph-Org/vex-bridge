@@ -9,9 +9,19 @@ description = "Local daemon that lets any CAD plugin push to architur over a tin
 name = "vex-bridge"
 path = "src/main.rs"
 
+[[bin]]
+name = "vex-tray"
+path = "src/tray_main.rs"
+required-features = ["tray"]
+
 [lib]
 name = "vex_bridge"
 path = "src/lib.rs"
+
+[features]
+default = []
+tray = ["tray-icon-asset", "dep:tao", "dep:tray-icon"]
+tray-icon-asset = ["dep:png"]
 
 [dependencies]
 vex-bridge-protocol = { path = "../vex-bridge-protocol" }
@@ -31,9 +41,13 @@ reqwest            = { workspace = true }
 ed25519-dalek      = { workspace = true }
 rand               = { workspace = true }
 sha2               = { workspace = true }
+blake3             = { workspace = true }
 base64             = { workspace = true }
 keyring            = { workspace = true }
 directories        = { workspace = true }
 notify             = { workspace = true }
 clap               = { workspace = true }
 open               = { workspace = true }
+png                = { workspace = true, optional = true }
+tao                = { workspace = true, optional = true }
+tray-icon          = { workspace = true, optional = true }

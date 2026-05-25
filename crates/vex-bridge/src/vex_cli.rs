@@ -2,12 +2,14 @@
 //! `ProcessStartInfo`-equivalent argument vectors — never concatenated into a
 //! shell string — so nothing the user types becomes a shell metacharacter.
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 
 use tokio::process::Command;
 
 use crate::errors::{BridgeError, BridgeResult};
+use crate::ifc::IfcIntake;
 
 pub struct VexRun {
     pub status: i32,
@@ -61,12 +63,35 @@ pub async fn init_repo(bin: &str, dir: &Path) -> BridgeResult<()> {
     Ok(())
 }
 
-pub async fn add_all(bin: &str, dir: &Path) -> BridgeResult<()> {
-    let r = run(bin, Some(dir), ["add", "."]).await?;
+pub async fn import_file(bin: &str, dir: &Path, file: &Path) -> BridgeResult<String> {
+    let args: Vec<OsString> = vec![
+        "--json".into(),
+        "import".into(),
+        file.as_os_str().to_os_string(),
+    ];
+    let r = run(bin, Some(dir), args).await?;
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }
-    Ok(())
+    let value: serde_json::Value = serde_json::from_str(&r.stdout)?;
+    value
+        .get("tree")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| BridgeError::VexCli("vex import did not return a tree hash".into()))
+}
+
+pub async fn ifc_intake(bin: &str, file: &Path) -> BridgeResult<IfcIntake> {
+    let args: Vec<OsString> = vec![
+        "--json".into(),
+        "ifc-intake".into(),
+        file.as_os_str().to_os_string(),
+    ];
+    let r = run(bin, None, args).await?;
+    if !r.ok() {
+        return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
+    }
+    Ok(serde_json::from_str(&r.stdout)?)
 }
 
 pub async fn commit(
@@ -75,7 +100,12 @@ pub async fn commit(
     message: &str,
     author: Option<(&str, &str)>,
 ) -> BridgeResult<String> {
-    let mut args: Vec<String> = vec!["commit".into(), "-m".into(), message.into()];
+    let mut args: Vec<String> = vec![
+        "--json".into(),
+        "commit".into(),
+        "-m".into(),
+        message.into(),
+    ];
     if let Some((name, email)) = author {
         args.push("--author".into());
         args.push(name.into());
@@ -86,15 +116,12 @@ pub async fn commit(
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }
-    // The CLI prints "Created commit <hash>" — pull the hash out.
-    let hash = r
-        .stdout
-        .split_whitespace()
-        .last()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    Ok(hash)
+    let value: serde_json::Value = serde_json::from_str(&r.stdout)?;
+    value
+        .get("commit")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| BridgeError::VexCli("vex commit did not return a commit hash".into()))
 }
 
 pub async fn push(bin: &str, dir: &Path, remote: &str, branch: &str) -> BridgeResult<()> {
@@ -103,4 +130,33 @@ pub async fn push(bin: &str, dir: &Path, remote: &str, branch: &str) -> BridgeRe
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }
     Ok(())
+}
+
+pub async fn log_json(bin: &str, dir: &Path) -> BridgeResult<serde_json::Value> {
+    let r = run(bin, Some(dir), ["--json", "log"]).await?;
+    if !r.ok() {
+        return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
+    }
+    Ok(serde_json::from_str(&r.stdout)?)
+}
+
+pub async fn changes_json(bin: &str, dir: &Path) -> BridgeResult<serde_json::Value> {
+    let r = run(bin, Some(dir), ["--json", "changes"]).await?;
+    if !r.ok() {
+        return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
+    }
+    Ok(serde_json::from_str(&r.stdout)?)
+}
+
+pub async fn compare_json(
+    bin: &str,
+    dir: &Path,
+    from: &str,
+    to: &str,
+) -> BridgeResult<serde_json::Value> {
+    let r = run(bin, Some(dir), ["--json", "compare", from, to]).await?;
+    if !r.ok() {
+        return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
+    }
+    Ok(serde_json::from_str(&r.stdout)?)
 }

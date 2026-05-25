@@ -1,60 +1,70 @@
 # Early Access Distribution
 
-Use direct distribution until there is enough customer pull to justify the
-Autodesk App Store review cycle.
+Use direct distribution for the standalone Vex desktop agent. The MVP path is
+the IFC inbox workflow; no Revit, AutoCAD, Autodesk account, or plug-in install
+is required.
 
 ## What to ship now
 
 1. Build a tagged GitHub Release from this repository.
-2. Send firms the Windows installer asset from the release:
-   `VexAtlasSetup-<tag>-windows-x86_64.exe`.
-3. For Revit-heavy beta users, send the cert-free bundle installer instead:
-   `install-revit.ps1`, which downloads `VexBridge-bundle.zip` from the latest
-   release and installs it under Autodesk's ApplicationPlugins folder.
-4. Include this SmartScreen note in outreach:
+2. Send firms the matching raw binary bundle from the release:
+   `vex-bridge-<tag>-windows-x86_64.tar.gz`,
+   `vex-bridge-<tag>-macos-arm64.tar.gz`, or
+   `vex-bridge-<tag>-macos-x86_64.tar.gz`.
+3. Include this early-access note in outreach:
 
-   > This is early access software. Windows may show a SmartScreen warning
-   > because we have not purchased a code signing certificate yet. Click
-   > **More info**, then **Run anyway**.
+   > This is early access software. The release ships raw desktop-agent
+   > binaries, not an installer. Extract the bundle, keep `vex`, `vex-bridge`,
+   > and `vex-tray` together, and launch the daemon/tray from your normal
+   > startup mechanism while we validate the standalone workflow.
 
-## Revit install behavior
+The release workflow downloads the matching platform `vex` bundle from the
+latest `Planmorph-Org/vex` GitHub Release. Set the repository variable
+`VEX_RELEASE_TAG` when a bridge release must pin a specific engine version. If
+the engine repository is private to Actions, set `VEX_RELEASE_TOKEN` with read
+access to that release.
 
-The supported Revit install unit is the Autodesk bundle:
+## Standalone install behavior
 
-```text
-C:\ProgramData\Autodesk\ApplicationPlugins\VexBridge.bundle\
-```
-
-If the machine-wide Autodesk folder is missing or not writable,
-`install-revit.ps1` lets the user browse for an Autodesk ApplicationPlugins
-folder, then falls back to the per-user location:
+The supported install unit is the desktop agent:
 
 ```text
-%APPDATA%\Autodesk\ApplicationPlugins\VexBridge.bundle\
+vex-bridge(.exe)
+vex-tray(.exe)
+vex(.exe)
 ```
 
-The bundle includes:
+The bundle:
 
-- `vex.exe`
-- `vex-bridge.exe`
-- Revit add-ins for 2022 through 2027
-- AutoCAD add-ins for 2024 through 2027
-- `EarlyAccessInstall.html`, opened after install
+- includes the daemon, tray, and matching `vex` engine binaries,
+- includes `SHA256SUMS` for the bundled files,
+- does not register login items, scheduled tasks, launchd agents, or services,
+- leaves startup, pairing, and project/inbox registration to the user, the
+   Architur setup UI, or
+  `/v1/repo/register`.
+
+Keep the three binaries in the same directory. If `config.toml` does not set
+`vex_bin`, `vex-bridge` automatically uses the bundled `vex` binary next to the
+running daemon/tray and only falls back to `vex` on `PATH` when no bundled copy
+exists.
 
 ## Account connection
 
-Users connect the installed add-in to Architur by clicking **Pair this device**
-in Revit. The browser opens to:
+Users connect the installed daemon to Architur through the browser pairing flow:
 
 ```text
 https://studio.planmorph.software/pair?code=<code>
 ```
 
-If they are not signed in, they can sign in at `/login` or create an account at
-`/register`; both flows return to the pairing approval page.
+After pairing, users choose or create an IFC inbox folder in the setup UI. From
+there, they export IFC from any CAD tool into that folder and `vex-bridge`
+imports, commits, pushes, and archives the export automatically.
 
-## App Store timing
+## Revit and AutoCAD
 
-Keep `docs/autodesk-app-store.md` as the future submission checklist. Do not
-block early customer conversations on Autodesk review, code signing, or listing
-metadata.
+Revit and AutoCAD plug-ins remain source-code examples for future Tier 1
+accelerators, but they are not built, published, or installed by the standalone
+release workflow.
+
+Do not block early customer conversations on Autodesk review, code signing, or
+listing metadata.

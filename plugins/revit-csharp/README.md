@@ -1,125 +1,46 @@
 # vex-bridge for Revit
 
-Revit ribbon plug-in. The MSI is **completely self-contained** — it
-ships the `vex.exe` CLI and the `vex-bridge.exe` daemon inside the
-bundle, registers a per-user Scheduled Task that auto-starts the daemon
-at every login, and the *Pair* button drives the whole pairing flow
-in-process (no console window, no terminal, no separate downloads).
-An architect can install from the Autodesk App Store and click *Pair*
-without ever opening a shell.
+Optional Revit ribbon plug-in source. The standalone Vex product does not ship
+or require this plug-in; the MVP workflow is exporting IFC into a Vex inbox
+folder watched by `vex-bridge`.
 
-```
+This project remains as a Tier 1 accelerator for a future workflow where Revit
+can trigger the same underlying daemon pipeline from a ribbon button.
+
+## Layout
+
+```text
 plugins/revit-csharp/
 ├── Application.cs          # ribbon panel + ensures daemon is running on Revit start
 ├── PushCommand.cs          # opens picker, hits POST /v1/repo/push
-├── PairCommand.cs          # in-process pair flow — opens browser, polls /pair/status
-├── BridgeClient.cs         # tiny HTTP client over the loopback daemon
-├── BundledBin.cs           # locates bundled vex.exe + vex-bridge.exe; starts daemon hidden
+├── PairCommand.cs          # in-process pair flow over the local daemon
+├── BridgeClient.cs         # tiny HTTP client over loopback
+├── BundledBin.cs           # locates bundled binaries for developer/plugin builds
 ├── ProjectPickerDialog.cs  # WinForms modal: project id + branch
 ├── VexBridgeRevit.csproj
-├── VexBridgeRevit.addin    # Revit add-in manifest
-├── installer/
-│   ├── PackageContents.xml # Autodesk Bundle manifest
-│   ├── build-bundle.ps1    # composes dist/VexBridge.bundle/ incl. bin/vex.exe + vex-bridge.exe
-│   └── wix/Product.wxs     # MSI for Autodesk App Store submission + ScheduledTask registration
-└── marketplace/
-    ├── LISTING.md          # App Store listing copy
-    ├── ReadMe.html         # required Help file inside the bundle
-    ├── LICENSE.txt
-    ├── icon.png            # 512×512, no shadow
-    └── screenshots/        # 1280×800 + 1920×1080 PNGs
+└── VexBridgeRevit.addin    # Revit add-in manifest
 ```
 
-## Build (developer install)
+## Developer Build
 
 ```powershell
 dotnet build VexBridgeRevit.csproj -c Release -p:RevitVersion=2024
 ```
 
-Then drop the `.dll` and `.addin` into:
-`%APPDATA%\Autodesk\Revit\Addins\2024\`
-
-Open Revit → *Add-Ins* tab → vex-bridge panel → *Push to architur*.
-
-## Build (Vex Atlas Windows installer)
-
-The user-facing `VexAtlasSetup.exe` built by the release workflow stages
-per-year Revit payloads and installs them into Autodesk's Revit AddIns
-folders for every detected Revit version from 2022 through 2027:
+For local testing, copy the built `.dll` and `.addin` into the per-user Revit
+add-in folder for the target year:
 
 ```text
-C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\VexBridgeRevit.dll
-C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\VexBridgeRevit.addin
-C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\bin\vex.exe
-C:\Program Files\Autodesk\Revit {year}\AddIns\VexBridge\bin\vex-bridge.exe
+%APPDATA%\Autodesk\Revit\Addins\2024\
 ```
 
-The `.addin` manifest lives inside the same `VexBridge` folder as the add-in
-DLLs, while `BundledBin` finds the daemon and CLI in the sibling `bin` folder.
+Open Revit, then use the Vex panel from the Add-Ins tab. The plug-in expects a
+running `vex-bridge` daemon and calls the same localhost API used by the
+standalone workflow.
 
-## Build (Autodesk Bundle, what real users install)
+## Runtime Shape
 
-`build-bundle.ps1` requires prebuilt `vex.exe` and `vex-bridge.exe` to
-stuff into `Contents\bin\`. Build them first with `cargo build --release`
-in each workspace:
-
-```powershell
-# In the vex repo
-cargo build --release           # → ..\vex\target\release\vex.exe
-
-# In the vex-bridge repo
-cargo build --release -p vex-bridge   # → ..\target\release\vex-bridge.exe
-
-# Then in this directory
-cd installer
-.\build-bundle.ps1 -Versions 2022,2023,2024
-# → dist/VexBridge.bundle/
-#       Contents\bin\vex.exe
-#       Contents\bin\vex-bridge.exe
-#       Contents\{2022,2023,2024}\VexBridgeRevit.dll
-```
-
-Copy the bundle to either of these locations and Revit auto-discovers it:
-
-| Scope        | Path                                                         |
-|--------------|--------------------------------------------------------------|
-| Per-user     | `%APPDATA%\Autodesk\ApplicationPlugins\VexBridge.bundle\`    |
-| Machine-wide | `%ProgramData%\Autodesk\ApplicationPlugins\VexBridge.bundle\`|
-
-## Build (signed MSI for Autodesk App Store)
-
-```powershell
-cd installer
-.\build-bundle.ps1
-wix build -arch x64 wix/Product.wxs -out dist/VexBridgeRevit-0.2.0.msi
-signtool sign /tr http://timestamp.digicert.com /td sha256 /fd sha256 /a `
-              dist/VexBridgeRevit-0.2.0.msi
-```
-
-Then upload the signed MSI at <https://apps.autodesk.com/MyUploads> and
-paste the listing copy from [marketplace/LISTING.md](marketplace/LISTING.md).
-The reviewer team installs the MSI on a clean Revit VM and exercises the
-ribbon button against the *Sample Architectural Project*.
-
-## What the user sees, end-to-end
-
-1. Install the MSI from the Autodesk App Store. Per-user Scheduled Task
-   `vex-bridge` is registered and the daemon is launched immediately.
-2. Open Revit. Even if the Scheduled Task hasn't fired yet (e.g. they
-   didn't log out / log back in), `Application.OnStartup` fires off
-   `BundledBin.EnsureDaemonRunning` which starts the bundled
-   `vex-bridge.exe` *hidden* (`CreateNoWindow=true`).
-3. Click *Pair this device*. The plug-in calls
-   `POST /v1/pair/start`, opens the verification URL in the user's
-   default browser, and shows a TaskDialog with the confirmation code.
-   No console window, ever.
-4. Click *Push to architur*, pick the project, click OK. The plug-in
-   calls `POST /v1/repo/push`, which runs the same `vex add → commit →
-   push` pipeline as the file watcher.
-
-## Architecture
-
-```
+```text
 Revit
  │
  │ (UI thread, sync HttpClient)
@@ -127,25 +48,11 @@ Revit
 PushCommand ──► BridgeClient ──► http://127.0.0.1:7878/v1/repo/push
                                                      │
                                                      ▼
-                              %ProgramData%\Autodesk\ApplicationPlugins\
-                                  VexBridge.bundle\Contents\bin\vex-bridge.exe
+                                                vex-bridge
                                                      │ subprocess
                                                      ▼
-                              %ProgramData%\Autodesk\ApplicationPlugins\
-                                  VexBridge.bundle\Contents\bin\vex.exe ──SSH──► architur
+                                                    vex CLI
 ```
 
-The Revit process never touches the public internet. The daemon does.
-That single design choice is what makes the plug-in eligible for the
-Autodesk App Store: Autodesk reviewers explicitly forbid plug-ins that
-phone home directly from the Revit process.
-
-## Versioning
-
-Bump the version in *three* places when releasing:
-
-1. `VexBridgeRevit.csproj` → `<Version>`
-2. `installer/PackageContents.xml` → `AppVersion`, `FriendlyVersion`, all `ComponentEntry/@Version`
-3. `installer/wix/Product.wxs` → `Version`
-
-A future commit will replace this with a single `Directory.Build.props`.
+The Revit process should stay a thin shell. Pairing, key management, IFC import,
+commits, pushes, dedupe, and archiving belong in the daemon.

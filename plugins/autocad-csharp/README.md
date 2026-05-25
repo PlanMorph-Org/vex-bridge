@@ -1,7 +1,11 @@
 # vex-bridge for AutoCAD
 
-Tier-1 AutoCAD plug-in. Loads on AutoCAD startup via the Autodesk Bundle
-mechanism and exposes three commands at the AutoCAD command line:
+Optional Tier 1 AutoCAD plug-in source. The standalone Vex product does not
+ship or require this plug-in; the MVP workflow is exporting IFC into a Vex
+inbox folder watched by `vex-bridge`.
+
+When built for local development, the plug-in exposes three commands at the
+AutoCAD command line:
 
 | Command   | What it does                                                       |
 | --------- | ------------------------------------------------------------------ |
@@ -9,9 +13,8 @@ mechanism and exposes three commands at the AutoCAD command line:
 | `VEXPAIR` | Pair this device with an architur account (browser-based, no SSH). |
 | `VEXEULA` | Re-display the End User License Agreement.                         |
 
-The plug-in itself is a thin shell — all real work (key management,
-SSH, network) happens in the bundled `vex-bridge.exe` daemon. Same daemon
-the Revit plug-in uses; only one runs per machine.
+The plug-in itself is a thin shell. All real work (key management, IFC import,
+commits, pushes, SSH, network) happens in the `vex-bridge.exe` daemon.
 
 ## Building
 
@@ -23,14 +26,13 @@ dotnet build -c Release -p:AcadVersion=2026  # net8.0
 dotnet build -c Release -p:AcadVersion=2027  # net10.0
 ```
 
-The MSI / bundle build (`plugins/revit-csharp/installer/build-bundle.ps1`)
-invokes this csproj for every supported AutoCAD year and drops the DLLs
-into `Contents/AutoCAD/<year>/` inside the shared `VexBridge.bundle`.
+The standalone release workflow does not package AutoCAD DLLs. Build this
+project directly when testing the optional plug-in path.
 
 ## AutoCAD year → release-number mapping
 
-Used in `PackageContents.xml` because AutoCAD's bundle loader compares
-on the internal release number, not the marketing year:
+Used when building/testing the optional AutoCAD plug-in because Autodesk APIs
+and package references use the internal release number, not the marketing year:
 
 | Year | SeriesMin |
 | ---- | --------- |

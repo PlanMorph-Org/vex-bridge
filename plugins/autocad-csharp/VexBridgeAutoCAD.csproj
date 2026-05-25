@@ -5,7 +5,7 @@
       2024 and earlier are .NET Framework 4.8. Override on the cmdline via
       -p:AcadVersion=2026 to build for that year.
 
-      Year → AutoCAD release-number mapping (used in PackageContents.xml):
+      Year → AutoCAD release-number mapping:
         2024 = R24.3   2025 = R25.0   2026 = R25.1   2027 = R26.0
     -->
     <AcadVersion Condition=" '$(AcadVersion)' == '' ">2025</AcadVersion>

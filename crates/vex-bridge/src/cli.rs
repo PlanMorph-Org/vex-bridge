@@ -39,13 +39,15 @@ enum Cmd {
     Start,
     /// One-shot: print health JSON to stdout and exit.
     Status,
+    /// Open the local dashboard UI served by the running daemon.
+    Dashboard,
     /// Pair this machine with an architur account. Prints the code + URL,
     /// then waits for browser approval.
     Pair {
         #[arg(long, default_value = "Unnamed device")]
         device_label: String,
         /// Automatically open the pairing URL in the default browser.
-        /// Used by the install script so users don't need to copy/paste.
+        /// Useful for first-run desktop setup so users don't need to copy/paste.
         #[arg(long)]
         open_browser: bool,
     },
@@ -73,6 +75,7 @@ pub fn run() -> BridgeResult<()> {
     match args.cmd {
         Cmd::Start => run_start(paths),
         Cmd::Status => run_status(paths),
+        Cmd::Dashboard => run_dashboard(paths),
         Cmd::Pair {
             device_label,
             open_browser,
@@ -143,12 +146,19 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
         paths: Arc::new(paths),
         access_token: Arc::new(token),
         started_at: Instant::now(),
+        watchers: Arc::new(RwLock::new(Vec::new())),
     };
     let rt = tokio::runtime::Runtime::new().map_err(BridgeError::Io)?;
     rt.block_on(async move {
         // Start configured watch → add+commit+push pipelines. The handles
         // must outlive `serve`, so bind them in this scope.
-        let _watchers = crate::pipeline::spawn_all(&cfg, tokio::runtime::Handle::current());
+        let watchers = crate::pipeline::spawn_all(
+            &cfg,
+            tokio::runtime::Handle::current(),
+            app.state.clone(),
+            app.paths.clone(),
+        );
+        *app.watchers.write().await = watchers;
         if let Err(e) = server::serve(app, port).await {
             tracing::error!(error = ?e, "server exited");
         }
@@ -159,6 +169,14 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
 fn run_status(paths: Paths) -> BridgeResult<()> {
     let state = State::load(&paths)?;
     println!("{}", serde_json::to_string_pretty(&state)?);
+    Ok(())
+}
+
+fn run_dashboard(paths: Paths) -> BridgeResult<()> {
+    let cfg = Config::load_or_default(&paths)?;
+    let url = format!("http://127.0.0.1:{}/ui", cfg.port);
+    open::that(&url).map_err(|e| BridgeError::Config(format!("could not open {url}: {e}")))?;
+    println!("Opened {url}");
     Ok(())
 }
 

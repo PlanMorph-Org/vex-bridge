@@ -111,6 +111,12 @@ pub struct RepoRegisterRequest {
     pub local_path: Option<String>,
     /// File globs to commit. Defaults to `["*.ifc"]` if omitted.
     pub include: Option<Vec<String>>,
+    /// Optional IFC `IfcProject.GlobalId` or `fingerprint:<hash>` route.
+    #[serde(default)]
+    pub ifc_project_guid: Option<String>,
+    /// Optional human project name for local UI and generated messages.
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,8 +124,150 @@ pub struct RepoRegisterResponse {
     pub project_id: String,
     pub local_path: String,
     pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ifc_project_guid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
     /// True if a previous entry for this project_id was replaced.
     pub replaced: bool,
+    /// True if the daemon has an active watcher for this project now.
+    #[serde(default)]
+    pub watching: bool,
+}
+
+/// `GET /v1/setup/status` — first-run UI state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupStatus {
+    pub paired: bool,
+    pub needs_inbox: bool,
+    pub suggested_inbox_path: String,
+    pub config_path: String,
+    pub state_path: String,
+    pub watch: WatchStatus,
+}
+
+/// `POST /v1/setup/inbox` — create/update the initial watched IFC inbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupInboxRequest {
+    pub project_id: String,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    /// If absent, daemon chooses `~/VexInbox/<project_name-or-id>`.
+    #[serde(default)]
+    pub local_path: Option<String>,
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
+    #[serde(default)]
+    pub ifc_project_guid: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupInboxResponse {
+    pub repo: RepoRegisterResponse,
+    pub watch: WatchStatus,
+}
+
+/// `GET /v1/watch/status` — status payload for tray/menu/dashboard UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchStatus {
+    pub active_watchers: usize,
+    pub configured_projects: usize,
+    pub seen_ifc_hash_count: usize,
+    pub projects: Vec<ProjectSummary>,
+}
+
+/// Project row for local desktop UI surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    pub local_path: String,
+    pub path_exists: bool,
+    pub active: bool,
+    pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ifc_project_guid: Option<String>,
+    pub seen_import_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_imported_at_unix: Option<i64>,
+}
+
+/// `GET /v1/projects/:project_id/history` — commit list for dashboard history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectHistoryResponse {
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    pub commits: Vec<CommitSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitSummary {
+    pub commit: String,
+    pub author: String,
+    pub email: String,
+    pub timestamp: i64,
+    pub message: String,
+    pub parents: Vec<String>,
+}
+
+/// `GET /v1/projects/:project_id/changes` — visual diff for 2D/3D UI.
+/// Optional query params: `from=<commit>&to=<commit>`. Without them, the
+/// daemon compares the latest commit against its parent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectChangesResponse {
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caught_at_unix: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_commit: Option<String>,
+    /// Usually the `vex.visual-diff/1` JSON returned by `vex --json changes`.
+    pub visual_diff: serde_json::Value,
+}
+
+/// `GET /v1/activity/recent` — recent daemon activity for tray/dashboard UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentActivityResponse {
+    /// Newest event first.
+    pub events: Vec<ActivityEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    ProcessingStarted,
+    CommitCreated,
+    DuplicateSkipped,
+    RouteSkipped,
+    NoChanges,
+    Error,
+}
+
+/// One locally observed event in the IFC intake pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    pub id: String,
+    pub kind: ActivityKind,
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub caught_at_unix: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

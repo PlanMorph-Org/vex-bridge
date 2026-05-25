@@ -2,8 +2,8 @@
 //!
 //! Any CAD that can export IFC works without a plugin: the user picks
 //! `Export → IFC` to a watched folder, this module sees the file appear,
-//! debounces for 2s (so we don't fire on a half-written file), then runs
-//! `vex add . && vex commit && vex push` via [`crate::vex_cli`].
+//! debounces for 2s (so we don't fire on a half-written file), then hands the
+//! settled path to the import pipeline.
 //!
 //! Future: Tier 2 hooks live here too — per-CAD scripts that drive the host's
 //! "Export to IFC" command from the CLI.

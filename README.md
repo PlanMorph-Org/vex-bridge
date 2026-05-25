@@ -1,18 +1,23 @@
 # vex-bridge
 
-> The local agent that lets **any** CAD tool push to architur.
+> The standalone desktop agent that versions IFC exports from **any** CAD tool.
 
 Architects don't know what SSH is, and they shouldn't have to. `vex-bridge`
 is a small daemon that runs on the user's machine, holds their key in the OS
-keychain, and exposes a tiny localhost HTTP API so a 50-line plugin in any CAD
-language can do `vex push` without ever touching a terminal.
+keychain, watches an IFC inbox folder, and shells out to the `vex` CLI without
+ever asking the user to touch a terminal.
 
 ```
-┌──────────────────────┐    HTTP (loopback)        ┌──────────────────┐
-│  Revit / Rhino /     │ ─────────────────────────▶│   vex-bridge     │
-│  ArchiCAD / SketchUp │   POST /v1/repo/push      │   daemon         │
-│  (per-CAD plugin)    │ ◀─────────────────────────│   (this repo)    │
-└──────────────────────┘                            └────────┬─────────┘
+┌──────────────────────┐    Export IFC             ┌──────────────────┐
+│  Revit / Rhino /     │ ─────────────────────────▶│   Vex Inbox      │
+│  ArchiCAD / AutoCAD  │                            │   watched folder │
+│  / any IFC tool      │                            └────────┬─────────┘
+└──────────────────────┘                                     │ fs event
+                                                             ▼
+                                                    ┌──────────────────┐
+                                                    │   vex-bridge     │
+                                                    │   daemon         │
+                                                    └────────┬─────────┘
                                                              │ subprocess
                                                              ▼
                                                        ┌────────────┐
@@ -46,19 +51,19 @@ case:
    *plugin host*, not in what we want to do (push files). Move the variable
    part into a tiny shell, keep the heavy lifting in one well-tested daemon.
 
-So we have **one daemon (this repo)** and **many tiny plugin shells**, in
+So we have **one daemon (this repo)** and optional tiny plugin shells later, in
 three tiers:
 
 | Tier | How it works                                                          | Coverage                                |
 | ---- | --------------------------------------------------------------------- | --------------------------------------- |
-| 1    | Native plugin button → `POST 127.0.0.1:7878/v1/repo/push`            | Revit, Rhino, ArchiCAD, SketchUp, AutoCAD |
-| 2    | One-line macro that calls the host's `Export IFC` then hits the API   | Vectorworks, Bentley, Allplan, Tekla    |
-| 3    | Daemon's filesystem watcher: user picks `Export IFC` to a synced folder | **Every CAD that exports IFC.**         |
+| 1    | Daemon's filesystem watcher: user exports IFC to an inbox folder      | **Every CAD that exports IFC.**         |
+| 2    | One-line macro that calls the host's `Export IFC` into that inbox     | Vectorworks, Bentley, Allplan, Tekla    |
+| 3    | Native plugin button that feeds the same inbox/API path               | Revit, Rhino, ArchiCAD, SketchUp, AutoCAD |
 
-Tier 3 is the universal fallback. Every BIM/CAD product on the market that
+Tier 1 is the MVP. Every BIM/CAD product on the market that
 matters can export IFC. So even on day zero, before we have shipped any
-plugins, every architect can use the system: install `vex-bridge`, point it
-at a folder, export IFC there from their CAD of choice.
+plugins, every architect can use the system: install `vex-bridge`, choose an
+inbox folder, export IFC there from their CAD of choice.
 
 ## Layout
 
@@ -67,9 +72,9 @@ crates/
   vex-bridge/            ← the daemon binary + library
   vex-bridge-protocol/   ← request/response types (serde) for plugins
 plugins/
-  revit-csharp/          ← Tier 1 example: Revit external command
-  rhino-python/          ← Tier 1 example: Rhino plugin (single .py file)
-  generic-watch-folder/  ← Tier 3 instructions
+  generic-watch-folder/  ← standalone IFC inbox instructions
+  revit-csharp/          ← optional future accelerator: Revit external command
+  rhino-python/          ← optional future accelerator: Rhino plugin (single .py file)
 docs/
   adding-a-cad.md        ← how to add a new CAD adapter
   early-access-distribution.md ← direct GitHub Release distribution plan
@@ -82,22 +87,46 @@ must carry the `X-Vex-Bridge-Token` header — its value lives at
 `<config_dir>/access-token` (mode 0600). This stops a malicious webpage in
 the user's browser from talking to the daemon (browsers cannot read disk).
 
+The local dashboard is served at `http://127.0.0.1:7878/ui` and injects the
+per-user token into that same-origin page. Open it with `vex-bridge dashboard`
+or from the native `vex-tray` menu.
+
 | Method | Path                | Auth | Purpose                                  |
 | ------ | ------------------- | ---- | ---------------------------------------- |
 | GET    | `/v1/health`        | no   | Daemon liveness + version                |
 | GET    | `/v1/pair/status`   | yes  | Is the daemon paired with an account?    |
 | POST   | `/v1/pair/start`    | yes  | Get a pairing code + URL                 |
+| GET    | `/v1/setup/status`  | yes  | First-run state for desktop setup        |
+| POST   | `/v1/setup/inbox`   | yes  | Create/update the first watched inbox    |
+| GET    | `/v1/watch/status`  | yes  | Active watcher + project status          |
+| GET    | `/v1/activity/recent` | yes | Recent processing/commit/error events    |
+| GET    | `/v1/projects`      | yes  | Local project rows for desktop UI        |
+| GET    | `/v1/projects/:id/history` | yes | Commit list for one project       |
+| GET    | `/v1/projects/:id/changes?from=&to=` | yes | Selected visual diff for 2D/3D views |
+| POST   | `/v1/repo/register` | yes  | Map an Architur project to a local inbox |
+| POST   | `/v1/repo/push`     | yes  | Manually import/commit/push latest IFC   |
 
-`/v1/repo/{init,commit,push}` are reserved in [`vex-bridge-protocol`] and
-will land alongside the corresponding `vex` CLI subcommands.
+The filesystem watcher uses the same import/commit/push path automatically when
+an IFC export settles in a configured inbox. `vex-bridge` handles the desktop
+agent work; the `vex` binary owns IFC metadata extraction, import, semantic
+diffing, and history. New inbox registrations are activated immediately in the
+running daemon, so the first-run UI does not need to ask users to restart.
 
 ## Build & run
 
 ```
 cargo build --release
-./target/release/vex-bridge pair --device-label "Revit on this Mac"
+./target/release/vex-bridge pair --device-label "Vex on this machine"
 ./target/release/vex-bridge start            # leaves it in foreground
+./target/release/vex-bridge dashboard        # opens http://127.0.0.1:7878/ui
+cargo build --release -p vex-bridge --features tray
+./target/release/vex-tray                    # native tray/menu bar entry point
 ```
+
+Release bundles are self-contained: `vex-bridge`, `vex-tray`, and the matching
+`vex` engine binary live in the same extracted folder. Unless `vex_bin` is set
+explicitly in `config.toml`, the bridge prefers that co-located `vex` binary
+before falling back to `vex` on `PATH`.
 
 For production the daemon should be supervised by `launchd` (macOS),
 `systemd --user` (Linux), or `nssm` (Windows). Sample units land here in a

@@ -6,11 +6,17 @@
 
 pub mod cli;
 pub mod config;
+pub mod dashboard;
+#[cfg(feature = "tray-icon-asset")]
+pub(crate) mod desktop_assets;
 pub mod errors;
+pub mod ifc;
 pub mod keychain;
 pub mod pairing;
 pub mod pipeline;
 pub mod server;
 pub mod state;
+#[cfg(feature = "tray")]
+pub mod tray;
 pub mod vex_cli;
 pub mod watcher;

@@ -8,6 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  VEX_REPO: Planmorph-Org/vex
+  VEX_RELEASE_TAG: ${{ vars.VEX_RELEASE_TAG }}
 
 jobs:
   build:
@@ -54,283 +56,63 @@ jobs:
       #   macOS   → Keychain Services
       #   Windows → Windows Credential Manager
 
-      - name: Build vex-bridge
-        run: cargo build --release -p vex-bridge --target ${{ matrix.target }}
+      - name: Build vex-bridge and vex-tray
+        run: cargo build --release -p vex-bridge --features tray --target ${{ matrix.target }}
+
+      - name: Download vex from latest vex release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VEX_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$VEX_RELEASE_TAG"
+          if [[ -z "$tag" ]]; then
+            tag="$(gh release view --repo "$VEX_REPO" --json tagName -q .tagName)"
+          fi
+          asset="vex-${tag}-${{ matrix.artifact_suffix }}.tar.gz"
+          mkdir -p vex-stage
+          gh release download "$tag" --repo "$VEX_REPO" \
+            --pattern "$asset" --dir vex-stage
+          tar -xzf "vex-stage/$asset" -C vex-stage
+          bin="vex-stage/vex-${tag}-${{ matrix.artifact_suffix }}/vex${{ matrix.exe }}"
+          test -f "$bin"
+          echo "VEX_BIN_PATH=$bin" >> "$GITHUB_ENV"
 
       # ── Package ──────────────────────────────────────────────────────────
-      # We publish TWO things per platform:
-      #
-      #   1. vex-bridge-{tag}-{suffix}.tar.gz
-      #      The "scripted" bundle: contains a sub-folder with the binary and
-      #      a SHA256SUMS file. Consumed by install.sh / install.ps1, which
-      #      already know how to verify and unpack it.
-      #
-      #   2. A single-file artifact for the "Direct downloads" buttons on the
-      #      website. Tar.gz is a terrible browser-download format (Safari
-      #      half-extracts it, Windows users see "wrong format", and on every
-      #      OS you end up with a folder named like the source repo, which is
-      #      what users were complaining about).
-      #
-      #         macOS  →  vex-bridge-{tag}-{suffix}.zip
-      #                   • single binary at the zip ROOT (no nested folder)
-      #                   • Safari + Finder auto-expand .zip into the same
-      #                     directory, so the user sees a runnable `vex-bridge`
-      #                     file appear next to the download — not a folder.
-      #         Windows → vex-bridge-{tag}-windows-x86_64.exe
-      #                   • the bare .exe; double-click and it runs.
+      # Publish one raw bundle per platform. No OS installers, no install
+      # scripts, no login-item/task registration. The bundle contains the
+      # daemon, tray binary, vex engine binary, and SHA256SUMS.
       - name: Package artifact
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
           EXE="${{ matrix.exe }}"
           BIN="vex-bridge${EXE}"
+          TRAY="vex-tray${EXE}"
+          VEX="vex${EXE}"
           DIR="dist/vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}"
           mkdir -p "$DIR" dist
 
           cp "target/${{ matrix.target }}/release/${BIN}" "$DIR/${BIN}"
+          cp "target/${{ matrix.target }}/release/${TRAY}" "$DIR/${TRAY}"
+          cp "$VEX_BIN_PATH" "$DIR/${VEX}"
 
-          # 1) Scripted bundle — tar.gz with SHA256SUMS, used by install scripts.
-          ( cd "$DIR" && sha256sum "${BIN}" > SHA256SUMS )
-          tar -czf "${DIR}.tar.gz" -C dist "vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}"
+          ( cd "$DIR" && sha256sum "${BIN}" "${TRAY}" "${VEX}" > SHA256SUMS )
+          ARCHIVE="${DIR}.tar.gz"
+          tar -czf "$ARCHIVE" -C dist "vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}"
 
-          # 2) Direct-download single-file artifact.
-          if [[ "${{ matrix.artifact_suffix }}" == windows-* ]]; then
-            DIRECT="dist/vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}.exe"
-            cp "$DIR/${BIN}" "$DIRECT"
-          else
-            # macOS: zip the single binary at the root so Finder/Safari
-            # auto-extract drops a runnable file next to the .zip instead of
-            # a folder. -j strips path components.
-            DIRECT="dist/vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}.zip"
-            ( cd "$DIR" && zip -qj "../../${DIRECT}" "${BIN}" )
-          fi
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
-          {
-            echo "ARCHIVE=${DIR}.tar.gz"
-            echo "DIRECT=${DIRECT}"
-          } >> "$GITHUB_ENV"
-
-      - name: Upload artifact (scripted bundle)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: vex-bridge-${{ matrix.artifact_suffix }}-bundle
           path: ${{ env.ARCHIVE }}
           retention-days: 1
 
-      - name: Upload artifact (direct download)
-        uses: actions/upload-artifact@v4
-        with:
-          name: vex-bridge-${{ matrix.artifact_suffix }}-direct
-          path: ${{ env.DIRECT }}
-          retention-days: 1
-
-  # ─────────────────────────────────────────────────────────────────────
-  # Native installers — the primary user-facing download.
-  #
-  # Engineers and architects on the receiving end aren't terminal users.
-  # The .exe / .pkg below is the "double-click and walk away" experience:
-  # both binaries bundled, daemon registered, browser opens to pair.
-  #
-  # Binaries needed:
-  #   • vex-bridge — built above in this workflow.
-  #   • vex        — fetched from the latest GitHub release of
-  #                   PlanMorph-Org/vex (set VEX_REPO below to override).
-  # If no vex release exists yet (very first cut-over), the installer
-  # build is skipped — the .tar.gz / .exe / .zip direct downloads still
-  # publish so users have a path forward.
-  # ─────────────────────────────────────────────────────────────────────
-
-  installer-windows:
-    name: Build Windows installer
-    needs: build
-    runs-on: windows-latest
-    env:
-      VEX_REPO: PlanMorph-Org/vex
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download vex-bridge.exe (this build)
-        uses: actions/download-artifact@v4
-        with:
-          name: vex-bridge-windows-x86_64-direct
-          path: installer-stage/
-
-      - name: Download vex.exe from latest vex release
-        id: fetch-vex
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # Find the .exe asset on the latest release of the vex repo.
-          # If no release exists yet, mark the step as skipped so the
-          # downstream packaging step can short-circuit.
-          if ! tag="$(gh release view --repo "$VEX_REPO" --json tagName -q .tagName 2>/dev/null)"; then
-            echo "::warning::No published vex release on $VEX_REPO — skipping installer build."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          asset="vex-${tag}-windows-x86_64.exe"
-          gh release download "$tag" --repo "$VEX_REPO" \
-            --pattern "$asset" --dir installer-stage/
-          mv "installer-stage/$asset" installer-stage/vex.exe
-          # Rename our own binary too so the .iss can refer to bare names.
-          mv "installer-stage/vex-bridge-${GITHUB_REF_NAME}-windows-x86_64.exe" \
-             installer-stage/vex-bridge.exe
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
-      - name: Set up .NET SDKs for Revit add-ins
-        if: steps.fetch-vex.outputs.skip != 'true'
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: |
-            8.0.x
-            10.0.x
-
-      - name: Stage Revit add-ins
-        if: steps.fetch-vex.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $revitVersions = @('2022', '2023', '2024', '2025', '2026', '2027')
-          foreach ($version in $revitVersions) {
-            $payload = Join-Path $env:GITHUB_WORKSPACE "installer-stage\revit\$version\VexBridge"
-            $bin = Join-Path $payload 'bin'
-            New-Item -ItemType Directory -Force -Path $payload, $bin | Out-Null
-
-            dotnet build "${env:GITHUB_WORKSPACE}\plugins\revit-csharp\VexBridgeRevit.csproj" `
-              -c Release `
-              -p:RevitVersion=$version `
-              -p:OutputPath="$payload\" `
-              --nologo
-            if ($LASTEXITCODE -ne 0) { throw "Revit $version add-in build failed: $LASTEXITCODE" }
-
-            Copy-Item -Force "${env:GITHUB_WORKSPACE}\installer-stage\vex.exe"        (Join-Path $bin 'vex.exe')
-            Copy-Item -Force "${env:GITHUB_WORKSPACE}\installer-stage\vex-bridge.exe" (Join-Path $bin 'vex-bridge.exe')
-
-            $addin = Get-Content "${env:GITHUB_WORKSPACE}\plugins\revit-csharp\VexBridgeRevit.addin" -Raw
-            $addin = $addin -replace '<Assembly>.*?</Assembly>', '<Assembly>VexBridgeRevit.dll</Assembly>'
-            Set-Content -Path (Join-Path $payload 'VexBridgeRevit.addin') -Value $addin -Encoding UTF8
-          }
-
-      - name: Stage installer script
-        if: steps.fetch-vex.outputs.skip != 'true'
-        shell: bash
-        run: |
-          cp installer/windows/setup.iss installer-stage/setup.iss
-          cp plugins/revit-csharp/marketplace/EarlyAccessInstall.html installer-stage/EarlyAccessInstall.html
-
-      - name: Generate wizard images
-        if: steps.fetch-vex.outputs.skip != 'true'
-        shell: pwsh
-        # Renders wizard.bmp + wizard-small.bmp from the brand palette so
-        # the installer doesn't fall back to Inno's stock teal panel.
-        # $LASTEXITCODE only tracks native processes; calling a .ps1
-        # leaves it stale, so we rely on -ErrorAction Stop instead and
-        # let the script's own exceptions surface.
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & "${env:GITHUB_WORKSPACE}\installer\windows\gen-images.ps1" `
-            -OutDir "${env:GITHUB_WORKSPACE}\installer-stage"
-
-      - name: Compile installer (Inno Setup)
-        if: steps.fetch-vex.outputs.skip != 'true'
-        shell: pwsh
-        # Inno Setup 6 (iscc.exe) is preinstalled on windows-latest images.
-        # /D defines the {#Version} preprocessor symbol used in setup.iss.
-        run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
-          }
-          & "$iscc" "/DVersion=$version" "/Oinstaller-stage" installer-stage/setup.iss
-          if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
-          $out = "installer-stage/VexAtlasSetup.exe"
-          $renamed = "installer-stage/VexAtlasSetup-${env:GITHUB_REF_NAME}-windows-x86_64.exe"
-          Move-Item -Force $out $renamed
-          "INSTALLER=$renamed" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Upload installer
-        if: steps.fetch-vex.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vex-atlas-installer-windows-x86_64
-          path: ${{ env.INSTALLER }}
-          retention-days: 1
-
-  installer-macos:
-    name: Build macOS installer (${{ matrix.arch }})
-    needs: build
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            suffix: macos-arm64
-          - arch: x86_64
-            suffix: macos-x86_64
-    env:
-      VEX_REPO: PlanMorph-Org/vex
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download vex-bridge (this build)
-        uses: actions/download-artifact@v4
-        with:
-          name: vex-bridge-${{ matrix.suffix }}-bundle
-          path: installer-stage/
-
-      - name: Extract vex-bridge binary
-        run: |
-          set -euo pipefail
-          mkdir -p installer-stage/bin
-          tar -xzf "installer-stage/vex-bridge-${GITHUB_REF_NAME}-${{ matrix.suffix }}.tar.gz" \
-            -C installer-stage/
-          mv "installer-stage/vex-bridge-${GITHUB_REF_NAME}-${{ matrix.suffix }}/vex-bridge" \
-             installer-stage/bin/vex-bridge
-
-      - name: Download vex from latest vex release
-        id: fetch-vex
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if ! tag="$(gh release view --repo "$VEX_REPO" --json tagName -q .tagName 2>/dev/null)"; then
-            echo "::warning::No published vex release on $VEX_REPO — skipping installer build."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          asset="vex-${tag}-${{ matrix.suffix }}.tar.gz"
-          gh release download "$tag" --repo "$VEX_REPO" \
-            --pattern "$asset" --dir installer-stage/
-          tar -xzf "installer-stage/$asset" -C installer-stage/
-          mv "installer-stage/vex-${tag}-${{ matrix.suffix }}/vex" installer-stage/bin/vex
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
-      - name: Build .pkg installer
-        if: steps.fetch-vex.outputs.skip != 'true'
-        env:
-          VERSION: ${{ github.ref_name }}
-          ARCH: ${{ matrix.arch }}
-          BIN_DIR: ${{ github.workspace }}/installer-stage/bin
-          OUT_DIR: ${{ github.workspace }}/installer-out
-        run: |
-          chmod +x installer/macos/build-pkg.sh
-          installer/macos/build-pkg.sh
-
-      - name: Upload installer
-        if: steps.fetch-vex.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vex-atlas-installer-${{ matrix.suffix }}
-          path: installer-out/*.pkg
-          retention-days: 1
-
   release:
     name: Publish GitHub Release
-    needs: [build, installer-windows, installer-macos]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -346,24 +128,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # Per platform we publish:
-          #   • VexAtlasSetup-{tag}-windows-x86_64.exe (the installer)
-          #   • VexAtlas-{tag}-{arch}.pkg              (the installer)
-          #   • the .tar.gz bundle (consumed by install.sh / install.ps1)
-          #   • the direct-download single-file artifact (.exe on Windows,
-          #     .zip on macOS) for advanced users who want raw binaries
-          # Plus the install scripts themselves (`curl | bash`, `irm | iex`)
-          # and the cert-free Revit installer + uninstaller.
+          # Per platform we publish only raw .tar.gz bundles containing
+          # vex-bridge, vex-tray, vex, and SHA256SUMS. Native installers and
+          # install scripts are intentionally not part of the standalone release.
           files: |
             dist/**/*.tar.gz
-            dist/**/*.exe
-            dist/**/*.zip
-            dist/**/*.pkg
-            install/install.sh
-            install/install.ps1
-            install/install-revit.ps1
-            install/uninstall.ps1
-            plugins/revit-csharp/marketplace/EarlyAccessInstall.html
             docs/early-access-distribution.md
           generate_release_notes: true
           draft: false
