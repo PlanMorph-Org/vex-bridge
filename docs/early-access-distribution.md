@@ -19,7 +19,7 @@ is required.
    > startup mechanism while we validate the standalone workflow.
 
 The release workflow downloads the matching platform `vex` bundle from the
-latest `Planmorph-Org/vex` GitHub Release. Set the repository variable
+latest `PlanMorph-Org/vex` GitHub Release. Set the repository variable
 `VEX_RELEASE_TAG` when a bridge release must pin a specific engine version. If
 the engine repository is private to Actions, set `VEX_RELEASE_TOKEN` with read
 access to that release.
