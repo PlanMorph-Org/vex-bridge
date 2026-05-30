@@ -54,9 +54,9 @@ Filename: "{app}\vex-bridge.exe"; Parameters: "pair --open-browser"; Description
 
 [Code]
 const
-  HWND_BROADCAST = $FFFF;
-  WM_SETTINGCHANGE = $001A;
-  SMTO_ABORTIFHUNG = $0002;
+  VEX_HWND_BROADCAST = $FFFF;
+  VEX_WM_SETTINGCHANGE = $001A;
+  VEX_SMTO_ABORTIFHUNG = $0002;
 
 function SendMessageTimeout(hWnd: Longint; Msg: Longint; wParam: Longint; lParam: String;
   fuFlags: Longint; uTimeout: Longint; var lpdwResult: Longint): Longint;
@@ -95,8 +95,8 @@ procedure BroadcastEnvironmentChange();
 var
   ResultCode: Longint;
 begin
-  SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 'Environment',
-    SMTO_ABORTIFHUNG, 5000, ResultCode);
+  SendMessageTimeout(VEX_HWND_BROADCAST, VEX_WM_SETTINGCHANGE, 0, 'Environment',
+    VEX_SMTO_ABORTIFHUNG, 5000, ResultCode);
 end;
 
 procedure RemoveAppFromUserPath();
