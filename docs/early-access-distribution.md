@@ -7,16 +7,18 @@ is required.
 ## What to ship now
 
 1. Build a tagged GitHub Release from this repository.
-2. Send firms the matching raw binary bundle from the release:
-   `vex-bridge-<tag>-windows-x86_64.tar.gz`,
-   `vex-bridge-<tag>-macos-arm64.tar.gz`, or
+2. Send Windows firms the one-click setup executable:
+   `VexAtlasSetup-<tag>-windows-x86_64.exe`.
+3. Send macOS firms the matching raw binary bundle from the release:
+   `vex-bridge-<tag>-macos-arm64.tar.gz` or
    `vex-bridge-<tag>-macos-x86_64.tar.gz`.
-3. Include this early-access note in outreach:
+4. Include this early-access note in outreach:
 
    > This is early access software. The release ships raw desktop-agent
-   > binaries, not an installer. Extract the bundle, keep `vex`, `vex-bridge`,
-   > and `vex-tray` together, and launch the daemon/tray from your normal
-   > startup mechanism while we validate the standalone workflow.
+   > binaries on macOS and a per-user setup executable on Windows. Windows users
+   > should run the setup executable; macOS users should extract the bundle, keep
+   > `vex`, `vex-bridge`, and `vex-tray` together, and launch the daemon/tray from
+   > their normal startup mechanism while we validate the standalone workflow.
 
 The release workflow downloads the matching platform `vex` bundle from the
 latest `PlanMorph-Org/vex` GitHub Release. Set the repository variable
@@ -34,7 +36,17 @@ vex-tray(.exe)
 vex(.exe)
 ```
 
-The bundle:
+The Windows setup executable:
+
+- installs `vex`, `vex-bridge`, `vex-tray`, and `SHA256SUMS` together under the
+   current user's local application folder,
+- adds that install folder to the user's PATH,
+- registers `vex-tray` to start at sign-in,
+- starts `vex-tray` after install, and
+- launches `vex-bridge pair --open-browser` so the first-run browser pairing
+   flow opens immediately.
+
+The macOS bundle:
 
 - includes the daemon, tray, and matching `vex` engine binaries,
 - includes `SHA256SUMS` for the bundled files,

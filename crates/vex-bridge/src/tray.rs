@@ -9,6 +9,7 @@ use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use vex_bridge_protocol as proto;
 
 use crate::config::{Config, Paths};
+use crate::device::default_device_label;
 use crate::errors::{BridgeError, BridgeResult};
 
 const MENU_OPEN: &str = "open-dashboard";
@@ -443,9 +444,7 @@ fn bridge_exe() -> BridgeResult<std::path::PathBuf> {
 }
 
 fn device_label() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "Vex desktop".to_string())
+    default_device_label()
 }
 
 fn http_get(url: &str, timeout: Duration, token: Option<&str>) -> std::io::Result<String> {

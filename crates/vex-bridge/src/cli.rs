@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::config::{Config, Paths};
+use crate::device::resolve_device_label;
 use crate::errors::{BridgeError, BridgeResult};
 use crate::keychain;
 use crate::pairing;
@@ -44,8 +45,8 @@ enum Cmd {
     /// Pair this machine with an architur account. Prints the code + URL,
     /// then waits for browser approval.
     Pair {
-        #[arg(long, default_value = "Unnamed device")]
-        device_label: String,
+        #[arg(long)]
+        device_label: Option<String>,
         /// Automatically open the pairing URL in the default browser.
         /// Useful for first-run desktop setup so users don't need to copy/paste.
         #[arg(long)]
@@ -79,7 +80,7 @@ pub fn run() -> BridgeResult<()> {
         Cmd::Pair {
             device_label,
             open_browser,
-        } => run_pair(paths, device_label, open_browser),
+        } => run_pair(paths, resolve_device_label(device_label), open_browser),
         Cmd::Unpair => run_unpair(paths),
     }
 }
@@ -203,17 +204,23 @@ fn run_pair(paths: Paths, device_label: String, open_browser: bool) -> BridgeRes
 
         println!("Waiting for browser approval (Ctrl-C to cancel)...");
 
+        let expires_at_unix = now_unix() + 600;
         let mut state = State::load(&paths)?;
         state.pairing = PairingState::Pending {
             code: outcome.code.clone(),
             pair_url: outcome.pair_url.clone(),
-            expires_at_unix: now_unix() + 600,
+            expires_at_unix,
             device_label: device_label.clone(),
         };
         state.save(&paths)?;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if now_unix() >= expires_at_unix {
+                return Err(BridgeError::Config(
+                    "pairing code expired before browser approval".into(),
+                ));
+            }
             match pairing::poll(&cfg, &outcome.code).await? {
                 Some(key_id) => {
                     let mut state = State::load(&paths)?;

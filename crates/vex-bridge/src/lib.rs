@@ -9,6 +9,7 @@ pub mod config;
 pub mod dashboard;
 #[cfg(feature = "tray-icon-asset")]
 pub(crate) mod desktop_assets;
+pub mod device;
 pub mod errors;
 pub mod ifc;
 pub mod keychain;

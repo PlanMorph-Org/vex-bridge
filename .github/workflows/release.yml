@@ -79,9 +79,9 @@ jobs:
           echo "VEX_BIN_PATH=$bin" >> "$GITHUB_ENV"
 
       # ── Package ──────────────────────────────────────────────────────────
-      # Publish one raw bundle per platform. No OS installers, no install
-      # scripts, no login-item/task registration. The bundle contains the
-      # daemon, tray binary, vex engine binary, and SHA256SUMS.
+      # Publish one raw bundle per platform. On Windows we also publish a
+      # single per-user setup executable that installs vex, vex-bridge, and
+      # vex-tray together, registers tray startup, and launches browser pairing.
       - name: Package artifact
         shell: bash
         run: |
@@ -103,11 +103,32 @@ jobs:
 
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
+      - name: Install Inno Setup
+        if: matrix.artifact_suffix == 'windows-x86_64'
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows setup executable
+        if: matrix.artifact_suffix == 'windows-x86_64'
+        shell: powershell
+        run: |
+          $version = "${env:GITHUB_REF_NAME}"
+          $source = Join-Path $env:GITHUB_WORKSPACE "dist\vex-bridge-$version-windows-x86_64"
+          $output = Join-Path $env:GITHUB_WORKSPACE "dist"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
+          & $iscc "installer\windows\VexAtlasSetup.iss" "/DAppVersion=$version" "/DSourceDir=$source" "/DOutputDir=$output"
+          $setup = Join-Path $output "VexAtlasSetup-$version-windows-x86_64.exe"
+          if (!(Test-Path $setup)) { throw "setup executable not found: $setup" }
+          "SETUP_EXE=$setup" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: vex-bridge-${{ matrix.artifact_suffix }}-bundle
-          path: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.SETUP_EXE }}
           retention-days: 1
 
   release:
@@ -128,11 +149,12 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # Per platform we publish only raw .tar.gz bundles containing
-          # vex-bridge, vex-tray, vex, and SHA256SUMS. Native installers and
-          # install scripts are intentionally not part of the standalone release.
+          # Per platform we publish raw .tar.gz bundles containing vex-bridge,
+          # vex-tray, vex, and SHA256SUMS. Windows also gets a one-click setup
+          # executable for normal users.
           files: |
             dist/**/*.tar.gz
+            dist/**/*.exe
             docs/early-access-distribution.md
           generate_release_notes: true
           draft: false
