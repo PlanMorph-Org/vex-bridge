@@ -51,6 +51,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          save-if: false
 
 # keyring v2 uses the OS-native secret store with no extra dependencies:
       #   macOS   → Keychain Services
