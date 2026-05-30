@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,6 +29,7 @@ use crate::config::{Config, Paths};
 use crate::dashboard;
 use crate::device::default_device_label;
 use crate::errors::BridgeError;
+use crate::ifc::parse_preview_elements;
 use crate::pairing;
 use crate::pipeline::{self, WatchPipeline};
 use crate::state::{now_unix, PairingState, State as DaemonState};
@@ -194,6 +195,12 @@ async fn handle_pair_start(
         .await
         .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?;
 
+    if req.open_browser {
+        if let Err(error) = open::that(&outcome.pair_url) {
+            warn!(error = %error, url = %outcome.pair_url, "could not open pairing URL");
+        }
+    }
+
     {
         let mut daemon_state = state.state.write().await;
         daemon_state.pairing = PairingState::Pending {
@@ -280,12 +287,19 @@ async fn handle_setup_status(
     let daemon_state = state.state.read().await.clone();
     let active = active_project_ids(&state).await;
     let watch = watch_status_from(&cfg, &daemon_state, &active);
+    let inbox_root = default_inbox_root().map_err(|error| {
+        err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BridgeError::Config(error),
+        )
+    })?;
     Ok(Json(proto::SetupStatus {
         paired: matches!(daemon_state.pairing, PairingState::Paired { .. }),
         pair_status: pair_status_from_state(&daemon_state),
         default_device_label: default_device_label(),
+        inbox_root_path: inbox_root.to_string_lossy().to_string(),
         needs_inbox: cfg.watch.is_empty(),
-        suggested_inbox_path: default_inbox_path("default", None)
+        suggested_inbox_path: default_inbox_path("default", None, None)
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|_| "VexInbox/default".to_string()),
         config_path: state.paths.config_file.to_string_lossy().to_string(),
@@ -300,11 +314,12 @@ async fn handle_setup_inbox(
     Json(req): Json<proto::SetupInboxRequest>,
 ) -> Result<Json<proto::SetupInboxResponse>, Response> {
     require_token(&headers, &state.access_token)?;
+    let project_id = setup_project_id(&req);
     let repo = register_watch(
         &state,
         proto::RepoRegisterRequest {
-            project_id: req.project_id,
-            local_path: req.local_path,
+            project_id,
+            local_path: setup_local_path(&req),
             include: req.include,
             ifc_project_guid: req.ifc_project_guid,
             project_name: req.project_name,
@@ -406,7 +421,7 @@ async fn handle_project_changes(
             .or_else(|| commits.get(1).map(|commit| commit.commit.clone()))
     };
     let caught_at_unix = caught_at_for_commit(&daemon_state, &project_id, latest_commit.as_deref());
-    let visual_diff = if let (Some(from), Some(to)) = (&previous_commit, &latest_commit) {
+    let mut visual_diff = if let (Some(from), Some(to)) = (&previous_commit, &latest_commit) {
         vex_cli::compare_json(&cfg.vex_bin, &dir, from, to)
             .await
             .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?
@@ -415,8 +430,17 @@ async fn handle_project_changes(
             .await
             .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?
     } else {
-        serde_json::json!({"status": "no-previous-version"})
+        baseline_visual_json(&dir).unwrap_or_else(|error| {
+            serde_json::json!({
+                "status": "baseline-unavailable",
+                "summary": "Baseline model",
+                "detail": error.to_string(),
+                "counts": {"added": 0, "removed": 0, "modified": 0, "moved": 0, "renamed": 0, "unchanged": 0},
+                "elements": []
+            })
+        })
     };
+    attach_model_elements(&mut visual_diff, &dir);
     Ok(Json(proto::ProjectChangesResponse {
         project_id,
         project_name: entry.project_name.clone(),
@@ -473,13 +497,16 @@ async fn register_watch(
     }
 
     let local_path = match req.local_path {
-        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
-        _ => default_inbox_path(&req.project_id, req.project_name.as_deref()).map_err(|error| {
-            err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                BridgeError::Config(error),
-            )
-        })?,
+        Some(path) if !path.trim().is_empty() => resolve_inbox_path(&path)
+            .map_err(|error| err_response(StatusCode::BAD_REQUEST, BridgeError::Config(error)))?,
+        _ => default_inbox_path(&req.project_id, req.project_name.as_deref(), None).map_err(
+            |error| {
+                err_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    BridgeError::Config(error),
+                )
+            },
+        )?,
     };
 
     if let Err(error) = std::fs::create_dir_all(&local_path) {
@@ -566,6 +593,133 @@ fn parent_for_commit(commits: &[proto::CommitSummary], commit: Option<&str>) -> 
         .iter()
         .find(|item| item.commit == commit || item.commit.starts_with(commit))
         .and_then(|item| item.parents.first().cloned())
+}
+
+fn setup_project_id(req: &proto::SetupInboxRequest) -> String {
+    let seed = req
+        .project_id
+        .as_deref()
+        .or(req.project_name.as_deref())
+        .or(req.folder_name.as_deref())
+        .or(req.local_path.as_deref())
+        .unwrap_or("project");
+    let segment = safe_path_segment(path_label(seed));
+    format!("vex-{}", segment.to_ascii_lowercase())
+}
+
+fn setup_local_path(req: &proto::SetupInboxRequest) -> Option<String> {
+    req.folder_name
+        .as_deref()
+        .or(req.local_path.as_deref())
+        .or(req.project_name.as_deref())
+        .map(str::to_string)
+}
+
+fn path_label(value: &str) -> &str {
+    Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(value)
+}
+
+fn attach_model_elements(visual_diff: &mut serde_json::Value, dir: &Path) {
+    let Ok(elements) = model_preview_elements(dir) else {
+        return;
+    };
+    if elements.is_empty() {
+        return;
+    }
+    if let Some(object) = visual_diff.as_object_mut() {
+        object
+            .entry("model_elements".to_string())
+            .or_insert_with(|| serde_json::Value::Array(elements));
+    }
+}
+
+fn baseline_visual_json(dir: &Path) -> Result<serde_json::Value, BridgeError> {
+    let elements = model_preview_elements(dir)?;
+    Ok(serde_json::json!({
+        "schema": "vex.visual-diff/1",
+        "status": "baseline",
+        "summary": "Baseline model",
+        "counts": {
+            "added": 0,
+            "removed": 0,
+            "modified": 0,
+            "moved": 0,
+            "renamed": 0,
+            "unchanged": elements.len()
+        },
+        "elements": elements,
+    }))
+}
+
+fn model_preview_elements(dir: &Path) -> Result<Vec<serde_json::Value>, BridgeError> {
+    let Some(path) = latest_ifc_snapshot(dir)? else {
+        return Ok(Vec::new());
+    };
+    let elements = parse_preview_elements(&path, 300)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, element)| {
+            serde_json::json!({
+                "kind": "unchanged",
+                "type": element.type_name,
+                "name": element.name.unwrap_or_else(|| element.step_id.clone()),
+                "id": element.step_id,
+                "stable_id": element.step_id,
+                "preview_index": index,
+            })
+        })
+        .collect();
+    Ok(elements)
+}
+
+fn latest_ifc_snapshot(dir: &Path) -> Result<Option<PathBuf>, BridgeError> {
+    fn visit(
+        dir: &Path,
+        best: &mut Option<(PathBuf, std::time::SystemTime)>,
+    ) -> Result<(), BridgeError> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                if path
+                    .components()
+                    .any(|component| matches!(component, Component::Normal(name) if name == ".vex"))
+                    && path.file_name().and_then(|name| name.to_str()) != Some("archive")
+                {
+                    let archive = path.join("archive");
+                    if archive.is_dir() {
+                        visit(&archive, best)?;
+                    }
+                    continue;
+                }
+                visit(&path, best)?;
+                continue;
+            }
+            let is_ifc = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.eq_ignore_ascii_case("ifc"))
+                .unwrap_or(false);
+            if !is_ifc {
+                continue;
+            }
+            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            match best {
+                Some((_, current)) if *current >= modified => {}
+                _ => *best = Some((path, modified)),
+            }
+        }
+        Ok(())
+    }
+
+    let mut best = None;
+    visit(dir, &mut best)?;
+    Ok(best.map(|(path, _)| path))
 }
 
 fn caught_at_for_commit(
@@ -752,14 +906,43 @@ fn unix_to_civil(seconds: i64) -> (i32, u32, u32, u32, u32, u32) {
     )
 }
 
-fn default_inbox_path(project_id: &str, project_name: Option<&str>) -> Result<PathBuf, String> {
+fn default_inbox_root() -> Result<PathBuf, String> {
     let home = directories::UserDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())
         .ok_or_else(|| "could not resolve user home".to_string())?;
+    Ok(home.join("VexInbox"))
+}
+
+fn default_inbox_path(
+    project_id: &str,
+    project_name: Option<&str>,
+    folder_name: Option<&str>,
+) -> Result<PathBuf, String> {
+    let root = default_inbox_root()?;
     let label = project_name
+        .or(folder_name)
         .filter(|name| !name.trim().is_empty())
         .unwrap_or(project_id);
-    Ok(home.join("VexInbox").join(safe_path_segment(label)))
+    Ok(root.join(safe_path_segment(path_label(label))))
+}
+
+fn resolve_inbox_path(value: &str) -> Result<PathBuf, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("project folder name cannot be empty".to_string());
+    }
+    let root = default_inbox_root()?;
+    let raw = Path::new(trimmed);
+    if raw.is_absolute() {
+        if raw.starts_with(&root) {
+            return Ok(raw.to_path_buf());
+        }
+        return Err(format!(
+            "tracked folders must live inside {}",
+            root.display()
+        ));
+    }
+    Ok(root.join(safe_path_segment(path_label(trimmed))))
 }
 
 fn safe_path_segment(value: &str) -> String {

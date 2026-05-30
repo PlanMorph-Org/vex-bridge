@@ -19,6 +19,13 @@ pub struct IfcIntake {
     pub approximate_entity_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct IfcPreviewElement {
+    pub step_id: String,
+    pub type_name: String,
+    pub name: Option<String>,
+}
+
 impl IfcIntake {
     pub fn routing_key(&self) -> Option<String> {
         if let Some(guid) = &self.project_guid {
@@ -123,6 +130,68 @@ pub fn parse_intake(path: &Path) -> BridgeResult<IfcIntake> {
     }
 
     Ok(out)
+}
+
+pub fn parse_preview_elements(path: &Path, limit: usize) -> BridgeResult<Vec<IfcPreviewElement>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut out = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((step_id, rest)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(open_paren) = rest.find('(') else {
+            continue;
+        };
+        let raw_type = rest[..open_paren].trim();
+        if !raw_type.to_ascii_uppercase().starts_with("IFC") || !is_preview_entity(raw_type) {
+            continue;
+        }
+        let args = balanced_parens(&rest[open_paren..]).unwrap_or_default();
+        let parts = split_top_level_args(args);
+        let name = parts.get(2).and_then(|value| parse_step_string(value));
+        out.push(IfcPreviewElement {
+            step_id: step_id.trim().to_string(),
+            type_name: raw_type.to_string(),
+            name,
+        });
+        if out.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+fn is_preview_entity(type_name: &str) -> bool {
+    matches!(
+        type_name.to_ascii_uppercase().as_str(),
+        "IFCWALL"
+            | "IFCWALLSTANDARDCASE"
+            | "IFCDOOR"
+            | "IFCWINDOW"
+            | "IFCSLAB"
+            | "IFCBEAM"
+            | "IFCCOLUMN"
+            | "IFCSTAIR"
+            | "IFCROOF"
+            | "IFCCURTAINWALL"
+            | "IFCSPACE"
+            | "IFCBUILDINGSTOREY"
+            | "IFCFURNISHINGELEMENT"
+            | "IFCFLOWSEGMENT"
+            | "IFCFLOWTERMINAL"
+            | "IFCFLOWFITTING"
+            | "IFCPLATE"
+            | "IFCMEMBER"
+    )
 }
 
 fn count_entity_starts(text: &str) -> usize {

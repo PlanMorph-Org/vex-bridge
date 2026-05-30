@@ -28,6 +28,10 @@ pub struct PairStartRequest {
     /// Human label that will appear in the user's account, e.g.
     /// `"Revit on Larry's MacBook"`.
     pub device_label: String,
+    /// Ask the native daemon to open the pairing URL. This avoids browser
+    /// popup blockers in app-mode desktop windows.
+    #[serde(default)]
+    pub open_browser: bool,
 }
 
 /// Response: shows the user a code and a URL to open in the browser.
@@ -141,6 +145,7 @@ pub struct SetupStatus {
     pub paired: bool,
     pub pair_status: PairStatus,
     pub default_device_label: String,
+    pub inbox_root_path: String,
     pub needs_inbox: bool,
     pub suggested_inbox_path: String,
     pub config_path: String,
@@ -151,10 +156,16 @@ pub struct SetupStatus {
 /// `POST /v1/setup/inbox` — create/update the initial watched IFC inbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupInboxRequest {
-    pub project_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
     #[serde(default)]
     pub project_name: Option<String>,
-    /// If absent, daemon chooses `~/VexInbox/<project_name-or-id>`.
+    /// Folder name under `~/VexInbox`. If absent, daemon derives it from the
+    /// project name or id.
+    #[serde(default)]
+    pub folder_name: Option<String>,
+    /// Back-compat: treated as a folder name or a path already inside
+    /// `~/VexInbox`; external absolute paths are rejected.
     #[serde(default)]
     pub local_path: Option<String>,
     #[serde(default)]

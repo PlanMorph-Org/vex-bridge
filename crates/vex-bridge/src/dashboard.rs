@@ -128,6 +128,19 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .commit-line { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .time-line { color: var(--muted); margin-top: 3px; }
+.view-toggle {
+  display: inline-flex;
+  align-self: start;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.view-toggle button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.view-toggle button.active { background: #f2f1ec; color: #111; }
 .view-grid {
   min-height: 0;
   display: grid;
@@ -169,6 +182,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 .kind.modified { color: var(--amber); }
 .kind.moved { color: var(--blue); }
 .kind.renamed { color: var(--violet); }
+.kind.unchanged { color: var(--muted); }
 .setup {
   display: none;
   position: fixed;
@@ -227,7 +241,13 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
           <div id="changeTitle" class="commit-line">No project selected</div>
           <div id="changeTime" class="time-line"></div>
         </div>
-        <div class="badges" id="countBadges"></div>
+        <div>
+          <div class="view-toggle" id="viewToggle">
+            <button type="button" data-mode="full" class="active">Full Model</button>
+            <button type="button" data-mode="changes">Changes Only</button>
+          </div>
+          <div class="badges" id="countBadges"></div>
+        </div>
       </div>
       <div class="view-grid">
         <div class="view-pane">
@@ -251,9 +271,9 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 <div class="setup" id="setupPanel">
   <div class="panel-head"><div class="panel-title">Add Inbox</div><button id="closeSetup" type="button">Close</button></div>
   <form id="setupForm">
-    <div class="field"><label for="projectId">Project ID</label><input id="projectId" required placeholder="prj_01HXYZ"></div>
     <div class="field"><label for="projectName">Project Name</label><input id="projectName" placeholder="Commercial Tower"></div>
-    <div class="field"><label for="localPath">Inbox Path</label><input id="localPath" placeholder="~/VexInbox/Commercial-Tower"></div>
+    <div class="field"><label for="folderName">Folder Name</label><input id="folderName" required placeholder="Commercial-Tower"></div>
+    <div class="row-meta" id="inboxHint">Folder will be created inside VexInbox.</div>
     <div class="field"><label for="ifcGuid">IFC Project GUID</label><input id="ifcGuid" placeholder="2HnQxDrSH5sBbC4NkVOGR8"></div>
     <button class="primary" type="submit">Save Inbox</button>
   </form>
@@ -267,6 +287,7 @@ let selectedCommit = null;
 let projectCommits = [];
 let latestChanges = null;
 let lastSetup = null;
+let currentViewMode = 'full';
 let pairPollTimer = null;
 const urlParams = new URLSearchParams(window.location.search);
 const requestedProject = urlParams.get('project');
@@ -281,7 +302,8 @@ const els = {
   planCanvas: document.getElementById('planCanvas'), modelCanvas: document.getElementById('modelCanvas'),
   planMeta: document.getElementById('planMeta'), modelMeta: document.getElementById('modelMeta'),
   pairButton: document.getElementById('pairButton'), syncButton: document.getElementById('syncButton'),
-  setupPanel: document.getElementById('setupPanel'), setupForm: document.getElementById('setupForm')
+  setupPanel: document.getElementById('setupPanel'), setupForm: document.getElementById('setupForm'),
+  inboxHint: document.getElementById('inboxHint'), viewToggle: document.getElementById('viewToggle')
 };
 
 document.getElementById('refreshButton').addEventListener('click', refresh);
@@ -290,6 +312,13 @@ els.pairButton.addEventListener('click', startOrPollPairing);
 els.syncButton.addEventListener('click', syncSelectedProject);
 document.getElementById('closeSetup').addEventListener('click', () => els.setupPanel.classList.remove('open'));
 els.setupForm.addEventListener('submit', saveInbox);
+els.viewToggle.addEventListener('click', event => {
+  const button = event.target.closest('button[data-mode]');
+  if (!button) return;
+  currentViewMode = button.dataset.mode;
+  for (const item of els.viewToggle.querySelectorAll('button')) item.classList.toggle('active', item === button);
+  renderChanges(latestChanges);
+});
 window.addEventListener('resize', () => drawChanges(latestChanges));
 
 async function api(path, options = {}) {
@@ -307,7 +336,7 @@ async function refresh() {
     els.topStatus.textContent = `${pairText(setup.pair_status)} / ${setup.watch.active_watchers}/${setup.watch.configured_projects} watching`;
     updatePairButton(setup.pair_status);
     els.syncButton.disabled = !selectedProject;
-    document.getElementById('localPath').placeholder = setup.suggested_inbox_path;
+    els.inboxHint.textContent = `Folders are created inside ${setup.inbox_root_path || setup.suggested_inbox_path || 'VexInbox'}.`;
     renderProjects(setup.watch.projects);
     if (!selectedProject && setup.watch.projects.length) {
       const requested = setup.watch.projects.find(project => project.project_id === requestedProject);
@@ -349,9 +378,8 @@ async function startOrPollPairing() {
   }
   const label = (lastSetup && lastSetup.default_device_label) || 'Vex Atlas Desktop';
   const response = await api('/v1/pair/start', {
-    method: 'POST', headers: jsonHeaders, body: JSON.stringify({device_label: label})
+    method: 'POST', headers: jsonHeaders, body: JSON.stringify({device_label: label, open_browser: true})
   });
-  window.open(response.pair_url, '_blank', 'noopener');
   els.topStatus.textContent = `Pairing code ${response.code}`;
   ensurePairPolling();
 }
@@ -474,17 +502,19 @@ async function loadChanges(projectId, fromCommit, toCommit) {
 }
 
 function renderChanges(changes) {
+  if (!changes) return;
   const diff = changes.visual_diff || {};
   const summary = diff.summary || diff.status || 'No previous version to compare';
   els.changeTitle.textContent = summary;
   els.changeTime.textContent = `Caught ${formatTime(changes.caught_at_unix)} / comparing ${short(changes.previous_commit)} -> ${short(changes.latest_commit)}`;
   renderBadges(diff.counts || {});
-  renderRows(diff.elements || []);
+  const changed = (diff.elements || []).filter(element => element.kind !== 'unchanged');
+  renderRows(changed);
   drawChanges(changes);
 }
 
 function renderBadges(counts) {
-  const kinds = ['added', 'removed', 'modified', 'moved', 'renamed'];
+  const kinds = ['added', 'removed', 'modified', 'moved', 'renamed', 'unchanged'];
   els.countBadges.innerHTML = '';
   for (const kind of kinds) {
     const badge = document.createElement('span');
@@ -499,7 +529,7 @@ function renderRows(elements) {
   for (const element of elements.slice(0, 150)) {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td class="kind ${element.kind}">${escapeHtml(element.kind)}</td>
-      <td>${escapeHtml(element.type_name || 'IFC element')}</td>
+      <td>${escapeHtml(elementType(element))}</td>
       <td>${escapeHtml(element.hint || idLabel(element.id) || '')}</td>`;
     els.changeRows.appendChild(tr);
   }
@@ -508,6 +538,16 @@ function renderRows(elements) {
 function drawChanges(changes) {
   drawPlan(els.planCanvas, changes);
   drawModel(els.modelCanvas, changes);
+}
+
+function visibleElements(changes) {
+  const diff = (changes && changes.visual_diff) || {};
+  const changed = (diff.elements || []).filter(element => element.kind !== 'unchanged');
+  if (currentViewMode === 'changes') return changed;
+  const model = diff.model_elements || [];
+  if (model.length && changed.length) return model.concat(changed);
+  if (model.length) return model;
+  return diff.elements || [];
 }
 
 function prepareCanvas(canvas) {
@@ -527,8 +567,8 @@ function drawPlan(canvas, changes) {
   ctx.strokeStyle = '#2f3435'; ctx.lineWidth = 1;
   for (let x = 24; x < width; x += 36) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
   for (let y = 24; y < height; y += 36) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
-  const elements = ((changes && changes.visual_diff && changes.visual_diff.elements) || []).slice(0, 80);
-  if (!elements.length) return drawEmpty(ctx, width, height);
+  const elements = visibleElements(changes).slice(0, 120);
+  if (!elements.length) { drawEmpty(ctx, width, height); els.planMeta.textContent = ''; return; }
   elements.forEach((el, i) => {
     const x = 38 + ((i * 53) % Math.max(60, width - 80));
     const y = 42 + ((i * 31) % Math.max(60, height - 90));
@@ -542,15 +582,15 @@ function drawModel(canvas, changes) {
   const {ctx, width, height} = prepareCanvas(canvas);
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = '#111313'; ctx.fillRect(0, 0, width, height);
-  const elements = ((changes && changes.visual_diff && changes.visual_diff.elements) || []).slice(0, 64);
-  if (!elements.length) return drawEmpty(ctx, width, height);
+  const elements = visibleElements(changes).slice(0, 96);
+  if (!elements.length) { drawEmpty(ctx, width, height); els.modelMeta.textContent = ''; return; }
   elements.forEach((el, i) => {
     const x = width * 0.18 + ((i * 47) % Math.max(80, width * 0.64));
     const y = height * 0.22 + ((i * 29) % Math.max(80, height * 0.58));
     const z = 12 + (i % 5) * 8;
     drawBlock(ctx, x, y, 36, 24, z, color(el.kind));
   });
-  els.modelMeta.textContent = 'visual diff';
+  els.modelMeta.textContent = currentViewMode === 'changes' ? 'changes only' : 'full model';
 }
 
 function drawBlock(ctx, x, y, w, h, z, c) {
@@ -563,35 +603,35 @@ function drawBlock(ctx, x, y, w, h, z, c) {
 
 function drawEmpty(ctx, width, height) {
   ctx.fillStyle = '#747873'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('No visual changes', width / 2, height / 2);
-  els.planMeta.textContent = ''; els.modelMeta.textContent = '';
+  ctx.fillText('No elements in this view', width / 2, height / 2);
 }
 
 function color(kind, alpha) {
-  const map = {added: '67,194,107', removed: '224,90,71', modified: '217,154,43', moved: '75,143,227', renamed: '155,107,211'};
+  const map = {added: '67,194,107', removed: '224,90,71', modified: '217,154,43', moved: '75,143,227', renamed: '155,107,211', unchanged: '168,170,167'};
   const rgb = map[kind] || '168,170,167';
   return alpha == null ? `rgb(${rgb})` : `rgba(${rgb},${alpha})`;
 }
 
 async function saveInbox(event) {
   event.preventDefault();
+  const folderName = document.getElementById('folderName').value.trim();
   const body = {
-    project_id: document.getElementById('projectId').value.trim(),
     project_name: optionalValue('projectName'),
-    local_path: optionalValue('localPath'),
+    folder_name: folderName,
     include: ['*.ifc'],
     ifc_project_guid: optionalValue('ifcGuid')
   };
-  await api('/v1/setup/inbox', {method: 'POST', headers: jsonHeaders, body: JSON.stringify(body)});
+  const response = await api('/v1/setup/inbox', {method: 'POST', headers: jsonHeaders, body: JSON.stringify(body)});
   els.setupPanel.classList.remove('open');
-  selectedProject = body.project_id;
+  selectedProject = response.repo.project_id;
   await refresh();
 }
 
 function optionalValue(id) { const value = document.getElementById(id).value.trim(); return value || null; }
 function parentFor(commit) { return commit && commit.parents && commit.parents.length ? commit.parents[0] : null; }
 function short(value) { return value ? value.slice(0, 12) : 'none'; }
-function idLabel(id) { return id && (id.GlobalId || id.StepId || id.step_id); }
+function idLabel(id) { return typeof id === 'string' ? id : id && (id.GlobalId || id.StepId || id.step_id); }
+function elementType(element) { return element.type_name || element.type || 'IFC element'; }
 function formatTime(seconds) { return seconds ? new Date(seconds * 1000).toLocaleString() : 'not caught yet'; }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 
