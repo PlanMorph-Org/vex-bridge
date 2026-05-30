@@ -211,6 +211,7 @@ fn run_pair(paths: Paths, device_label: String, open_browser: bool) -> BridgeRes
             pair_url: outcome.pair_url.clone(),
             expires_at_unix,
             device_label: device_label.clone(),
+            key_fingerprint: outcome.key_fingerprint.clone(),
         };
         state.save(&paths)?;
 

@@ -29,20 +29,24 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ChangesEnvironment=yes
-UninstallDisplayIcon={app}\vex-tray.exe
+UninstallDisplayIcon={app}\vex-desktop.exe
 
 [Tasks]
 Name: "autostart"; Description: "Start Vex Atlas tray when I sign in"; GroupDescription: "Startup:"; Flags: checkedonce
+Name: "desktopicon"; Description: "Create a Vex Atlas desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\vex.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\vex-bridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\vex-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\vex-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\SHA256SUMS"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
+Name: "{group}\Vex Atlas"; Filename: "{app}\vex-desktop.exe"
 Name: "{group}\Vex Atlas Tray"; Filename: "{app}\vex-tray.exe"
-Name: "{group}\Pair Vex Atlas Device"; Filename: "{app}\vex-bridge.exe"; Parameters: "pair --open-browser"
+Name: "{group}\Pair Vex Atlas Device"; Filename: "{app}\vex-desktop.exe"
+Name: "{autodesktop}\Vex Atlas"; Filename: "{app}\vex-desktop.exe"; Tasks: desktopicon
 Name: "{userstartup}\Vex Atlas Tray"; Filename: "{app}\vex-tray.exe"; Tasks: autostart
 
 [Registry]
@@ -50,7 +54,7 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; Value
 
 [Run]
 Filename: "{app}\vex-tray.exe"; Description: "Start Vex Atlas tray"; Flags: nowait skipifsilent
-Filename: "{app}\vex-bridge.exe"; Parameters: "pair --open-browser"; Description: "Pair this device in your browser"; Flags: nowait runhidden skipifsilent
+Filename: "{app}\vex-desktop.exe"; Description: "Open Vex Atlas"; Flags: nowait skipifsilent
 
 [Code]
 const

@@ -39,6 +39,8 @@ pub enum PairingState {
         pair_url: String,
         expires_at_unix: i64,
         device_label: String,
+        #[serde(default)]
+        key_fingerprint: String,
     },
     Paired {
         device_label: String,

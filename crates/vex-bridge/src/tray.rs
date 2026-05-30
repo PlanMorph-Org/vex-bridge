@@ -296,6 +296,18 @@ fn update_menu(
 }
 
 fn open_dashboard(url: &str) {
+    if let Ok(exe) = desktop_exe() {
+        if Command::new(exe)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
     if let Err(error) = open::that(url) {
         eprintln!("could not open dashboard: {error}");
     }
@@ -400,31 +412,42 @@ fn pair_device() {
         eprintln!("could not find vex-bridge executable");
         return;
     };
-    if let Err(error) = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("pair")
         .arg("--device-label")
         .arg(device_label())
         .arg("--open-browser")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    if let Err(error) = command.spawn() {
         eprintln!("could not start pairing: {error}");
     }
 }
 
 fn start_daemon() -> BridgeResult<()> {
     let exe = bridge_exe()?;
-    Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("start")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(BridgeError::Io)
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    command.spawn().map(|_| ()).map_err(BridgeError::Io)
 }
+
+#[cfg(target_os = "windows")]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_console_window(_command: &mut Command) {}
 
 fn bridge_exe() -> BridgeResult<std::path::PathBuf> {
     let mut exe = std::env::current_exe().map_err(BridgeError::Io)?;
@@ -441,6 +464,21 @@ fn bridge_exe() -> BridgeResult<std::path::PathBuf> {
     } else {
         "vex-bridge"
     }))
+}
+
+fn desktop_exe() -> BridgeResult<std::path::PathBuf> {
+    let mut exe = std::env::current_exe().map_err(BridgeError::Io)?;
+    exe.set_file_name(if cfg!(windows) {
+        "vex-desktop.exe"
+    } else {
+        "vex-desktop"
+    });
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    Err(BridgeError::Config(
+        "vex-desktop executable was not found".into(),
+    ))
 }
 
 fn device_label() -> String {

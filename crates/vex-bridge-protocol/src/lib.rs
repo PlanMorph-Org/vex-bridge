@@ -139,6 +139,8 @@ pub struct RepoRegisterResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupStatus {
     pub paired: bool,
+    pub pair_status: PairStatus,
+    pub default_device_label: String,
     pub needs_inbox: bool,
     pub suggested_inbox_path: String,
     pub config_path: String,

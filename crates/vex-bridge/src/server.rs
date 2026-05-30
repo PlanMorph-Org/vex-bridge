@@ -27,6 +27,7 @@ use vex_bridge_protocol as proto;
 
 use crate::config::{Config, Paths};
 use crate::dashboard;
+use crate::device::default_device_label;
 use crate::errors::BridgeError;
 use crate::pairing;
 use crate::pipeline::{self, WatchPipeline};
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/health", get(handle_health))
         .route("/v1/pair/status", get(handle_pair_status))
         .route("/v1/pair/start", post(handle_pair_start))
+        .route("/v1/pair/poll", post(handle_pair_poll))
         .route("/v1/setup/status", get(handle_setup_status))
         .route("/v1/setup/inbox", post(handle_setup_inbox))
         .route("/v1/watch/status", get(handle_watch_status))
@@ -152,7 +154,11 @@ async fn handle_pair_status(
 ) -> Result<Json<proto::PairStatus>, Response> {
     require_token(&headers, &state.access_token)?;
     let daemon_state = state.state.read().await.clone();
-    let body = match daemon_state.pairing {
+    Ok(Json(pair_status_from_state(&daemon_state)))
+}
+
+fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
+    match &state.pairing {
         PairingState::Unpaired => proto::PairStatus::Unpaired,
         PairingState::Pending {
             code,
@@ -160,9 +166,9 @@ async fn handle_pair_status(
             expires_at_unix,
             ..
         } => proto::PairStatus::Pending {
-            code,
-            pair_url,
-            expires_at: rfc3339_from_unix(expires_at_unix),
+            code: code.clone(),
+            pair_url: pair_url.clone(),
+            expires_at: rfc3339_from_unix(*expires_at_unix),
         },
         PairingState::Paired {
             device_label,
@@ -170,12 +176,11 @@ async fn handle_pair_status(
             paired_at_unix,
             ..
         } => proto::PairStatus::Paired {
-            device_label,
-            key_fingerprint,
-            paired_at: rfc3339_from_unix(paired_at_unix),
+            device_label: device_label.clone(),
+            key_fingerprint: key_fingerprint.clone(),
+            paired_at: rfc3339_from_unix(*paired_at_unix),
         },
-    };
-    Ok(Json(body))
+    }
 }
 
 async fn handle_pair_start(
@@ -196,6 +201,7 @@ async fn handle_pair_start(
             pair_url: outcome.pair_url.clone(),
             expires_at_unix: now_unix() + 600,
             device_label: req.device_label.clone(),
+            key_fingerprint: outcome.key_fingerprint.clone(),
         };
         daemon_state
             .save(&state.paths)
@@ -209,6 +215,62 @@ async fn handle_pair_start(
     }))
 }
 
+async fn handle_pair_poll(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<proto::PairStatus>, Response> {
+    require_token(&headers, &state.access_token)?;
+
+    let pending = {
+        let daemon_state = state.state.read().await.clone();
+        match daemon_state.pairing {
+            PairingState::Pending {
+                code,
+                expires_at_unix,
+                device_label,
+                key_fingerprint,
+                ..
+            } => Some((code, expires_at_unix, device_label, key_fingerprint)),
+            _ => return Ok(Json(pair_status_from_state(&daemon_state))),
+        }
+    };
+
+    let Some((code, expires_at_unix, device_label, key_fingerprint)) = pending else {
+        let daemon_state = state.state.read().await.clone();
+        return Ok(Json(pair_status_from_state(&daemon_state)));
+    };
+
+    if now_unix() >= expires_at_unix {
+        let mut daemon_state = state.state.write().await;
+        daemon_state.pairing = PairingState::Unpaired;
+        daemon_state
+            .save(&state.paths)
+            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        return Ok(Json(proto::PairStatus::Unpaired));
+    }
+
+    let cfg = state.config.read().await.clone();
+    if let Some(key_id) = pairing::poll(&cfg, &code)
+        .await
+        .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?
+    {
+        let mut daemon_state = state.state.write().await;
+        daemon_state.pairing = PairingState::Paired {
+            device_label,
+            key_fingerprint,
+            key_id,
+            paired_at_unix: now_unix(),
+        };
+        daemon_state
+            .save(&state.paths)
+            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        return Ok(Json(pair_status_from_state(&daemon_state)));
+    }
+
+    let daemon_state = state.state.read().await.clone();
+    Ok(Json(pair_status_from_state(&daemon_state)))
+}
+
 async fn handle_setup_status(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -220,6 +282,8 @@ async fn handle_setup_status(
     let watch = watch_status_from(&cfg, &daemon_state, &active);
     Ok(Json(proto::SetupStatus {
         paired: matches!(daemon_state.pairing, PairingState::Paired { .. }),
+        pair_status: pair_status_from_state(&daemon_state),
+        default_device_label: default_device_label(),
         needs_inbox: cfg.watch.is_empty(),
         suggested_inbox_path: default_inbox_path("default", None)
             .map(|path| path.to_string_lossy().to_string())

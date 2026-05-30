@@ -1,8 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() {
-    if let Err(error) = vex_bridge::tray::run() {
-        eprintln!("vex-tray: {error:#}");
+    if let Err(error) = vex_bridge::desktop::run() {
+        eprintln!("vex-desktop: {error:#}");
         std::process::exit(1);
     }
 }

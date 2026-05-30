@@ -46,6 +46,7 @@ button {
 }
 button:hover { border-color: #596066; }
 button.primary { background: #f2f1ec; color: #111; border-color: #f2f1ec; }
+button:disabled { opacity: .45; cursor: default; }
 .app {
   height: 100%;
   display: grid;
@@ -203,10 +204,12 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 <div class="app">
   <div class="topbar">
     <div class="status-dot" id="statusDot"></div>
-    <div class="brand">Vex</div>
+    <div class="brand">Vex Atlas</div>
     <div id="topStatus" class="row-meta">Loading</div>
     <div class="toolbar-spacer"></div>
+    <button id="pairButton">Pair Device</button>
     <button id="setupButton">Add Inbox</button>
+    <button id="syncButton">Sync</button>
     <button class="primary" id="refreshButton">Refresh</button>
   </div>
   <main class="main">
@@ -263,6 +266,8 @@ let selectedProject = null;
 let selectedCommit = null;
 let projectCommits = [];
 let latestChanges = null;
+let lastSetup = null;
+let pairPollTimer = null;
 const urlParams = new URLSearchParams(window.location.search);
 const requestedProject = urlParams.get('project');
 const requestedCommit = urlParams.get('commit');
@@ -275,11 +280,14 @@ const els = {
   countBadges: document.getElementById('countBadges'), changeRows: document.getElementById('changeRows'),
   planCanvas: document.getElementById('planCanvas'), modelCanvas: document.getElementById('modelCanvas'),
   planMeta: document.getElementById('planMeta'), modelMeta: document.getElementById('modelMeta'),
+  pairButton: document.getElementById('pairButton'), syncButton: document.getElementById('syncButton'),
   setupPanel: document.getElementById('setupPanel'), setupForm: document.getElementById('setupForm')
 };
 
 document.getElementById('refreshButton').addEventListener('click', refresh);
 document.getElementById('setupButton').addEventListener('click', () => els.setupPanel.classList.add('open'));
+els.pairButton.addEventListener('click', startOrPollPairing);
+els.syncButton.addEventListener('click', syncSelectedProject);
 document.getElementById('closeSetup').addEventListener('click', () => els.setupPanel.classList.remove('open'));
 els.setupForm.addEventListener('submit', saveInbox);
 window.addEventListener('resize', () => drawChanges(latestChanges));
@@ -293,8 +301,12 @@ async function api(path, options = {}) {
 async function refresh() {
   try {
     const setup = await api('/v1/setup/status', {headers});
-    els.statusDot.className = `status-dot ${setup.watch.active_watchers > 0 ? 'ok' : 'warn'}`;
-    els.topStatus.textContent = `${setup.watch.active_watchers}/${setup.watch.configured_projects} watching`;
+    lastSetup = setup;
+    const paired = setup.pair_status && setup.pair_status.status === 'paired';
+    els.statusDot.className = `status-dot ${paired && setup.watch.active_watchers > 0 ? 'ok' : 'warn'}`;
+    els.topStatus.textContent = `${pairText(setup.pair_status)} / ${setup.watch.active_watchers}/${setup.watch.configured_projects} watching`;
+    updatePairButton(setup.pair_status);
+    els.syncButton.disabled = !selectedProject;
     document.getElementById('localPath').placeholder = setup.suggested_inbox_path;
     renderProjects(setup.watch.projects);
     if (!selectedProject && setup.watch.projects.length) {
@@ -304,6 +316,79 @@ async function refresh() {
   } catch (error) {
     els.statusDot.className = 'status-dot warn';
     els.topStatus.textContent = error.message;
+  }
+}
+
+function updatePairButton(status) {
+  const kind = status && status.status;
+  if (kind === 'paired') {
+    els.pairButton.textContent = 'Paired';
+    els.pairButton.disabled = true;
+  } else if (kind === 'pending') {
+    els.pairButton.textContent = 'Check Pairing';
+    els.pairButton.disabled = false;
+    ensurePairPolling();
+  } else {
+    els.pairButton.textContent = 'Pair Device';
+    els.pairButton.disabled = false;
+  }
+}
+
+function pairText(status) {
+  const kind = status && status.status;
+  if (kind === 'paired') return `Paired as ${status.device_label || 'this workstation'}`;
+  if (kind === 'pending') return `Pairing code ${status.code}`;
+  return 'Not paired';
+}
+
+async function startOrPollPairing() {
+  const status = lastSetup && lastSetup.pair_status;
+  if (status && status.status === 'pending') {
+    await pollPairing();
+    return;
+  }
+  const label = (lastSetup && lastSetup.default_device_label) || 'Vex Atlas Desktop';
+  const response = await api('/v1/pair/start', {
+    method: 'POST', headers: jsonHeaders, body: JSON.stringify({device_label: label})
+  });
+  window.open(response.pair_url, '_blank', 'noopener');
+  els.topStatus.textContent = `Pairing code ${response.code}`;
+  ensurePairPolling();
+}
+
+function ensurePairPolling() {
+  if (pairPollTimer) return;
+  pairPollTimer = setInterval(pollPairing, 3000);
+}
+
+async function pollPairing() {
+  try {
+    const status = await api('/v1/pair/poll', {method: 'POST', headers});
+    if (lastSetup) lastSetup.pair_status = status;
+    updatePairButton(status);
+    els.topStatus.textContent = `${pairText(status)} / ${lastSetup ? `${lastSetup.watch.active_watchers}/${lastSetup.watch.configured_projects} watching` : 'watching'}`;
+    if (!status || status.status !== 'pending') {
+      clearInterval(pairPollTimer);
+      pairPollTimer = null;
+      await refresh();
+    }
+  } catch (error) {
+    els.topStatus.textContent = error.message;
+  }
+}
+
+async function syncSelectedProject() {
+  if (!selectedProject) return;
+  els.syncButton.disabled = true;
+  try {
+    const result = await api('/v1/repo/push', {
+      method: 'POST', headers: jsonHeaders, body: JSON.stringify({project_id: selectedProject, branch: 'main'})
+    });
+    els.topStatus.textContent = `Synced ${short(result.commit_hash)}`;
+  } catch (error) {
+    els.topStatus.textContent = error.message;
+  } finally {
+    els.syncButton.disabled = false;
   }
 }
 

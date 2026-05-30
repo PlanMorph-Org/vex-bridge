@@ -57,7 +57,7 @@ jobs:
       #   macOS   → Keychain Services
       #   Windows → Windows Credential Manager
 
-      - name: Build vex-bridge and vex-tray
+      - name: Build Vex Atlas desktop agent
         run: cargo build --release -p vex-bridge --features tray --target ${{ matrix.target }}
 
       - name: Download vex from latest vex release
@@ -90,15 +90,17 @@ jobs:
           EXE="${{ matrix.exe }}"
           BIN="vex-bridge${EXE}"
           TRAY="vex-tray${EXE}"
+          DESKTOP="vex-desktop${EXE}"
           VEX="vex${EXE}"
           DIR="dist/vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}"
           mkdir -p "$DIR" dist
 
           cp "target/${{ matrix.target }}/release/${BIN}" "$DIR/${BIN}"
           cp "target/${{ matrix.target }}/release/${TRAY}" "$DIR/${TRAY}"
+          cp "target/${{ matrix.target }}/release/${DESKTOP}" "$DIR/${DESKTOP}"
           cp "$VEX_BIN_PATH" "$DIR/${VEX}"
 
-          ( cd "$DIR" && sha256sum "${BIN}" "${TRAY}" "${VEX}" > SHA256SUMS )
+          ( cd "$DIR" && sha256sum "${BIN}" "${TRAY}" "${DESKTOP}" "${VEX}" > SHA256SUMS )
           ARCHIVE="${DIR}.tar.gz"
           tar -czf "$ARCHIVE" -C dist "vex-bridge-${VERSION}-${{ matrix.artifact_suffix }}"
 

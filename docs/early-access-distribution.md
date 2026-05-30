@@ -17,8 +17,9 @@ is required.
    > This is early access software. The release ships raw desktop-agent
    > binaries on macOS and a per-user setup executable on Windows. Windows users
    > should run the setup executable; macOS users should extract the bundle, keep
-   > `vex`, `vex-bridge`, and `vex-tray` together, and launch the daemon/tray from
-   > their normal startup mechanism while we validate the standalone workflow.
+   > `vex`, `vex-bridge`, `vex-tray`, and `vex-desktop` together, and launch the
+   > desktop app/tray from their normal startup mechanism while we validate the
+   > standalone workflow.
 
 The release workflow downloads the matching platform `vex` bundle from the
 latest `PlanMorph-Org/vex` GitHub Release. Set the repository variable
@@ -33,29 +34,30 @@ The supported install unit is the desktop agent:
 ```text
 vex-bridge(.exe)
 vex-tray(.exe)
+vex-desktop(.exe)
 vex(.exe)
 ```
 
 The Windows setup executable:
 
-- installs `vex`, `vex-bridge`, `vex-tray`, and `SHA256SUMS` together under the
-   current user's local application folder,
+- installs `vex`, `vex-bridge`, `vex-tray`, `vex-desktop`, and `SHA256SUMS`
+   together under the current user's local application folder,
 - adds that install folder to the user's PATH,
 - registers `vex-tray` to start at sign-in,
 - starts `vex-tray` after install, and
-- launches `vex-bridge pair --open-browser` so the first-run browser pairing
-   flow opens immediately.
+- launches the Vex Atlas desktop app so first-run pairing, inbox setup, sync,
+   and change review happen from the UI.
 
 The macOS bundle:
 
-- includes the daemon, tray, and matching `vex` engine binaries,
+- includes the daemon, tray, desktop app, and matching `vex` engine binaries,
 - includes `SHA256SUMS` for the bundled files,
 - does not register login items, scheduled tasks, launchd agents, or services,
 - leaves startup, pairing, and project/inbox registration to the user, the
    Architur setup UI, or
   `/v1/repo/register`.
 
-Keep the three binaries in the same directory. If `config.toml` does not set
+Keep the four binaries in the same directory. If `config.toml` does not set
 `vex_bin`, `vex-bridge` automatically uses the bundled `vex` binary next to the
 running daemon/tray and only falls back to `vex` on `PATH` when no bundled copy
 exists.

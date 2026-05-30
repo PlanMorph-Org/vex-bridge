@@ -14,6 +14,10 @@ name = "vex-tray"
 path = "src/tray_main.rs"
 required-features = ["tray"]
 
+[[bin]]
+name = "vex-desktop"
+path = "src/desktop_main.rs"
+
 [lib]
 name = "vex_bridge"
 path = "src/lib.rs"
