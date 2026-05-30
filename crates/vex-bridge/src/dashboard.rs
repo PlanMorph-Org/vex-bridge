@@ -327,7 +327,7 @@ async function api(path, options = {}) {
   return await response.json();
 }
 
-async function refresh() {
+async function refresh(options = {}) {
   try {
     const setup = await api('/v1/setup/status', {headers});
     lastSetup = setup;
@@ -340,7 +340,9 @@ async function refresh() {
     renderProjects(setup.watch.projects);
     if (!selectedProject && setup.watch.projects.length) {
       const requested = setup.watch.projects.find(project => project.project_id === requestedProject);
-      selectProject((requested || setup.watch.projects[0]).project_id);
+      await selectProject((requested || setup.watch.projects[0]).project_id);
+    } else if (selectedProject && options.reloadSelected !== false) {
+      await reloadSelectedProject();
     }
   } catch (error) {
     els.statusDot.className = 'status-dot warn';
@@ -438,11 +440,17 @@ async function selectProject(projectId) {
   selectedProject = projectId;
   selectedCommit = null;
   projectCommits = [];
-  await loadHistory(projectId);
-  const requested = projectCommits.find(commit => requestedCommit && commit.commit.startsWith(requestedCommit));
+  await reloadSelectedProject();
+  await refresh({reloadSelected: false});
+}
+
+async function reloadSelectedProject() {
+  if (!selectedProject) return;
+  const previousCommit = selectedCommit;
+  await loadHistory(selectedProject);
+  const requested = !previousCommit ? projectCommits.find(commit => requestedCommit && commit.commit.startsWith(requestedCommit)) : null;
   const target = requested || projectCommits[0];
   await selectCommit(target ? target.commit : null);
-  await refresh();
 }
 
 async function loadHistory(projectId) {
@@ -623,8 +631,7 @@ async function saveInbox(event) {
   };
   const response = await api('/v1/setup/inbox', {method: 'POST', headers: jsonHeaders, body: JSON.stringify(body)});
   els.setupPanel.classList.remove('open');
-  selectedProject = response.repo.project_id;
-  await refresh();
+  await selectProject(response.repo.project_id);
 }
 
 function optionalValue(id) { const value = document.getElementById(id).value.trim(); return value || null; }

@@ -372,6 +372,13 @@ async fn handle_project_history(
     let entry =
         find_watch_entry(&cfg, &project_id).ok_or_else(|| unknown_project_response(&project_id))?;
     let dir = PathBuf::from(&entry.path);
+    if !is_local_vex_repo(&dir) {
+        return Ok(Json(proto::ProjectHistoryResponse {
+            project_id,
+            project_name: entry.project_name.clone(),
+            commits: Vec::new(),
+        }));
+    }
     let log = vex_cli::log_json(&cfg.vex_bin, &dir)
         .await
         .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?;
@@ -394,10 +401,14 @@ async fn handle_project_changes(
     let entry =
         find_watch_entry(&cfg, &project_id).ok_or_else(|| unknown_project_response(&project_id))?;
     let dir = PathBuf::from(&entry.path);
-    let log = vex_cli::log_json(&cfg.vex_bin, &dir)
-        .await
-        .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?;
-    let commits = commits_from_log(log);
+    let commits = if is_local_vex_repo(&dir) {
+        let log = vex_cli::log_json(&cfg.vex_bin, &dir)
+            .await
+            .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?;
+        commits_from_log(log)
+    } else {
+        Vec::new()
+    };
     let latest_commit = query
         .to
         .as_ref()
@@ -821,6 +832,10 @@ fn find_watch_entry(cfg: &Config, project_id: &str) -> Option<crate::config::Wat
         .iter()
         .find(|watch| watch.project_id == project_id)
         .cloned()
+}
+
+fn is_local_vex_repo(dir: &Path) -> bool {
+    dir.join(".vex").join("config.toml").is_file()
 }
 
 fn unknown_project_response(project_id: &str) -> Response {

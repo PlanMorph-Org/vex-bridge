@@ -171,27 +171,37 @@ pub fn parse_preview_elements(path: &Path, limit: usize) -> BridgeResult<Vec<Ifc
 }
 
 fn is_preview_entity(type_name: &str) -> bool {
-    matches!(
-        type_name.to_ascii_uppercase().as_str(),
-        "IFCWALL"
-            | "IFCWALLSTANDARDCASE"
-            | "IFCDOOR"
-            | "IFCWINDOW"
-            | "IFCSLAB"
-            | "IFCBEAM"
-            | "IFCCOLUMN"
-            | "IFCSTAIR"
-            | "IFCROOF"
-            | "IFCCURTAINWALL"
-            | "IFCSPACE"
-            | "IFCBUILDINGSTOREY"
-            | "IFCFURNISHINGELEMENT"
-            | "IFCFLOWSEGMENT"
-            | "IFCFLOWTERMINAL"
-            | "IFCFLOWFITTING"
-            | "IFCPLATE"
-            | "IFCMEMBER"
-    )
+    let upper = type_name.to_ascii_uppercase();
+    if !upper.starts_with("IFC") {
+        return false;
+    }
+    const SKIP_PREFIXES: &[&str] = &[
+        "IFCREL",
+        "IFCPROPERTY",
+        "IFCPROPERTYS",
+        "IFCQUANTITY",
+        "IFCOWNER",
+        "IFCPERSON",
+        "IFCORGANIZATION",
+        "IFCAPPLICATION",
+        "IFCSIUNIT",
+        "IFCUNIT",
+        "IFCMEASURE",
+        "IFCCARTESIAN",
+        "IFCDIRECTION",
+        "IFCAXIS",
+        "IFCLOCALPLACEMENT",
+        "IFCGEOMETRIC",
+        "IFCSHAPE",
+        "IFCPRODUCTDEFINITIONSHAPE",
+        "IFCSTYLE",
+        "IFCCOLOUR",
+        "IFCMATERIAL",
+        "IFCPRESENTATION",
+        "IFCTOPOLOGY",
+        "IFCCONNECTION",
+    ];
+    !SKIP_PREFIXES.iter().any(|prefix| upper.starts_with(prefix))
 }
 
 fn count_entity_starts(text: &str) -> usize {

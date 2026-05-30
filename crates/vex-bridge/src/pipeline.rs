@@ -107,21 +107,29 @@ pub fn spawn_entry(
 
     let dir_for_cb = dir.clone();
     let entry_for_cb = entry.clone();
+    let runtime_for_cb = runtime.clone();
+    let lock_for_cb = lock.clone();
+    let bin_for_cb = bin.clone();
+    let api_base_for_cb = api_base.clone();
+    let author_name_for_cb = author_name.clone();
+    let author_email_for_cb = author_email.clone();
+    let state_for_cb = state.clone();
+    let paths_for_cb = paths.clone();
     let handle = watcher::spawn(entry.clone(), move |changed| {
         if !is_ifc_candidate(&changed) || !matches_include(&changed, &entry_for_cb.include) {
             return;
         }
-        let runtime = runtime.clone();
-        let lock = lock.clone();
-        let bin = bin.clone();
-        let api_base = api_base.clone();
+        let runtime = runtime_for_cb.clone();
+        let lock = lock_for_cb.clone();
+        let bin = bin_for_cb.clone();
+        let api_base = api_base_for_cb.clone();
         let entry = entry_for_cb.clone();
         let project_id = entry.project_id.clone();
         let dir = dir_for_cb.clone();
-        let author_name = author_name.clone();
-        let author_email = author_email.clone();
-        let state = state.clone();
-        let paths = paths.clone();
+        let author_name = author_name_for_cb.clone();
+        let author_email = author_email_for_cb.clone();
+        let state = state_for_cb.clone();
+        let paths = paths_for_cb.clone();
         runtime.spawn(async move {
             let _g = lock.lock().await;
             if let Err(e) = run_pipeline(PipelineRun {
@@ -158,6 +166,63 @@ pub fn spawn_entry(
             }
         });
     })?;
+
+    let scan_lock = lock.clone();
+    let scan_bin = cfg.vex_bin.clone();
+    let scan_api_base = cfg.api_base.clone();
+    let scan_entry = entry.clone();
+    let scan_dir = dir.clone();
+    let scan_author_name = cfg.default_author_name.clone();
+    let scan_author_email = cfg.default_author_email.clone();
+    let scan_state = state.clone();
+    let scan_paths = paths.clone();
+    runtime.spawn(async move {
+        let _g = scan_lock.lock().await;
+        let files = match existing_ifc_files(&scan_dir) {
+            Ok(files) => files,
+            Err(error) => {
+                warn!(path = %scan_dir.display(), error = %error, "could not scan existing IFC files");
+                return;
+            }
+        };
+        for changed in files {
+            if !matches_include(&changed, &scan_entry.include) {
+                continue;
+            }
+            if let Err(error) = run_pipeline(PipelineRun {
+                bin: scan_bin.clone(),
+                dir: scan_dir.clone(),
+                api_base: scan_api_base.clone(),
+                entry: scan_entry.clone(),
+                changed: changed.clone(),
+                author_name: scan_author_name.clone(),
+                author_email: scan_author_email.clone(),
+                state: scan_state.clone(),
+                paths: scan_paths.clone(),
+            })
+            .await
+            {
+                record_activity(
+                    &scan_state,
+                    &scan_paths,
+                    activity_event(
+                        &scan_entry,
+                        &scan_dir,
+                        &changed,
+                        ActivityDetails {
+                            kind: proto::ActivityKind::Error,
+                            commit_hash: None,
+                            content_hash: None,
+                            message: format!("Could not process {}", file_label(&changed)),
+                            detail: Some(error.to_string()),
+                        },
+                    ),
+                )
+                .await;
+                error!(error = %error, project = %scan_entry.project_id, "inbox scan failed");
+            }
+        }
+    });
 
     Ok(WatchPipeline {
         project_id: entry.project_id,
@@ -307,10 +372,16 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
     };
     info!(commit = %hash, "committed");
 
-    // Push to origin/main. The remote URL was registered above (or by the
-    // user manually) and points at vex-sshd → vex-serve on the architur host.
-    vex_cli::push(bin, dir, "origin", "refs/heads/main").await?;
-    info!(project = %entry.project_id, commit = %hash, "pushed");
+    let push_detail = match vex_cli::push(bin, dir, "origin", "refs/heads/main").await {
+        Ok(()) => {
+            info!(project = %entry.project_id, commit = %hash, "pushed");
+            format!("pushed {hash}")
+        }
+        Err(error) => {
+            warn!(project = %entry.project_id, commit = %hash, error = %error, "committed locally but push failed");
+            format!("committed locally; sync failed: {error}")
+        }
+    };
 
     {
         let mut state = state.write().await;
@@ -328,7 +399,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
                 commit_hash: Some(hash.clone()),
                 content_hash: Some(content_hash.clone()),
                 message: msg.clone(),
-                detail: Some(format!("pushed {hash}")),
+                detail: Some(push_detail),
             },
         ));
         state.save(&paths)?;
@@ -478,6 +549,36 @@ fn matches_include(path: &Path, include: &[String]) -> bool {
         "*.ifc" | "*.IFC" => is_ifc_candidate(path),
         _ => pattern == file_name,
     })
+}
+
+fn existing_ifc_files(dir: &Path) -> BridgeResult<Vec<PathBuf>> {
+    fn visit(dir: &Path, out: &mut Vec<(PathBuf, SystemTime)>) -> BridgeResult<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path
+                .components()
+                .any(|component| matches!(component, Component::Normal(name) if name == ".vex"))
+            {
+                continue;
+            }
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                visit(&path, out)?;
+                continue;
+            }
+            if !is_ifc_candidate(&path) {
+                continue;
+            }
+            out.push((path, meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(dir, &mut files)?;
+    files.sort_by_key(|(_, modified)| *modified);
+    Ok(files.into_iter().map(|(path, _)| path).collect())
 }
 
 fn entry_matches_ifc(entry: &WatchEntry, intake: &IfcIntake) -> bool {
