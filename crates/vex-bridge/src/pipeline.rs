@@ -383,11 +383,26 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
         }
     };
 
+    let snapshot_path = match archive_processed_file_async(dir, changed, &content_hash).await {
+        Ok(path) => path,
+        Err(error) => {
+            warn!(file = %changed.display(), error = %error, "could not archive processed IFC");
+            changed.to_path_buf()
+        }
+    };
+
     {
         let mut state = state.write().await;
         state.mark_ifc_hash_seen(
             content_hash.clone(),
             entry.project_id.clone(),
+            intake.project_guid.clone(),
+        );
+        state.record_ifc_snapshot(
+            entry.project_id.clone(),
+            hash.clone(),
+            content_hash.clone(),
+            snapshot_path.to_string_lossy().to_string(),
             intake.project_guid.clone(),
         );
         state.push_activity(activity_event(
@@ -403,10 +418,6 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
             },
         ));
         state.save(&paths)?;
-    }
-
-    if let Err(e) = archive_processed_file_async(dir, changed, &content_hash).await {
-        warn!(file = %changed.display(), error = %e, "could not archive processed IFC");
     }
     Ok(())
 }

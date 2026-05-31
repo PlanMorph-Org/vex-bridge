@@ -101,6 +101,24 @@ button:disabled { opacity: .45; cursor: default; }
 .row:hover, .row.active { background: var(--panel-2); }
 .row-title { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-meta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: stretch;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.project-row .row { border-bottom: 0; }
+.icon-button {
+  align-self: center;
+  justify-self: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+.icon-button.danger:hover { color: #f09a8e; border-color: rgba(224,90,71,.65); }
 .badges { display: flex; flex-wrap: wrap; gap: 6px; }
 .badge {
   display: inline-flex;
@@ -154,6 +172,7 @@ button:disabled { opacity: .45; cursor: default; }
   background: #111313;
   display: grid;
   grid-template-rows: 38px 1fr;
+  position: relative;
 }
 .view-pane header {
   display: flex;
@@ -164,6 +183,17 @@ button:disabled { opacity: .45; cursor: default; }
   color: var(--muted);
 }
 canvas { width: 100%; height: 100%; display: block; }
+.view-status {
+  position: absolute;
+  inset: 38px 0 0 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  color: var(--muted);
+  text-align: center;
+  pointer-events: none;
+}
+.view-status:empty { display: none; }
 .empty {
   padding: 18px;
   color: var(--muted);
@@ -197,6 +227,18 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 }
 .setup.open { display: block; }
 .setup form { display: grid; gap: 10px; padding: 14px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.radio-group { display: grid; gap: 8px; }
+.radio-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: var(--text);
+}
+.radio-option input { width: auto; margin-top: 2px; }
+.radio-option span { color: var(--muted); font-size: 12px; }
+.danger-text { color: #f09a8e; }
 .field { display: grid; gap: 5px; }
 .field label { color: var(--muted); font-size: 12px; }
 .field input {
@@ -251,12 +293,14 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
       </div>
       <div class="view-grid">
         <div class="view-pane">
-          <header><span>2D Change Plan</span><span id="planMeta"></span></header>
+          <header><span>2D Plan</span><span id="planMeta"></span></header>
           <canvas id="planCanvas"></canvas>
+          <div class="view-status" id="planStatus"></div>
         </div>
         <div class="view-pane">
-          <header><span>3D Change View</span><span id="modelMeta"></span></header>
+          <header><span>3D Model</span><span id="modelMeta"></span></header>
           <canvas id="modelCanvas"></canvas>
+          <div class="view-status" id="modelStatus"></div>
         </div>
       </div>
       <div class="change-table">
@@ -278,7 +322,33 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     <button class="primary" type="submit">Save Inbox</button>
   </form>
 </div>
-<script>
+<div class="setup" id="deletePanel">
+  <div class="panel-head"><div class="panel-title">Delete Project</div><button id="closeDelete" type="button">Close</button></div>
+  <form id="deleteForm">
+    <div class="row-meta" id="deleteProjectText"></div>
+    <div class="radio-group">
+      <label class="radio-option"><input type="radio" name="deletePolicy" value="keep_folder" checked><div>Remove from Vex Desktop<br><span>Keep the project folder and IFC history on disk.</span></div></label>
+      <label class="radio-option"><input type="radio" name="deletePolicy" value="archive_folder"><div>Archive folder<br><span>Rename the folder inside VexInbox.</span></div></label>
+      <label class="radio-option"><input type="radio" name="deletePolicy" value="delete_folder"><div class="danger-text">Delete folder permanently<br><span>Only folders inside VexInbox are allowed.</span></div></label>
+    </div>
+    <div class="modal-actions"><button type="button" id="cancelDelete">Cancel</button><button class="primary" type="submit">Delete</button></div>
+  </form>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "/assets/viewer/three/three.module.js",
+    "three/examples/jsm/utils/BufferGeometryUtils": "/assets/viewer/three/examples/jsm/utils/BufferGeometryUtils.js",
+    "three/examples/jsm/controls/OrbitControls": "/assets/viewer/three/examples/jsm/controls/OrbitControls.js",
+    "web-ifc": "/assets/viewer/web-ifc/web-ifc-api.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { IFCLoader } from '/assets/viewer/web-ifc-three/IFCLoader.js';
+
 const TOKEN = __VEX_TOKEN__;
 const headers = {'X-Vex-Bridge-Token': TOKEN};
 const jsonHeaders = {'X-Vex-Bridge-Token': TOKEN, 'Content-Type': 'application/json'};
@@ -289,6 +359,7 @@ let latestChanges = null;
 let lastSetup = null;
 let currentViewMode = 'full';
 let pairPollTimer = null;
+let pendingDeleteProject = null;
 const urlParams = new URLSearchParams(window.location.search);
 const requestedProject = urlParams.get('project');
 const requestedCommit = urlParams.get('commit');
@@ -301,17 +372,25 @@ const els = {
   countBadges: document.getElementById('countBadges'), changeRows: document.getElementById('changeRows'),
   planCanvas: document.getElementById('planCanvas'), modelCanvas: document.getElementById('modelCanvas'),
   planMeta: document.getElementById('planMeta'), modelMeta: document.getElementById('modelMeta'),
+  planStatus: document.getElementById('planStatus'), modelStatus: document.getElementById('modelStatus'),
   pairButton: document.getElementById('pairButton'), syncButton: document.getElementById('syncButton'),
   setupPanel: document.getElementById('setupPanel'), setupForm: document.getElementById('setupForm'),
+  deletePanel: document.getElementById('deletePanel'), deleteForm: document.getElementById('deleteForm'),
+  deleteProjectText: document.getElementById('deleteProjectText'),
   inboxHint: document.getElementById('inboxHint'), viewToggle: document.getElementById('viewToggle')
 };
+
+let ifcViewer = null;
 
 document.getElementById('refreshButton').addEventListener('click', refresh);
 document.getElementById('setupButton').addEventListener('click', () => els.setupPanel.classList.add('open'));
 els.pairButton.addEventListener('click', startOrPollPairing);
 els.syncButton.addEventListener('click', syncSelectedProject);
 document.getElementById('closeSetup').addEventListener('click', () => els.setupPanel.classList.remove('open'));
+document.getElementById('closeDelete').addEventListener('click', closeDeletePanel);
+document.getElementById('cancelDelete').addEventListener('click', closeDeletePanel);
 els.setupForm.addEventListener('submit', saveInbox);
+els.deleteForm.addEventListener('submit', deleteProject);
 els.viewToggle.addEventListener('click', event => {
   const button = event.target.closest('button[data-mode]');
   if (!button) return;
@@ -319,7 +398,7 @@ els.viewToggle.addEventListener('click', event => {
   for (const item of els.viewToggle.querySelectorAll('button')) item.classList.toggle('active', item === button);
   renderChanges(latestChanges);
 });
-window.addEventListener('resize', () => drawChanges(latestChanges));
+window.addEventListener('resize', () => { if (ifcViewer) ifcViewer.resize(); });
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -426,13 +505,27 @@ function renderProjects(projects) {
   els.projectCount.textContent = String(projects.length);
   els.projects.innerHTML = projects.length ? '' : '<div class="empty">No inboxes configured.</div>';
   for (const project of projects) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'project-row';
     const button = document.createElement('button');
     button.className = `row ${project.project_id === selectedProject ? 'active' : ''}`;
     button.innerHTML = `<div class="row-title">${escapeHtml(project.project_name || project.project_id)}</div>
       <div class="row-meta">${project.active ? 'Watching' : 'Inactive'} / ${escapeHtml(project.local_path)}</div>
       <div class="row-meta">${project.seen_import_count} caught</div>`;
     button.addEventListener('click', () => selectProject(project.project_id));
-    els.projects.appendChild(button);
+    const remove = document.createElement('button');
+    remove.className = 'icon-button danger';
+    remove.type = 'button';
+    remove.title = 'Delete project';
+    remove.setAttribute('aria-label', `Delete ${project.project_name || project.project_id}`);
+    remove.textContent = '×';
+    remove.addEventListener('click', event => {
+      event.stopPropagation();
+      openDeletePanel(project);
+    });
+    wrapper.appendChild(button);
+    wrapper.appendChild(remove);
+    els.projects.appendChild(wrapper);
   }
 }
 
@@ -510,7 +603,14 @@ async function loadChanges(projectId, fromCommit, toCommit) {
 }
 
 function renderChanges(changes) {
-  if (!changes) return;
+  if (!changes) {
+    els.changeTitle.textContent = 'No project selected';
+    els.changeTime.textContent = '';
+    els.countBadges.innerHTML = '';
+    els.changeRows.innerHTML = '';
+    if (ifcViewer) ifcViewer.clear('Select a project with an imported IFC.');
+    return;
+  }
   const diff = changes.visual_diff || {};
   const summary = diff.summary || diff.status || 'No previous version to compare';
   els.changeTitle.textContent = summary;
@@ -544,80 +644,279 @@ function renderRows(elements) {
 }
 
 function drawChanges(changes) {
-  drawPlan(els.planCanvas, changes);
-  drawModel(els.modelCanvas, changes);
+  if (ifcViewer) ifcViewer.load(changes, currentViewMode);
 }
 
-function visibleElements(changes) {
-  const diff = (changes && changes.visual_diff) || {};
-  const changed = (diff.elements || []).filter(element => element.kind !== 'unchanged');
-  if (currentViewMode === 'changes') return changed;
-  const model = diff.model_elements || [];
-  if (model.length && changed.length) return model.concat(changed);
-  if (model.length) return model;
-  return diff.elements || [];
+class RealIfcViewer {
+  constructor({planCanvas, modelCanvas, planStatus, modelStatus, planMeta, modelMeta}) {
+    this.planCanvas = planCanvas;
+    this.modelCanvas = modelCanvas;
+    this.planStatus = planStatus;
+    this.modelStatus = modelStatus;
+    this.planMeta = planMeta;
+    this.modelMeta = modelMeta;
+    this.planScene = this.makeScene();
+    this.modelScene = this.makeScene();
+    this.planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000000);
+    this.modelCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
+    this.modelCamera.up.set(0, 0, 1);
+    this.planCamera.up.set(0, 1, 0);
+    this.planRenderer = this.makeRenderer(planCanvas);
+    this.modelRenderer = this.makeRenderer(modelCanvas);
+    this.controls = new OrbitControls(this.modelCamera, modelCanvas);
+    this.controls.enableDamping = true;
+    this.controls.dampingFactor = 0.08;
+    this.currentKey = '';
+    this.loadToken = 0;
+    this.model = null;
+    this.planModel = null;
+    this.highlightObjects = [];
+    this.removedObjects = [];
+    this.resize();
+    this.animate();
+    this.clear('Select a project with an imported IFC.');
+  }
+
+  makeRenderer(canvas) {
+    const renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: false});
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x111313, 1);
+    return renderer;
+  }
+
+  makeScene() {
+    const scene = new THREE.Scene();
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x303437, 0.85));
+    const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+    sun.position.set(40, -35, 70);
+    scene.add(sun);
+    return scene;
+  }
+
+  animate() {
+    requestAnimationFrame(() => this.animate());
+    this.controls.update();
+    this.modelRenderer.render(this.modelScene, this.modelCamera);
+    this.planRenderer.render(this.planScene, this.planCamera);
+  }
+
+  clear(message = '') {
+    this.clearSceneModels();
+    this.currentKey = '';
+    this.planStatus.textContent = message;
+    this.modelStatus.textContent = message;
+    this.planMeta.textContent = '';
+    this.modelMeta.textContent = '';
+  }
+
+  async load(changes, mode) {
+    const projectId = changes && changes.project_id;
+    const latestCommit = changes && changes.latest_commit;
+    if (!projectId || !latestCommit) {
+      this.clear('Drop an IFC into this inbox to render the model.');
+      return;
+    }
+    const key = `${projectId}:${latestCommit}`;
+    const token = ++this.loadToken;
+    try {
+      if (this.currentKey !== key) {
+        this.clearSceneModels();
+        this.planStatus.textContent = 'Loading IFC geometry...';
+        this.modelStatus.textContent = 'Loading IFC geometry...';
+        const model = await this.loadIfcModel(projectId, latestCommit);
+        if (token !== this.loadToken) return;
+        this.model = model;
+        this.planModel = model.clone(true);
+        this.modelScene.add(this.model);
+        this.planScene.add(this.planModel);
+        this.currentKey = key;
+        this.fitToModel(this.model);
+      }
+      await this.applyDiff(changes, mode, token);
+      if (token !== this.loadToken) return;
+      this.planStatus.textContent = '';
+      this.modelStatus.textContent = '';
+      this.planMeta.textContent = mode === 'changes' ? 'changes only' : 'full model';
+      this.modelMeta.textContent = mode === 'changes' ? 'changes only' : 'full model';
+    } catch (error) {
+      if (token !== this.loadToken) return;
+      this.clear(`IFC render failed: ${error.message}`);
+    }
+  }
+
+  async loadIfcModel(projectId, commit) {
+    const url = `/v1/projects/${encodeURIComponent(projectId)}/ifc/${encodeURIComponent(commit)}`;
+    const response = await fetch(url, {headers});
+    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+    const buffer = await response.arrayBuffer();
+    const loader = new IFCLoader();
+    loader.ifcManager.setWasmPath('/assets/viewer/web-ifc/');
+    if (loader.ifcManager.applyWebIfcConfig) {
+      await loader.ifcManager.applyWebIfcConfig({COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true});
+    }
+    return await loader.parse(buffer);
+  }
+
+  clearSceneModels() {
+    for (const object of [this.model, this.planModel, ...this.highlightObjects, ...this.removedObjects]) {
+      if (object && object.parent) object.parent.remove(object);
+    }
+    this.model = null;
+    this.planModel = null;
+    this.highlightObjects = [];
+    this.removedObjects = [];
+  }
+
+  async applyDiff(changes, mode, token) {
+    if (!this.model || !this.planModel) return;
+    for (const object of [...this.highlightObjects, ...this.removedObjects]) {
+      if (object && object.parent) object.parent.remove(object);
+    }
+    this.highlightObjects = [];
+    this.removedObjects = [];
+    const grouped = groupedGlobalIds(changes);
+    const hasChanges = Object.values(grouped).some(set => set.size > 0);
+    this.setObjectOpacity(this.model, mode === 'changes' ? 0.08 : 1);
+    this.setObjectOpacity(this.planModel, mode === 'changes' ? 0.06 : 0.9);
+    this.model.visible = mode !== 'changes' || !hasChanges;
+    this.planModel.visible = mode !== 'changes' || !hasChanges;
+    for (const [kind, ids] of Object.entries(grouped)) {
+      if (!ids.size || kind === 'removed') continue;
+      const expressIds = await this.globalIdsToExpressIds(this.model, ids);
+      if (token !== this.loadToken) return;
+      if (!expressIds.length) continue;
+      const material = highlightMaterial(kind);
+      const subset = this.model.createSubset({ids: expressIds, material, scene: this.modelScene, removePrevious: false, customID: `vex-${kind}`});
+      const planSubset = subset.clone(true);
+      this.planScene.add(planSubset);
+      this.highlightObjects.push(subset, planSubset);
+    }
+    if (grouped.removed.size && changes.previous_commit) {
+      await this.addRemovedSubset(changes, grouped.removed, token);
+    }
+  }
+
+  async addRemovedSubset(changes, ids, token) {
+    try {
+      const previous = await this.loadIfcModel(changes.project_id, changes.previous_commit);
+      if (token !== this.loadToken) return;
+      const expressIds = await this.globalIdsToExpressIds(previous, ids);
+      if (token !== this.loadToken || !expressIds.length) return;
+      this.setObjectOpacity(previous, 0.04);
+      previous.visible = false;
+      const material = highlightMaterial('removed');
+      const subset = previous.createSubset({ids: expressIds, material, scene: this.modelScene, removePrevious: false, customID: 'vex-removed'});
+      const planSubset = subset.clone(true);
+      this.planScene.add(planSubset);
+      this.removedObjects.push(previous, subset, planSubset);
+    } catch (error) {
+      this.modelMeta.textContent = `removed unavailable: ${error.message}`;
+    }
+  }
+
+  async globalIdsToExpressIds(model, wanted) {
+    const out = [];
+    const structure = await model.getSpatialStructure();
+    const visit = async node => {
+      if (!node) return;
+      const direct = valueOf(node.GlobalId || node.globalId);
+      if (direct && wanted.has(direct) && Number.isFinite(node.expressID)) out.push(node.expressID);
+      if (!direct && Number.isFinite(node.expressID)) {
+        try {
+          const props = await model.getItemProperties(node.expressID, false);
+          const globalId = valueOf(props && (props.GlobalId || props.globalId));
+          if (globalId && wanted.has(globalId)) out.push(node.expressID);
+        } catch (_) {}
+      }
+      for (const child of node.children || []) await visit(child);
+    };
+    await visit(structure);
+    return [...new Set(out)];
+  }
+
+  setObjectOpacity(object, opacity) {
+    object.traverse(item => {
+      const materials = Array.isArray(item.material) ? item.material : item.material ? [item.material] : [];
+      for (const material of materials) {
+        material.transparent = opacity < 1;
+        material.opacity = opacity;
+        material.depthWrite = opacity >= 0.5;
+      }
+    });
+  }
+
+  fitToModel(model) {
+    const box = new THREE.Box3().setFromObject(model);
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const radius = Math.max(size.x, size.y, size.z, 1);
+    this.modelCamera.position.set(center.x + radius, center.y - radius, center.z + radius * 0.7);
+    this.modelCamera.near = Math.max(radius / 1000, 0.01);
+    this.modelCamera.far = radius * 100;
+    this.modelCamera.lookAt(center);
+    this.modelCamera.updateProjectionMatrix();
+    this.controls.target.copy(center);
+    this.controls.update();
+    const rect = this.planCanvas.getBoundingClientRect();
+    const aspect = rect.width / Math.max(rect.height, 1);
+    const planSize = Math.max(size.x, size.y, 1) * 0.58;
+    this.planCamera.left = -planSize * aspect;
+    this.planCamera.right = planSize * aspect;
+    this.planCamera.top = planSize;
+    this.planCamera.bottom = -planSize;
+    this.planCamera.near = -radius * 10;
+    this.planCamera.far = radius * 10;
+    this.planCamera.position.set(center.x, center.y, center.z + radius * 2);
+    this.planCamera.lookAt(center);
+    this.planCamera.updateProjectionMatrix();
+  }
+
+  resize() {
+    this.resizeRenderer(this.modelRenderer, this.modelCanvas, this.modelCamera);
+    this.resizeRenderer(this.planRenderer, this.planCanvas, this.planCamera);
+    if (this.model) this.fitToModel(this.model);
+  }
+
+  resizeRenderer(renderer, canvas, camera) {
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.floor(rect.width));
+    const height = Math.max(1, Math.floor(rect.height));
+    renderer.setSize(width, height, false);
+    if (camera.isPerspectiveCamera) {
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    }
+  }
 }
 
-function prepareCanvas(canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const scale = window.devicePixelRatio || 1;
-  canvas.width = Math.max(1, Math.floor(rect.width * scale));
-  canvas.height = Math.max(1, Math.floor(rect.height * scale));
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  return {ctx, width: rect.width, height: rect.height};
+function groupedGlobalIds(changes) {
+  const out = {added: new Set(), removed: new Set(), modified: new Set(), moved: new Set(), renamed: new Set()};
+  const elements = ((changes && changes.visual_diff && changes.visual_diff.elements) || []);
+  for (const element of elements) {
+    if (!out[element.kind]) continue;
+    const id = idLabel(element.id);
+    if (id) out[element.kind].add(id);
+  }
+  return out;
 }
 
-function drawPlan(canvas, changes) {
-  const {ctx, width, height} = prepareCanvas(canvas);
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = '#111313'; ctx.fillRect(0, 0, width, height);
-  ctx.strokeStyle = '#2f3435'; ctx.lineWidth = 1;
-  for (let x = 24; x < width; x += 36) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
-  for (let y = 24; y < height; y += 36) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
-  const elements = visibleElements(changes).slice(0, 120);
-  if (!elements.length) { drawEmpty(ctx, width, height); els.planMeta.textContent = ''; return; }
-  elements.forEach((el, i) => {
-    const x = 38 + ((i * 53) % Math.max(60, width - 80));
-    const y = 42 + ((i * 31) % Math.max(60, height - 90));
-    ctx.strokeStyle = color(el.kind); ctx.fillStyle = color(el.kind, 0.18); ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.rect(x, y, 30 + (i % 4) * 8, 18 + (i % 3) * 7); ctx.fill(); ctx.stroke();
+function highlightMaterial(kind) {
+  const colors = {added: 0x43c26b, removed: 0xe05a47, modified: 0xd99a2b, moved: 0x4b8fe3, renamed: 0x9b6bd3};
+  return new THREE.MeshLambertMaterial({
+    color: colors[kind] || 0xa8aaa7,
+    transparent: true,
+    opacity: 0.9,
+    side: THREE.DoubleSide,
+    depthTest: true
   });
-  els.planMeta.textContent = `${elements.length} drawn`;
 }
 
-function drawModel(canvas, changes) {
-  const {ctx, width, height} = prepareCanvas(canvas);
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = '#111313'; ctx.fillRect(0, 0, width, height);
-  const elements = visibleElements(changes).slice(0, 96);
-  if (!elements.length) { drawEmpty(ctx, width, height); els.modelMeta.textContent = ''; return; }
-  elements.forEach((el, i) => {
-    const x = width * 0.18 + ((i * 47) % Math.max(80, width * 0.64));
-    const y = height * 0.22 + ((i * 29) % Math.max(80, height * 0.58));
-    const z = 12 + (i % 5) * 8;
-    drawBlock(ctx, x, y, 36, 24, z, color(el.kind));
-  });
-  els.modelMeta.textContent = currentViewMode === 'changes' ? 'changes only' : 'full model';
-}
-
-function drawBlock(ctx, x, y, w, h, z, c) {
-  ctx.fillStyle = c; ctx.globalAlpha = 0.78;
-  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.fill();
-  ctx.globalAlpha = 0.52; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + z, y - z); ctx.lineTo(x + w + z, y - z); ctx.lineTo(x + w, y); ctx.closePath(); ctx.fill();
-  ctx.globalAlpha = 0.36; ctx.beginPath(); ctx.moveTo(x + w, y); ctx.lineTo(x + w + z, y - z); ctx.lineTo(x + w + z, y + h - z); ctx.lineTo(x + w, y + h); ctx.closePath(); ctx.fill();
-  ctx.globalAlpha = 1;
-}
-
-function drawEmpty(ctx, width, height) {
-  ctx.fillStyle = '#747873'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('No elements in this view', width / 2, height / 2);
-}
-
-function color(kind, alpha) {
-  const map = {added: '67,194,107', removed: '224,90,71', modified: '217,154,43', moved: '75,143,227', renamed: '155,107,211', unchanged: '168,170,167'};
-  const rgb = map[kind] || '168,170,167';
-  return alpha == null ? `rgb(${rgb})` : `rgba(${rgb},${alpha})`;
+function valueOf(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') return value;
+  if (typeof value.value === 'string') return value.value;
+  return null;
 }
 
 async function saveInbox(event) {
@@ -634,6 +933,41 @@ async function saveInbox(event) {
   await selectProject(response.repo.project_id);
 }
 
+function openDeletePanel(project) {
+  pendingDeleteProject = project;
+  els.deleteProjectText.textContent = `${project.project_name || project.project_id} / ${project.local_path}`;
+  const keep = els.deleteForm.querySelector('input[value="keep_folder"]');
+  if (keep) keep.checked = true;
+  els.deletePanel.classList.add('open');
+}
+
+function closeDeletePanel() {
+  pendingDeleteProject = null;
+  els.deletePanel.classList.remove('open');
+}
+
+async function deleteProject(event) {
+  event.preventDefault();
+  if (!pendingDeleteProject) return;
+  const projectId = pendingDeleteProject.project_id;
+  const selected = els.deleteForm.querySelector('input[name="deletePolicy"]:checked');
+  const deletion_policy = selected ? selected.value : 'keep_folder';
+  await api(`/v1/projects/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE', headers: jsonHeaders, body: JSON.stringify({deletion_policy})
+  });
+  closeDeletePanel();
+  if (selectedProject === projectId) {
+    selectedProject = null;
+    selectedCommit = null;
+    projectCommits = [];
+    latestChanges = null;
+    els.history.innerHTML = '<div class="empty">No project selected.</div>';
+    els.historyMeta.textContent = '';
+    renderChanges(null);
+  }
+  await refresh();
+}
+
 function optionalValue(id) { const value = document.getElementById(id).value.trim(); return value || null; }
 function parentFor(commit) { return commit && commit.parents && commit.parents.length ? commit.parents[0] : null; }
 function short(value) { return value ? value.slice(0, 12) : 'none'; }
@@ -642,6 +976,14 @@ function elementType(element) { return element.type_name || element.type || 'IFC
 function formatTime(seconds) { return seconds ? new Date(seconds * 1000).toLocaleString() : 'not caught yet'; }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 
+ifcViewer = new RealIfcViewer({
+  planCanvas: els.planCanvas,
+  modelCanvas: els.modelCanvas,
+  planStatus: els.planStatus,
+  modelStatus: els.modelStatus,
+  planMeta: els.planMeta,
+  modelMeta: els.modelMeta
+});
 refresh();
 setInterval(refresh, 15000);
 </script>

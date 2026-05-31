@@ -17,6 +17,8 @@ pub struct State {
     #[serde(default)]
     pub seen_ifc_hashes: Vec<SeenIfcHash>,
     #[serde(default)]
+    pub ifc_snapshots: Vec<IfcSnapshot>,
+    #[serde(default)]
     pub recent_activity: Vec<proto::ActivityEvent>,
 }
 
@@ -24,6 +26,17 @@ pub struct State {
 pub struct SeenIfcHash {
     pub hash: String,
     pub project_id: String,
+    #[serde(default)]
+    pub ifc_project_guid: Option<String>,
+    pub imported_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IfcSnapshot {
+    pub project_id: String,
+    pub commit_hash: String,
+    pub content_hash: String,
+    pub path: String,
     #[serde(default)]
     pub ifc_project_guid: Option<String>,
     pub imported_at_unix: i64,
@@ -92,6 +105,45 @@ impl State {
         }
     }
 
+    pub fn record_ifc_snapshot(
+        &mut self,
+        project_id: String,
+        commit_hash: String,
+        content_hash: String,
+        path: String,
+        ifc_project_guid: Option<String>,
+    ) {
+        self.ifc_snapshots.retain(|snapshot| {
+            !(snapshot.project_id == project_id && snapshot.commit_hash == commit_hash)
+        });
+        self.ifc_snapshots.push(IfcSnapshot {
+            project_id,
+            commit_hash,
+            content_hash,
+            path,
+            ifc_project_guid,
+            imported_at_unix: now_unix(),
+        });
+        const MAX_IFC_SNAPSHOTS: usize = 4096;
+        if self.ifc_snapshots.len() > MAX_IFC_SNAPSHOTS {
+            let excess = self.ifc_snapshots.len() - MAX_IFC_SNAPSHOTS;
+            self.ifc_snapshots.drain(0..excess);
+        }
+    }
+
+    pub fn ifc_snapshot(&self, project_id: &str, commit_hash: &str) -> Option<IfcSnapshot> {
+        self.ifc_snapshots
+            .iter()
+            .rev()
+            .find(|snapshot| {
+                snapshot.project_id == project_id
+                    && (snapshot.commit_hash == commit_hash
+                        || snapshot.commit_hash.starts_with(commit_hash)
+                        || commit_hash.starts_with(&snapshot.commit_hash))
+            })
+            .cloned()
+    }
+
     pub fn push_activity(&mut self, event: proto::ActivityEvent) {
         self.recent_activity.push(event);
         const MAX_RECENT_ACTIVITY: usize = 256;
@@ -116,4 +168,36 @@ pub fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_snapshot_list_defaults_empty() {
+        let state: State = serde_json::from_str(
+            r#"{"pairing":{"status":"unpaired"},"seen_ifc_hashes":[],"recent_activity":[]}"#,
+        )
+        .unwrap();
+
+        assert!(state.ifc_snapshots.is_empty());
+    }
+
+    #[test]
+    fn records_and_finds_snapshot_by_prefix() {
+        let mut state = State::default();
+        state.record_ifc_snapshot(
+            "project-1".to_string(),
+            "abcdef123456".to_string(),
+            "content".to_string(),
+            "/tmp/model.ifc".to_string(),
+            Some("ifc-guid".to_string()),
+        );
+
+        let snapshot = state.ifc_snapshot("project-1", "abcdef").unwrap();
+        assert_eq!(snapshot.commit_hash, "abcdef123456");
+        assert_eq!(snapshot.path, "/tmp/model.ifc");
+        assert_eq!(snapshot.ifc_project_guid.as_deref(), Some("ifc-guid"));
+    }
 }

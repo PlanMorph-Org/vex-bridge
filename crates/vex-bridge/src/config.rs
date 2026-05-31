@@ -148,6 +148,13 @@ impl Config {
         fs::write(&paths.config_file, body)?;
         Ok(())
     }
+
+    pub fn remove_watch(&mut self, project_id: &str) -> Option<WatchEntry> {
+        self.watch
+            .iter()
+            .position(|watch| watch.project_id == project_id)
+            .map(|index| self.watch.remove(index))
+    }
 }
 
 fn bundled_vex_bin() -> Option<String> {
@@ -207,5 +214,35 @@ mod tests {
         assert_eq!(bundled_vex_bin_next_to(&executable), None);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn removes_watch_by_project_id() {
+        let mut cfg = Config {
+            watch: vec![
+                WatchEntry {
+                    project_id: "a".to_string(),
+                    path: "/tmp/a".to_string(),
+                    include: vec!["*.ifc".to_string()],
+                    ifc_project_guid: None,
+                    project_name: None,
+                },
+                WatchEntry {
+                    project_id: "b".to_string(),
+                    path: "/tmp/b".to_string(),
+                    include: vec!["*.ifc".to_string()],
+                    ifc_project_guid: Some("guid".to_string()),
+                    project_name: Some("Project B".to_string()),
+                },
+            ],
+            ..Config::default()
+        };
+
+        let removed = cfg.remove_watch("b").unwrap();
+
+        assert_eq!(removed.project_id, "b");
+        assert_eq!(cfg.watch.len(), 1);
+        assert_eq!(cfg.watch[0].project_id, "a");
+        assert!(cfg.remove_watch("missing").is_none());
     }
 }

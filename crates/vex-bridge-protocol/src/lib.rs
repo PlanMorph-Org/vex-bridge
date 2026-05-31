@@ -243,6 +243,35 @@ pub struct ProjectChangesResponse {
     pub visual_diff: serde_json::Value,
 }
 
+/// `DELETE /v1/projects/:project_id` — remove a watched project from Vex
+/// Desktop and stop its watcher.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteProjectRequest {
+    /// `keep_folder` leaves files alone, `archive_folder` renames the folder,
+    /// and `delete_folder` permanently removes it after server-side safety
+    /// checks.
+    #[serde(default = "default_delete_project_policy")]
+    pub deletion_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteProjectResponse {
+    pub project_id: String,
+    pub local_folder: String,
+    pub deletion_policy: String,
+    pub removed_from_config: bool,
+    pub watcher_stopped: bool,
+    pub folder_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_error: Option<String>,
+}
+
+fn default_delete_project_policy() -> String {
+    "keep_folder".to_string()
+}
+
 /// `GET /v1/activity/recent` — recent daemon activity for tray/dashboard UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentActivityResponse {

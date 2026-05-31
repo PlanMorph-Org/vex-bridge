@@ -15,9 +15,9 @@ use std::time::Instant;
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use tokio::sync::RwLock;
@@ -53,10 +53,17 @@ struct ChangeQuery {
     to: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct IfcSnapshotQuery {
+    #[serde(default)]
+    commit: Option<String>,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(handle_dashboard))
         .route("/ui", get(handle_dashboard))
+        .route("/assets/viewer/*path", get(handle_viewer_asset))
         .route("/v1/health", get(handle_health))
         .route("/v1/pair/status", get(handle_pair_status))
         .route("/v1/pair/start", post(handle_pair_start))
@@ -74,6 +81,15 @@ pub fn router(state: AppState) -> Router {
             "/v1/projects/:project_id/changes",
             get(handle_project_changes),
         )
+        .route(
+            "/v1/projects/:project_id/ifc/latest",
+            get(handle_project_ifc_latest),
+        )
+        .route(
+            "/v1/projects/:project_id/ifc/:commit",
+            get(handle_project_ifc_commit),
+        )
+        .route("/v1/projects/:project_id", delete(handle_delete_project))
         .route("/v1/repo/push", post(handle_repo_push))
         .route("/v1/repo/register", post(handle_repo_register))
         .with_state(state)
@@ -132,8 +148,64 @@ fn err_response(status: StatusCode, error: BridgeError) -> Response {
         .into_response()
 }
 
+fn viewer_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
+    match path {
+        "three/three.module.js" => Some((
+            include_bytes!("../assets/viewer/three/three.module.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "three/examples/jsm/utils/BufferGeometryUtils.js" => Some((
+            include_bytes!("../assets/viewer/three/examples/jsm/utils/BufferGeometryUtils.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "three/examples/jsm/controls/OrbitControls.js" => Some((
+            include_bytes!("../assets/viewer/three/examples/jsm/controls/OrbitControls.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "three/LICENSE" => Some((
+            include_bytes!("../assets/viewer/three/LICENSE"),
+            "text/plain; charset=utf-8",
+        )),
+        "web-ifc/web-ifc-api.js" => Some((
+            include_bytes!("../assets/viewer/web-ifc/web-ifc-api.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "web-ifc/web-ifc.wasm" => Some((
+            include_bytes!("../assets/viewer/web-ifc/web-ifc.wasm"),
+            "application/wasm",
+        )),
+        "web-ifc/web-ifc-mt.wasm" => Some((
+            include_bytes!("../assets/viewer/web-ifc/web-ifc-mt.wasm"),
+            "application/wasm",
+        )),
+        "web-ifc/LICENSE.md" => Some((
+            include_bytes!("../assets/viewer/web-ifc/LICENSE.md"),
+            "text/markdown; charset=utf-8",
+        )),
+        "web-ifc-three/IFCLoader.js" => Some((
+            include_bytes!("../assets/viewer/web-ifc-three/IFCLoader.js"),
+            "text/javascript; charset=utf-8",
+        )),
+        "NOTICE.md" => Some((
+            include_bytes!("../assets/viewer/NOTICE.md"),
+            "text/markdown; charset=utf-8",
+        )),
+        _ => None,
+    }
+}
+
 async fn handle_dashboard(State(state): State<AppState>) -> Html<String> {
     Html(dashboard::render(&state.access_token))
+}
+
+async fn handle_viewer_asset(AxumPath(path): AxumPath<String>) -> Result<Response, Response> {
+    let Some((bytes, content_type)) = viewer_asset(&path) else {
+        return Err(err_response(
+            StatusCode::NOT_FOUND,
+            BridgeError::Config(format!("unknown viewer asset `{path}`")),
+        ));
+    };
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes.to_vec()).into_response())
 }
 
 async fn handle_health(State(state): State<AppState>) -> Json<proto::Health> {
@@ -462,6 +534,79 @@ async fn handle_project_changes(
     }))
 }
 
+async fn handle_project_ifc_latest(
+    headers: HeaderMap,
+    AxumPath(project_id): AxumPath<String>,
+    Query(query): Query<IfcSnapshotQuery>,
+    State(state): State<AppState>,
+) -> Result<Response, Response> {
+    require_token(&headers, &state.access_token)?;
+    let path = resolve_ifc_snapshot_path(&state, &project_id, query.commit.as_deref()).await?;
+    serve_ifc_file(path).await
+}
+
+async fn handle_project_ifc_commit(
+    headers: HeaderMap,
+    AxumPath((project_id, commit)): AxumPath<(String, String)>,
+    State(state): State<AppState>,
+) -> Result<Response, Response> {
+    require_token(&headers, &state.access_token)?;
+    let path = resolve_ifc_snapshot_path(&state, &project_id, Some(&commit)).await?;
+    serve_ifc_file(path).await
+}
+
+async fn handle_delete_project(
+    headers: HeaderMap,
+    AxumPath(project_id): AxumPath<String>,
+    State(state): State<AppState>,
+    Json(req): Json<proto::DeleteProjectRequest>,
+) -> Result<Json<proto::DeleteProjectResponse>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let policy = req.deletion_policy.trim();
+    if !matches!(policy, "keep_folder" | "archive_folder" | "delete_folder") {
+        return Err(err_response(
+            StatusCode::BAD_REQUEST,
+            BridgeError::Config(format!(
+                "invalid deletion_policy `{policy}`; expected keep_folder, archive_folder, or delete_folder"
+            )),
+        ));
+    }
+
+    let entry = {
+        let mut cfg = state.config.write().await;
+        let Some(entry) = cfg.remove_watch(&project_id) else {
+            return Err(unknown_project_response(&project_id));
+        };
+        cfg.save(&state.paths)
+            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        entry
+    };
+
+    let watcher_stopped = {
+        let mut watchers = state.watchers.write().await;
+        let before = watchers.len();
+        watchers.retain(|watcher| watcher.project_id != project_id);
+        watchers.len() != before
+    };
+
+    let local_folder = entry.path.clone();
+    let (folder_action, resulting_folder, policy_error) =
+        apply_deletion_policy(Path::new(&entry.path), policy).await;
+
+    info!(project_id = %project_id, path = %local_folder, policy, watcher_stopped, "deleted project watch");
+
+    Ok(Json(proto::DeleteProjectResponse {
+        project_id,
+        local_folder,
+        deletion_policy: policy.to_string(),
+        removed_from_config: true,
+        watcher_stopped,
+        folder_action,
+        resulting_folder,
+        policy_error,
+    }))
+}
+
 async fn handle_repo_push(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -604,6 +749,192 @@ fn parent_for_commit(commits: &[proto::CommitSummary], commit: Option<&str>) -> 
         .iter()
         .find(|item| item.commit == commit || item.commit.starts_with(commit))
         .and_then(|item| item.parents.first().cloned())
+}
+
+async fn resolve_ifc_snapshot_path(
+    state: &AppState,
+    project_id: &str,
+    commit: Option<&str>,
+) -> Result<PathBuf, Response> {
+    let cfg = state.config.read().await.clone();
+    let entry =
+        find_watch_entry(&cfg, project_id).ok_or_else(|| unknown_project_response(project_id))?;
+    let dir = PathBuf::from(&entry.path);
+
+    if let Some(commit) = commit.filter(|value| !value.trim().is_empty()) {
+        let daemon_state = state.state.read().await;
+        if let Some(snapshot) = daemon_state.ifc_snapshot(project_id, commit) {
+            let path = PathBuf::from(snapshot.path);
+            validate_project_file_path(&dir, &path)?;
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+        if daemon_state
+            .ifc_snapshots
+            .iter()
+            .any(|snapshot| snapshot.project_id == project_id)
+        {
+            return Err(err_response(
+                StatusCode::NOT_FOUND,
+                BridgeError::Config(format!(
+                    "no IFC snapshot found for project `{project_id}` at commit `{commit}`"
+                )),
+            ));
+        }
+    }
+
+    let path = latest_ifc_snapshot(&dir)
+        .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?
+        .ok_or_else(|| {
+            err_response(
+                StatusCode::NOT_FOUND,
+                BridgeError::Config(format!("no IFC snapshot found for project `{project_id}`")),
+            )
+        })?;
+    validate_project_file_path(&dir, &path)?;
+    Ok(path)
+}
+
+fn validate_project_file_path(project_dir: &Path, file: &Path) -> Result<(), Response> {
+    let project_dir = project_dir
+        .canonicalize()
+        .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, BridgeError::Io(error)))?;
+    let file = file.canonicalize().map_err(|error| {
+        let status = if error.kind() == std::io::ErrorKind::NotFound {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        err_response(status, BridgeError::Io(error))
+    })?;
+    if !file.starts_with(&project_dir) {
+        return Err(err_response(
+            StatusCode::FORBIDDEN,
+            BridgeError::Config("IFC snapshot path is outside the project folder".into()),
+        ));
+    }
+    let is_ifc = file
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("ifc"))
+        .unwrap_or(false);
+    if !is_ifc {
+        return Err(err_response(
+            StatusCode::FORBIDDEN,
+            BridgeError::Config("snapshot path is not an IFC file".into()),
+        ));
+    }
+    Ok(())
+}
+
+async fn serve_ifc_file(path: PathBuf) -> Result<Response, Response> {
+    let bytes = tokio::fs::read(&path).await.map_err(|error| {
+        let status = if error.kind() == std::io::ErrorKind::NotFound {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        err_response(status, BridgeError::Io(error))
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("model.ifc");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("inline; filename=\"{}\"", safe_header_value(file_name)),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn apply_deletion_policy(
+    path: &Path,
+    policy: &str,
+) -> (String, Option<String>, Option<String>) {
+    match policy {
+        "keep_folder" => (
+            "kept".to_string(),
+            Some(path.to_string_lossy().to_string()),
+            None,
+        ),
+        "archive_folder" => match archive_project_folder(path) {
+            Ok(archived) => (
+                "archived".to_string(),
+                Some(archived.to_string_lossy().to_string()),
+                None,
+            ),
+            Err(error) => (
+                "archive_failed".to_string(),
+                Some(path.to_string_lossy().to_string()),
+                Some(error.to_string()),
+            ),
+        },
+        "delete_folder" => match validate_deletable_inbox_path(path)
+            .and_then(|_| std::fs::remove_dir_all(path).map_err(BridgeError::Io))
+        {
+            Ok(()) => ("deleted".to_string(), None, None),
+            Err(error) => (
+                "delete_failed".to_string(),
+                Some(path.to_string_lossy().to_string()),
+                Some(error.to_string()),
+            ),
+        },
+        _ => (
+            "kept".to_string(),
+            Some(path.to_string_lossy().to_string()),
+            None,
+        ),
+    }
+}
+
+fn archive_project_folder(path: &Path) -> Result<PathBuf, BridgeError> {
+    validate_deletable_inbox_path(path)?;
+    if !path.exists() {
+        return Ok(path.to_path_buf());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| BridgeError::Config("project folder has no parent".into()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("project");
+    let timestamp = rfc3339_from_unix(now_unix()).replace([':', 'T', 'Z'], "-");
+    let mut target = parent.join(format!("{name}.archived-{timestamp}"));
+    let mut suffix = 1u32;
+    while target.exists() {
+        target = parent.join(format!("{name}.archived-{timestamp}-{suffix}"));
+        suffix += 1;
+    }
+    std::fs::rename(path, &target)?;
+    Ok(target)
+}
+
+fn validate_deletable_inbox_path(path: &Path) -> Result<(), BridgeError> {
+    let root = default_inbox_root().map_err(BridgeError::Config)?;
+    let root = root.canonicalize()?;
+    let path = path.canonicalize()?;
+    if path == root || !path.starts_with(&root) {
+        return Err(BridgeError::Config(format!(
+            "refusing to modify folder outside {}",
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn safe_header_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+        .collect()
 }
 
 fn setup_project_id(req: &proto::SetupInboxRequest) -> String {
