@@ -59,6 +59,11 @@ struct IfcSnapshotQuery {
     commit: Option<String>,
 }
 
+struct PathValidationError {
+    status: StatusCode,
+    error: BridgeError,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(handle_dashboard))
@@ -765,7 +770,8 @@ async fn resolve_ifc_snapshot_path(
         let daemon_state = state.state.read().await;
         if let Some(snapshot) = daemon_state.ifc_snapshot(project_id, commit) {
             let path = PathBuf::from(snapshot.path);
-            validate_project_file_path(&dir, &path)?;
+            validate_project_file_path(&dir, &path)
+                .map_err(|error| err_response(error.status, error.error))?;
             if path.is_file() {
                 return Ok(path);
             }
@@ -792,27 +798,34 @@ async fn resolve_ifc_snapshot_path(
                 BridgeError::Config(format!("no IFC snapshot found for project `{project_id}`")),
             )
         })?;
-    validate_project_file_path(&dir, &path)?;
+    validate_project_file_path(&dir, &path)
+        .map_err(|error| err_response(error.status, error.error))?;
     Ok(path)
 }
 
-fn validate_project_file_path(project_dir: &Path, file: &Path) -> Result<(), Response> {
+fn validate_project_file_path(project_dir: &Path, file: &Path) -> Result<(), PathValidationError> {
     let project_dir = project_dir
         .canonicalize()
-        .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, BridgeError::Io(error)))?;
+        .map_err(|error| PathValidationError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: BridgeError::Io(error),
+        })?;
     let file = file.canonicalize().map_err(|error| {
         let status = if error.kind() == std::io::ErrorKind::NotFound {
             StatusCode::NOT_FOUND
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
-        err_response(status, BridgeError::Io(error))
+        PathValidationError {
+            status,
+            error: BridgeError::Io(error),
+        }
     })?;
     if !file.starts_with(&project_dir) {
-        return Err(err_response(
-            StatusCode::FORBIDDEN,
-            BridgeError::Config("IFC snapshot path is outside the project folder".into()),
-        ));
+        return Err(PathValidationError {
+            status: StatusCode::FORBIDDEN,
+            error: BridgeError::Config("IFC snapshot path is outside the project folder".into()),
+        });
     }
     let is_ifc = file
         .extension()
@@ -820,10 +833,10 @@ fn validate_project_file_path(project_dir: &Path, file: &Path) -> Result<(), Res
         .map(|extension| extension.eq_ignore_ascii_case("ifc"))
         .unwrap_or(false);
     if !is_ifc {
-        return Err(err_response(
-            StatusCode::FORBIDDEN,
-            BridgeError::Config("snapshot path is not an IFC file".into()),
-        ));
+        return Err(PathValidationError {
+            status: StatusCode::FORBIDDEN,
+            error: BridgeError::Config("snapshot path is not an IFC file".into()),
+        });
     }
     Ok(())
 }
