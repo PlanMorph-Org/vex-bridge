@@ -1436,14 +1436,25 @@ function elementType(element) { return element.type_name || element.type || 'IFC
 function formatTime(seconds) { return seconds ? new Date(seconds * 1000).toLocaleString() : 'not caught yet'; }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 
-ifcViewer = new RealIfcViewer({
-  planCanvas: els.planCanvas,
-  modelCanvas: els.modelCanvas,
-  planStatus: els.planStatus,
-  modelStatus: els.modelStatus,
-  planMeta: els.planMeta,
-  modelMeta: els.modelMeta
-});
+try {
+  ifcViewer = new RealIfcViewer({
+    planCanvas: els.planCanvas,
+    modelCanvas: els.modelCanvas,
+    planStatus: els.planStatus,
+    modelStatus: els.modelStatus,
+    planMeta: els.planMeta,
+    modelMeta: els.modelMeta
+  });
+} catch (error) {
+  // 3D rendering may be unavailable (e.g. no WebGL/GPU context). Keep the rest
+  // of the dashboard fully usable for pairing and project management instead of
+  // aborting startup.
+  ifcViewer = null;
+  console.error('3D viewer unavailable:', error);
+  const msg = '3D preview unavailable on this machine (no WebGL).';
+  if (els.modelStatus) els.modelStatus.textContent = msg;
+  if (els.planStatus) els.planStatus.textContent = msg;
+}
 refresh();
 loadHealth();
 setInterval(refresh, 15000);
