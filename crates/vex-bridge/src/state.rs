@@ -219,9 +219,11 @@ impl State {
         if push.next_attempt_unix == 0 {
             push.next_attempt_unix = push.enqueued_at_unix;
         }
-        if let Some(existing) = self.pending_push.iter_mut().find(|p| {
-            p.project_id == push.project_id && p.refspec == push.refspec
-        }) {
+        if let Some(existing) = self
+            .pending_push
+            .iter_mut()
+            .find(|p| p.project_id == push.project_id && p.refspec == push.refspec)
+        {
             // Preserve the original enqueue time and attempt count so backoff
             // keeps growing across repeated failures for the same target.
             push.enqueued_at_unix = existing.enqueued_at_unix.min(push.enqueued_at_unix);
@@ -264,7 +266,13 @@ impl State {
 
     /// Record a failed retry: bump the attempt count and schedule the next
     /// attempt with capped exponential backoff (base 15s, ceiling 1h).
-    pub fn record_push_failure(&mut self, project_id: &str, refspec: &str, error: String, now: i64) {
+    pub fn record_push_failure(
+        &mut self,
+        project_id: &str,
+        refspec: &str,
+        error: String,
+        now: i64,
+    ) {
         if let Some(p) = self
             .pending_push
             .iter_mut()

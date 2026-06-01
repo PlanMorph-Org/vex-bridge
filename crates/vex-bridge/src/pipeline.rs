@@ -506,14 +506,16 @@ async fn intake_for_routing(
     route_required: bool,
 ) -> BridgeResult<IfcIntake> {
     if route_required {
-        vex_cli::ifc_intake(bin, path).await.map_err(|engine_error| {
-            crate::errors::BridgeError::VexCli(format!(
-                "cannot verify IFC project route for {}: the vex engine intake \
+        vex_cli::ifc_intake(bin, path)
+            .await
+            .map_err(|engine_error| {
+                crate::errors::BridgeError::VexCli(format!(
+                    "cannot verify IFC project route for {}: the vex engine intake \
                  failed ({engine_error}). Refusing to route by heuristic to \
                  avoid landing the model in the wrong project.",
-                path.display()
-            ))
-        })
+                    path.display()
+                ))
+            })
     } else {
         parse_intake_with_engine(bin, path).await
     }
@@ -908,8 +910,7 @@ pub async fn run_outbox(state: Arc<RwLock<State>>, paths: Arc<Paths>, vex_bin: S
 
         for pending in due {
             let dir = PathBuf::from(&pending.dir);
-            let result =
-                vex_cli::push(&vex_bin, &dir, &pending.remote, &pending.refspec).await;
+            let result = vex_cli::push(&vex_bin, &dir, &pending.remote, &pending.refspec).await;
 
             let mut guard = state.write().await;
             match result {
