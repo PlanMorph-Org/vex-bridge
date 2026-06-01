@@ -17,6 +17,7 @@ required-features = ["tray"]
 [[bin]]
 name = "vex-desktop"
 path = "src/desktop_main.rs"
+required-features = ["desktop"]
 
 [lib]
 name = "vex_bridge"
@@ -26,6 +27,8 @@ path = "src/lib.rs"
 default = []
 tray = ["tray-icon-asset", "dep:tao", "dep:tray-icon"]
 tray-icon-asset = ["dep:png"]
+# Native standalone desktop window (system webview via wry + tao event loop).
+desktop = ["dep:wry", "dep:tao", "dep:rfd"]
 
 [dependencies]
 vex-bridge-protocol = { path = "../vex-bridge-protocol" }
@@ -55,3 +58,5 @@ open               = { workspace = true }
 png                = { workspace = true, optional = true }
 tao                = { workspace = true, optional = true }
 tray-icon          = { workspace = true, optional = true }
+wry                = { workspace = true, optional = true }
+rfd                = { workspace = true, optional = true }

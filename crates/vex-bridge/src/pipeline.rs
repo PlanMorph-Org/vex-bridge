@@ -298,7 +298,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
         return Ok(());
     }
 
-    let intake = parse_intake_with_engine(bin, changed).await?;
+    let intake = intake_for_routing(bin, changed, entry.ifc_project_guid.is_some()).await?;
     if !entry_matches_ifc(entry, &intake) {
         warn!(
             file = %changed.display(),
@@ -372,15 +372,27 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
     };
     info!(commit = %hash, "committed");
 
-    let push_detail = match vex_cli::push(bin, dir, "origin", "refs/heads/main").await {
+    const REMOTE: &str = "origin";
+    const REFSPEC: &str = "refs/heads/main";
+    let push_succeeded = match vex_cli::push(bin, dir, REMOTE, REFSPEC).await {
         Ok(()) => {
             info!(project = %entry.project_id, commit = %hash, "pushed");
-            format!("pushed {hash}")
+            true
         }
         Err(error) => {
-            warn!(project = %entry.project_id, commit = %hash, error = %error, "committed locally but push failed");
-            format!("committed locally; sync failed: {error}")
+            warn!(
+                project = %entry.project_id,
+                commit = %hash,
+                error = %error,
+                "committed locally but push failed; queued in durable outbox for retry"
+            );
+            false
         }
+    };
+    let push_detail = if push_succeeded {
+        format!("pushed {hash}")
+    } else {
+        "committed locally; push queued for retry".to_string()
     };
 
     let snapshot_path = match archive_processed_file_async(dir, changed, &content_hash).await {
@@ -405,12 +417,31 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
             snapshot_path.to_string_lossy().to_string(),
             intake.project_guid.clone(),
         );
+        let activity_kind = if push_succeeded {
+            proto::ActivityKind::CommitCreated
+        } else {
+            // The commit is durably recorded; queue the push so the outbox
+            // retries it with backoff instead of losing the sync.
+            let now = crate::state::now_unix();
+            state.enqueue_push(crate::state::PendingPush {
+                project_id: entry.project_id.clone(),
+                dir: dir.to_string_lossy().to_string(),
+                remote: REMOTE.to_string(),
+                refspec: REFSPEC.to_string(),
+                commit_hash: hash.clone(),
+                enqueued_at_unix: now,
+                attempts: 0,
+                next_attempt_unix: now,
+                last_error: None,
+            });
+            proto::ActivityKind::PushQueued
+        };
         state.push_activity(activity_event(
             entry,
             dir,
             changed,
             ActivityDetails {
-                kind: proto::ActivityKind::CommitCreated,
+                kind: activity_kind,
                 commit_hash: Some(hash.clone()),
                 content_hash: Some(content_hash.clone()),
                 message: msg.clone(),
@@ -457,6 +488,34 @@ async fn parse_intake_with_engine(bin: &str, path: &Path) -> BridgeResult<IfcInt
                 .await
                 .map_err(join_error)?
         }
+    }
+}
+
+/// Produce the intake metadata used for routing + commit messages.
+///
+/// Routing safety is the priority here: when a `[[watch]]` entry declares an
+/// `ifc_project_guid`, the IFC's identity decides *which project* the commit
+/// lands in, so we MUST trust only the authoritative engine parse. If the
+/// engine is unavailable we fail closed rather than silently falling back to
+/// the heuristic regex parser, which could mis-route a model into the wrong
+/// project. When no route is configured the regex fallback is acceptable —
+/// it only feeds the commit message, never a routing decision.
+async fn intake_for_routing(
+    bin: &str,
+    path: &Path,
+    route_required: bool,
+) -> BridgeResult<IfcIntake> {
+    if route_required {
+        vex_cli::ifc_intake(bin, path).await.map_err(|engine_error| {
+            crate::errors::BridgeError::VexCli(format!(
+                "cannot verify IFC project route for {}: the vex engine intake \
+                 failed ({engine_error}). Refusing to route by heuristic to \
+                 avoid landing the model in the wrong project.",
+                path.display()
+            ))
+        })
+    } else {
+        parse_intake_with_engine(bin, path).await
     }
 }
 
@@ -820,4 +879,107 @@ fn latest_ifc_file(dir: &Path) -> BridgeResult<Option<PathBuf>> {
     let mut best = None;
     visit(dir, &mut best)?;
     Ok(best.map(|(path, _)| path))
+}
+
+/// How often the durable outbox wakes up to retry queued pushes. Individual
+/// entries still honour their own exponential backoff via `next_attempt_unix`;
+/// this is just the polling cadence.
+const OUTBOX_TICK: Duration = Duration::from_secs(20);
+
+/// Background task that drains the durable push outbox.
+///
+/// When [`run_pipeline`] commits locally but the push fails (network blip,
+/// remote restart, transient SSH error), the commit is enqueued in
+/// [`State::pending_push`]. This loop periodically retries any entry whose
+/// backoff window has elapsed: on success it removes the entry and records a
+/// `PushSynced` activity; on failure it bumps the attempt count and reschedules
+/// with exponential backoff. The loop runs for the lifetime of the daemon.
+pub async fn run_outbox(state: Arc<RwLock<State>>, paths: Arc<Paths>, vex_bin: String) {
+    loop {
+        tokio::time::sleep(OUTBOX_TICK).await;
+
+        let due = {
+            let guard = state.read().await;
+            guard.pending_push_due(crate::state::now_unix())
+        };
+        if due.is_empty() {
+            continue;
+        }
+
+        for pending in due {
+            let dir = PathBuf::from(&pending.dir);
+            let result =
+                vex_cli::push(&vex_bin, &dir, &pending.remote, &pending.refspec).await;
+
+            let mut guard = state.write().await;
+            match result {
+                Ok(()) => {
+                    info!(
+                        project = %pending.project_id,
+                        commit = %pending.commit_hash,
+                        "outbox: queued push synced"
+                    );
+                    guard.remove_pending_push(&pending.project_id, &pending.refspec);
+                    guard.push_activity(outbox_activity(
+                        &pending,
+                        proto::ActivityKind::PushSynced,
+                        format!("Synced {}", short_hash(&pending.commit_hash)),
+                        Some(format!("pushed {}", pending.commit_hash)),
+                    ));
+                }
+                Err(error) => {
+                    let now = crate::state::now_unix();
+                    guard.record_push_failure(
+                        &pending.project_id,
+                        &pending.refspec,
+                        error.to_string(),
+                        now,
+                    );
+                    warn!(
+                        project = %pending.project_id,
+                        commit = %pending.commit_hash,
+                        error = %error,
+                        "outbox: push retry failed; will back off"
+                    );
+                }
+            }
+            if let Err(error) = guard.save(&paths) {
+                warn!(error = %error, "outbox: could not persist push queue state");
+            }
+        }
+    }
+}
+
+fn short_hash(hash: &str) -> &str {
+    &hash[..12.min(hash.len())]
+}
+
+/// Build an activity event for an outbox push. Unlike [`activity_event`] this
+/// has no originating `WatchEntry`/source file, so it is constructed directly
+/// from the queued push record.
+fn outbox_activity(
+    pending: &crate::state::PendingPush,
+    kind: proto::ActivityKind,
+    message: String,
+    detail: Option<String>,
+) -> proto::ActivityEvent {
+    let caught_at_unix = crate::state::now_unix();
+    let id_material = format!(
+        "{caught_at_unix}:{}:{kind:?}:{}",
+        pending.project_id, pending.commit_hash
+    );
+    let digest = blake3::hash(id_material.as_bytes()).to_hex().to_string();
+    proto::ActivityEvent {
+        id: format!("{caught_at_unix}-{}", &digest[..12]),
+        kind,
+        project_id: pending.project_id.clone(),
+        project_name: None,
+        local_path: Some(pending.dir.clone()),
+        source_path: None,
+        commit_hash: Some(pending.commit_hash.clone()),
+        content_hash: None,
+        message,
+        detail,
+        caught_at_unix,
+    }
 }

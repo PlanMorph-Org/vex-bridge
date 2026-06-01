@@ -59,6 +59,23 @@ struct IfcSnapshotQuery {
     commit: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LimitQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+impl LimitQuery {
+    const DEFAULT: usize = 50;
+    const MAX: usize = 200;
+
+    /// Resolve the requested page size, clamped to a sane range so a client
+    /// cannot ask the daemon to serialize an unbounded activity log.
+    fn resolved(&self) -> usize {
+        self.limit.unwrap_or(Self::DEFAULT).clamp(1, Self::MAX)
+    }
+}
+
 struct PathValidationError {
     status: StatusCode,
     error: BridgeError,
@@ -73,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pair/status", get(handle_pair_status))
         .route("/v1/pair/start", post(handle_pair_start))
         .route("/v1/pair/poll", post(handle_pair_poll))
+        .route("/v1/pair/forget", post(handle_pair_forget))
         .route("/v1/setup/status", get(handle_setup_status))
         .route("/v1/setup/inbox", post(handle_setup_inbox))
         .route("/v1/watch/status", get(handle_watch_status))
@@ -252,11 +270,17 @@ fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
             device_label,
             key_fingerprint,
             paired_at_unix,
+            account_id,
+            account_email,
+            account_name,
             ..
         } => proto::PairStatus::Paired {
             device_label: device_label.clone(),
             key_fingerprint: key_fingerprint.clone(),
             paired_at: rfc3339_from_unix(*paired_at_unix),
+            account_id: account_id.clone(),
+            account_email: account_email.clone(),
+            account_name: account_name.clone(),
         },
     }
 }
@@ -334,7 +358,7 @@ async fn handle_pair_poll(
     }
 
     let cfg = state.config.read().await.clone();
-    if let Some(key_id) = pairing::poll(&cfg, &code)
+    if let Some(approval) = pairing::poll(&cfg, &code)
         .await
         .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?
     {
@@ -342,8 +366,11 @@ async fn handle_pair_poll(
         daemon_state.pairing = PairingState::Paired {
             device_label,
             key_fingerprint,
-            key_id,
+            key_id: approval.key_id,
             paired_at_unix: now_unix(),
+            account_id: approval.account_id,
+            account_email: approval.account_email,
+            account_name: approval.account_name,
         };
         daemon_state
             .save(&state.paths)
@@ -353,6 +380,24 @@ async fn handle_pair_poll(
 
     let daemon_state = state.state.read().await.clone();
     Ok(Json(pair_status_from_state(&daemon_state)))
+}
+
+async fn handle_pair_forget(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<proto::PairStatus>, Response> {
+    require_token(&headers, &state.access_token)?;
+    {
+        let mut daemon_state = state.state.write().await;
+        daemon_state.pairing = PairingState::Unpaired;
+        daemon_state
+            .save(&state.paths)
+            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    }
+    if let Err(error) = crate::keychain::forget() {
+        warn!(error = %error, "could not remove device key from keychain on sign-out");
+    }
+    Ok(Json(proto::PairStatus::Unpaired))
 }
 
 async fn handle_setup_status(
@@ -430,12 +475,13 @@ async fn handle_projects(
 
 async fn handle_recent_activity(
     headers: HeaderMap,
+    Query(query): Query<LimitQuery>,
     State(state): State<AppState>,
 ) -> Result<Json<proto::RecentActivityResponse>, Response> {
     require_token(&headers, &state.access_token)?;
     let daemon_state = state.state.read().await;
     Ok(Json(proto::RecentActivityResponse {
-        events: daemon_state.recent_activity(50),
+        events: daemon_state.recent_activity(query.resolved()),
     }))
 }
 
@@ -787,6 +833,22 @@ async fn resolve_ifc_snapshot_path(
                     "no IFC snapshot found for project `{project_id}` at commit `{commit}`"
                 )),
             ));
+        }
+    }
+
+    // No explicit commit requested: prefer the newest recorded snapshot (the
+    // latest commit's full model) so the caller always receives the complete
+    // current model, even when no changes have been made since the last commit.
+    // Fall back to a filesystem scan only when no snapshot has been recorded.
+    {
+        let daemon_state = state.state.read().await;
+        if let Some(snapshot) = daemon_state.latest_ifc_snapshot_for_project(project_id) {
+            let path = PathBuf::from(snapshot.path);
+            if path.is_file() {
+                validate_project_file_path(&dir, &path)
+                    .map_err(|error| err_response(error.status, error.error))?;
+                return Ok(path);
+            }
         }
     }
 
@@ -1167,6 +1229,7 @@ fn watch_status_from(
         active_watchers: active.len(),
         configured_projects: cfg.watch.len(),
         seen_ifc_hash_count: state.seen_ifc_hashes.len(),
+        pending_push_count: state.pending_push_count(),
         projects,
     }
 }

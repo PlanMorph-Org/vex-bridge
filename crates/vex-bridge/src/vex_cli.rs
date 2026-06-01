@@ -10,6 +10,28 @@ use tokio::process::Command;
 
 use crate::errors::{BridgeError, BridgeResult};
 use crate::ifc::IfcIntake;
+use vex_bridge_protocol::schema;
+
+/// Reject a `vex.visual-diff` payload whose schema name/major differs from
+/// what this bridge build understands. Forwarding an incompatible payload to
+/// the web viewer would silently mis-render a diff; failing here surfaces an
+/// engine/bridge version skew as a clear, actionable error instead.
+fn ensure_visual_diff_schema(value: &serde_json::Value) -> BridgeResult<()> {
+    match value.get("schema").and_then(|s| s.as_str()) {
+        Some(tag) if schema::is_compatible(tag, schema::VISUAL_DIFF) => Ok(()),
+        Some(tag) => Err(BridgeError::VexCli(format!(
+            "vex returned visual diff schema `{tag}`, but this bridge expects \
+             `{}`. Update the bundled vex engine or vex-bridge so their \
+             contract versions match.",
+            schema::VISUAL_DIFF
+        ))),
+        None => Err(BridgeError::VexCli(format!(
+            "vex visual diff output is missing the required `schema` field \
+             (expected `{}`)",
+            schema::VISUAL_DIFF
+        ))),
+    }
+}
 
 pub struct VexRun {
     pub status: i32,
@@ -145,7 +167,9 @@ pub async fn changes_json(bin: &str, dir: &Path) -> BridgeResult<serde_json::Val
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }
-    Ok(serde_json::from_str(&r.stdout)?)
+    let value: serde_json::Value = serde_json::from_str(&r.stdout)?;
+    ensure_visual_diff_schema(&value)?;
+    Ok(value)
 }
 
 pub async fn compare_json(
@@ -158,5 +182,32 @@ pub async fn compare_json(
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }
-    Ok(serde_json::from_str(&r.stdout)?)
+    let value: serde_json::Value = serde_json::from_str(&r.stdout)?;
+    ensure_visual_diff_schema(&value)?;
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn accepts_matching_major() {
+        let v = json!({ "schema": "vex.visual-diff/1", "elements": [] });
+        assert!(ensure_visual_diff_schema(&v).is_ok());
+    }
+
+    #[test]
+    fn rejects_incompatible_major() {
+        let v = json!({ "schema": "vex.visual-diff/2", "elements": [] });
+        let err = ensure_visual_diff_schema(&v).unwrap_err();
+        assert!(matches!(err, BridgeError::VexCli(_)));
+    }
+
+    #[test]
+    fn rejects_missing_schema() {
+        let v = json!({ "elements": [] });
+        assert!(ensure_visual_diff_schema(&v).is_err());
+    }
 }

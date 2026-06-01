@@ -58,7 +58,7 @@ jobs:
       #   Windows → Windows Credential Manager
 
       - name: Build Vex Atlas desktop agent
-        run: cargo build --release -p vex-bridge --features tray --target ${{ matrix.target }}
+        run: cargo build --release -p vex-bridge --features tray,desktop --target ${{ matrix.target }}
 
       - name: Download vex from latest vex release
         shell: bash

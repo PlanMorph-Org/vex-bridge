@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod config;
 pub mod dashboard;
+#[cfg(feature = "desktop")]
 pub mod desktop;
 #[cfg(feature = "tray-icon-asset")]
 pub(crate) mod desktop_assets;

@@ -1,9 +1,38 @@
+//! Native standalone desktop window for Vex Atlas.
+//!
+//! The window hosts the system webview (WebView2 on Windows, WKWebView on
+//! macOS, WebKitGTK on Linux) pointed at the local daemon's `/ui` page. The
+//! daemon bakes the access token directly into that page, so the webview needs
+//! no extra authentication. All of the existing Three.js / web-ifc viewer code
+//! runs unchanged inside the webview.
+//!
+//! A tiny JS->Rust IPC bridge exposes native capabilities the browser can't
+//! provide — currently a native folder picker (used by the "Add project" flow)
+//! and opening links in the user's real browser (used by account pairing).
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use tao::dpi::LogicalSize;
+use tao::event::{Event, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+use tao::window::WindowBuilder;
+use wry::WebViewBuilder;
+
 use crate::config::{Config, Paths};
 use crate::errors::{BridgeError, BridgeResult};
+
+/// Custom events posted from the webview's IPC handler onto the event loop so
+/// native work (dialogs, opening the system browser) happens on the main
+/// thread and can call back into the webview.
+#[derive(Debug, Clone)]
+enum UserEvent {
+    /// Open a native folder picker and return the chosen path to the webview.
+    PickFolder { request_id: String },
+    /// Open a URL in the user's default system browser.
+    OpenExternal { url: String },
+}
 
 pub fn run() -> BridgeResult<()> {
     let paths = Paths::discover()?;
@@ -64,6 +93,128 @@ fn start_daemon() -> BridgeResult<()> {
 }
 
 fn open_desktop_window(url: &str) -> BridgeResult<()> {
+    match run_native_window(url) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::warn!(error = %error, "native webview unavailable; falling back to browser");
+            open_in_browser(url)
+        }
+    }
+}
+
+/// Build the native window + webview and run the event loop. On success this
+/// never returns (the event loop drives the app until the window closes and the
+/// process exits). It returns `Err` only when the window/webview cannot be
+/// created, so the caller can fall back to a browser window.
+fn run_native_window(url: &str) -> BridgeResult<()> {
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+
+    let window = WindowBuilder::new()
+        .with_title("Vex Atlas")
+        .with_inner_size(LogicalSize::new(1280.0, 820.0))
+        .with_min_inner_size(LogicalSize::new(960.0, 640.0))
+        .build(&event_loop)
+        .map_err(|error| BridgeError::Config(format!("could not create window: {error}")))?;
+
+    let ipc_proxy = proxy.clone();
+    let init_script = include_str!("desktop_bridge.js");
+
+    let builder = WebViewBuilder::new()
+        .with_url(url)
+        .with_initialization_script(init_script)
+        .with_ipc_handler(move |request| {
+            handle_ipc(request.body().as_str(), &ipc_proxy);
+        });
+
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "android"
+    ))]
+    let webview = builder
+        .build(&window)
+        .map_err(|error| BridgeError::Config(format!("could not create webview: {error}")))?;
+
+    // On Linux the webview must be attached to the GTK window's child container.
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "android"
+    )))]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window.default_vbox().ok_or_else(|| {
+            BridgeError::Config("could not access window container for webview".into())
+        })?;
+        builder
+            .build_gtk(vbox)
+            .map_err(|error| BridgeError::Config(format!("could not create webview: {error}")))?
+    };
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(UserEvent::PickFolder { request_id }) => {
+                let chosen = rfd::FileDialog::new()
+                    .set_title("Choose a project folder")
+                    .pick_folder()
+                    .map(|path| path.to_string_lossy().to_string());
+                let payload = serde_json::json!({
+                    "requestId": request_id,
+                    "path": chosen,
+                });
+                let script = format!(
+                    "window.__vexNative && window.__vexNative._onFolderPicked({});",
+                    payload
+                );
+                let _ = webview.evaluate_script(&script);
+            }
+            Event::UserEvent(UserEvent::OpenExternal { url }) => {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    let _ = open::that(&url);
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+/// Parse a JSON IPC message from the webview and forward it onto the event loop.
+fn handle_ipc(body: &str, proxy: &EventLoopProxy<UserEvent>) {
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(body) else {
+        return;
+    };
+    match message.get("type").and_then(|value| value.as_str()) {
+        Some("pickFolder") => {
+            let request_id = message
+                .get("requestId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let _ = proxy.send_event(UserEvent::PickFolder { request_id });
+        }
+        Some("openExternal") => {
+            if let Some(url) = message.get("url").and_then(|value| value.as_str()) {
+                let _ = proxy.send_event(UserEvent::OpenExternal {
+                    url: url.to_string(),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Last-resort fallback when no native webview is available: open the UI in the
+/// system browser (app-mode if a Chromium browser is installed).
+fn open_in_browser(url: &str) -> BridgeResult<()> {
     if try_app_window(url) {
         return Ok(());
     }

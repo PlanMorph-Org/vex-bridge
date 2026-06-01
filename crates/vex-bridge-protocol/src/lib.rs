@@ -11,6 +11,35 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod schema {
+    //! Cross-service contract versions. The bridge is a *consumer* of the
+    //! `vex` engine's JSON; asserting the version at the boundary turns a
+    //! whole class of silent cross-version drift bugs into one loud, early
+    //! error instead of a corrupt payload forwarded to the web UI.
+
+    /// Full schema tag emitted by `vex-visual-diff` (e.g. `vex --json changes`).
+    pub const VISUAL_DIFF: &str = "vex.visual-diff/1";
+
+    /// Split a `name/major` schema tag into `(name, major)`.
+    ///
+    /// `"vex.visual-diff/1"` → `Some(("vex.visual-diff", 1))`.
+    pub fn parse_tag(tag: &str) -> Option<(&str, u32)> {
+        let (name, major) = tag.rsplit_once('/')?;
+        let major: u32 = major.trim().parse().ok()?;
+        Some((name, major))
+    }
+
+    /// True when `tag` shares the same schema name and major version as
+    /// `expected`. Patch/minor drift (a longer tag with extra fields) is
+    /// tolerated; a different name or major is rejected.
+    pub fn is_compatible(tag: &str, expected: &str) -> bool {
+        match (parse_tag(tag), parse_tag(expected)) {
+            (Some((n1, m1)), Some((n2, m2))) => n1 == n2 && m1 == m2,
+            _ => tag == expected,
+        }
+    }
+}
+
 /// `GET /v1/health` — daemon liveness + version probe. Unauthenticated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
@@ -56,6 +85,12 @@ pub enum PairStatus {
         device_label: String,
         key_fingerprint: String,
         paired_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_email: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_name: Option<String>,
     },
 }
 
@@ -186,6 +221,11 @@ pub struct WatchStatus {
     pub active_watchers: usize,
     pub configured_projects: usize,
     pub seen_ifc_hash_count: usize,
+    /// Commits committed locally but not yet pushed to the remote. Drained
+    /// by the daemon's background outbox; surfaced so the UI can show
+    /// "N changes pending sync" instead of silently losing pushes.
+    #[serde(default)]
+    pub pending_push_count: usize,
     pub projects: Vec<ProjectSummary>,
 }
 
@@ -287,6 +327,11 @@ pub enum ActivityKind {
     DuplicateSkipped,
     RouteSkipped,
     NoChanges,
+    /// Commit landed locally but the push failed and was queued in the
+    /// durable outbox for retry. The local history is safe; sync is pending.
+    PushQueued,
+    /// A previously queued push was retried successfully by the outbox.
+    PushSynced,
     Error,
 }
 

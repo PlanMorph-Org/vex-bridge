@@ -50,7 +50,7 @@ button:disabled { opacity: .45; cursor: default; }
 .app {
   height: 100%;
   display: grid;
-  grid-template-rows: 48px 1fr;
+  grid-template-rows: 48px 1fr 26px;
 }
 .topbar {
   display: flex;
@@ -249,6 +249,91 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
   border-radius: 6px;
   padding: 8px 9px;
 }
+.viewer-toolbar {
+  position: absolute;
+  top: 44px;
+  left: 10px;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: calc(100% - 20px);
+}
+.tool-btn {
+  padding: 4px 8px;
+  font-size: 12px;
+  background: rgba(20,22,23,.82);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+}
+.tool-btn:hover { color: var(--text); border-color: #596066; }
+.tool-btn.active { background: #f2f1ec; color: #111; border-color: #f2f1ec; }
+.viewer-toolbar .sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px 1px; }
+.gizmo {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 86px;
+  height: 86px;
+  z-index: 3;
+  pointer-events: none;
+}
+.props-panel {
+  position: absolute;
+  top: 44px;
+  right: 10px;
+  width: 244px;
+  max-height: calc(100% - 64px);
+  overflow: auto;
+  z-index: 4;
+  background: rgba(18,20,21,.94);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 12px 12px;
+  display: none;
+}
+.props-panel.open { display: block; }
+.props-panel h4 { margin: 0 26px 8px 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.props-panel .prop { display: grid; grid-template-columns: 92px 1fr; gap: 6px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,.05); font-size: 12px; }
+.props-panel .prop .k { color: var(--subtle); }
+.props-panel .prop .v { color: var(--text); word-break: break-word; }
+.props-panel .close { position: absolute; top: 7px; right: 8px; padding: 2px 7px; }
+.section-row {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 3;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  background: rgba(20,22,23,.85);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.section-row.open { display: flex; }
+.section-row input[type=range] { width: 130px; accent-color: var(--blue); }
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line);
+  background: #141617;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.statusbar .sb-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.statusbar .sb-item strong { color: var(--text); font-weight: 620; }
+.statusbar .sb-spacer { flex: 1; }
+.sb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); flex: none; }
+.sb-dot.ok { background: var(--green); }
+.sb-dot.warn { background: var(--amber); }
 @media (max-width: 980px) {
   .main { grid-template-columns: 1fr; grid-template-rows: 220px 260px 1fr; }
   .sidebar, .history { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -297,9 +382,31 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
           <canvas id="planCanvas"></canvas>
           <div class="view-status" id="planStatus"></div>
         </div>
-        <div class="view-pane">
+        <div class="view-pane" id="modelPane">
           <header><span>3D Model</span><span id="modelMeta"></span></header>
           <canvas id="modelCanvas"></canvas>
+          <div class="viewer-toolbar" id="viewerToolbar">
+            <button class="tool-btn" data-act="fit" title="Fit to model (F)">Fit</button>
+            <span class="sep"></span>
+            <button class="tool-btn" data-act="view-iso" title="Isometric view">Iso</button>
+            <button class="tool-btn" data-act="view-top" title="Top view">Top</button>
+            <button class="tool-btn" data-act="view-front" title="Front view">Front</button>
+            <button class="tool-btn" data-act="view-right" title="Right view">Right</button>
+            <span class="sep"></span>
+            <button class="tool-btn" data-act="proj" id="projBtn" title="Toggle perspective / orthographic">Persp</button>
+            <button class="tool-btn" data-act="section" id="sectionBtn" title="Section / cut plane">Section</button>
+          </div>
+          <div class="section-row" id="sectionRow">
+            <span>Cut</span>
+            <input type="range" id="sectionSlider" min="0" max="100" value="100" title="Section height">
+            <button class="tool-btn" data-act="section-off" title="Clear section">Clear</button>
+          </div>
+          <div class="props-panel" id="propsPanel">
+            <button class="tool-btn close" data-act="props-close" type="button">Close</button>
+            <h4 id="propsTitle">Element</h4>
+            <div id="propsBody"></div>
+          </div>
+          <canvas class="gizmo" id="gizmoCanvas" width="172" height="172"></canvas>
           <div class="view-status" id="modelStatus"></div>
         </div>
       </div>
@@ -311,12 +418,21 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
       </div>
     </section>
   </main>
+  <footer class="statusbar">
+    <span class="sb-item"><span class="sb-dot" id="sbDot"></span><span id="sbConn">Connecting…</span></span>
+    <span class="sb-item" id="sbAccountItem" style="display:none">Signed in as&nbsp;<strong id="sbAccount"></strong></span>
+    <span class="sb-item" id="sbWatch"></span>
+    <span class="sb-spacer"></span>
+    <span class="sb-item" id="sbActivity"></span>
+    <span class="sb-item" id="sbVersions"></span>
+  </footer>
 </div>
 <div class="setup" id="setupPanel">
   <div class="panel-head"><div class="panel-title">Add Inbox</div><button id="closeSetup" type="button">Close</button></div>
   <form id="setupForm">
     <div class="field"><label for="projectName">Project Name</label><input id="projectName" placeholder="Commercial Tower"></div>
     <div class="field"><label for="folderName">Folder Name</label><input id="folderName" required placeholder="Commercial-Tower"></div>
+    <div class="field" id="browseField" style="display:none"><button type="button" id="browseFolder">Browse for folder…</button></div>
     <div class="row-meta" id="inboxHint">Folder will be created inside VexInbox.</div>
     <div class="field"><label for="ifcGuid">IFC Project GUID</label><input id="ifcGuid" placeholder="2HnQxDrSH5sBbC4NkVOGR8"></div>
     <button class="primary" type="submit">Save Inbox</button>
@@ -377,8 +493,26 @@ const els = {
   setupPanel: document.getElementById('setupPanel'), setupForm: document.getElementById('setupForm'),
   deletePanel: document.getElementById('deletePanel'), deleteForm: document.getElementById('deleteForm'),
   deleteProjectText: document.getElementById('deleteProjectText'),
-  inboxHint: document.getElementById('inboxHint'), viewToggle: document.getElementById('viewToggle')
+  inboxHint: document.getElementById('inboxHint'), viewToggle: document.getElementById('viewToggle'),
+  viewerToolbar: document.getElementById('viewerToolbar'), projBtn: document.getElementById('projBtn'),
+  sectionBtn: document.getElementById('sectionBtn'), sectionRow: document.getElementById('sectionRow'),
+  sectionSlider: document.getElementById('sectionSlider'),
+  propsPanel: document.getElementById('propsPanel'), propsTitle: document.getElementById('propsTitle'),
+  propsBody: document.getElementById('propsBody'), gizmoCanvas: document.getElementById('gizmoCanvas'),
+  modelCanvas2: document.getElementById('modelCanvas'),
+  sbDot: document.getElementById('sbDot'), sbConn: document.getElementById('sbConn'),
+  sbAccountItem: document.getElementById('sbAccountItem'), sbAccount: document.getElementById('sbAccount'),
+  sbWatch: document.getElementById('sbWatch'), sbActivity: document.getElementById('sbActivity'),
+  sbVersions: document.getElementById('sbVersions'),
+  browseField: document.getElementById('browseField'), browseFolder: document.getElementById('browseFolder')
 };
+
+// Native desktop bridge (present only inside the vex-desktop window). Falls back
+// gracefully to plain browser behaviour when unavailable.
+const native = (typeof window !== 'undefined' && window.__vexNative && window.__vexNative.available)
+  ? window.__vexNative : null;
+let pickedFolderPath = null;
+let healthInfo = null;
 
 let ifcViewer = null;
 
@@ -399,6 +533,53 @@ els.viewToggle.addEventListener('click', event => {
   renderChanges(latestChanges);
 });
 window.addEventListener('resize', () => { if (ifcViewer) ifcViewer.resize(); });
+els.viewerToolbar.addEventListener('click', event => {
+  const btn = event.target.closest('button[data-act]');
+  if (!btn || !ifcViewer) return;
+  const act = btn.dataset.act;
+  if (act === 'fit') ifcViewer.fit();
+  else if (act === 'view-iso') ifcViewer.setView('iso');
+  else if (act === 'view-top') ifcViewer.setView('top');
+  else if (act === 'view-front') ifcViewer.setView('front');
+  else if (act === 'view-right') ifcViewer.setView('right');
+  else if (act === 'proj') ifcViewer.toggleProjection();
+  else if (act === 'section') ifcViewer.toggleSection();
+});
+els.sectionRow.addEventListener('click', event => {
+  if (event.target.closest('button[data-act="section-off"]') && ifcViewer) ifcViewer.toggleSection(false);
+});
+els.sectionSlider.addEventListener('input', () => { if (ifcViewer) ifcViewer.setSection(Number(els.sectionSlider.value)); });
+els.propsPanel.addEventListener('click', event => {
+  if (event.target.closest('button[data-act="props-close"]') && ifcViewer) ifcViewer.clearSelection();
+});
+window.addEventListener('keydown', event => {
+  if (!ifcViewer) return;
+  const tag = (event.target && event.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (event.key === 'f' || event.key === 'F') ifcViewer.fit();
+  else if (event.key === 'Escape') ifcViewer.clearSelection();
+});
+if (native) {
+  els.browseField.style.display = '';
+  els.browseFolder.addEventListener('click', pickFolder);
+}
+
+async function pickFolder() {
+  if (!native) return;
+  try {
+    const path = await native.pickFolder();
+    if (!path) return;
+    pickedFolderPath = path;
+    const base = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
+    document.getElementById('folderName').value = base;
+    const root = lastSetup && (lastSetup.inbox_root_path || lastSetup.suggested_inbox_path);
+    els.inboxHint.textContent = (root && path.startsWith(root))
+      ? `Tracking ${path}`
+      : `Will create a managed folder named "${base}" inside ${root || 'VexInbox'}.`;
+  } catch (error) {
+    els.inboxHint.textContent = `Folder pick failed: ${error.message || error}`;
+  }
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -415,8 +596,11 @@ async function refresh(options = {}) {
     els.topStatus.textContent = `${pairText(setup.pair_status)} / ${setup.watch.active_watchers}/${setup.watch.configured_projects} watching`;
     updatePairButton(setup.pair_status);
     els.syncButton.disabled = !selectedProject;
-    els.inboxHint.textContent = `Folders are created inside ${setup.inbox_root_path || setup.suggested_inbox_path || 'VexInbox'}.`;
+    if (!pickedFolderPath) {
+      els.inboxHint.textContent = `Folders are created inside ${setup.inbox_root_path || setup.suggested_inbox_path || 'VexInbox'}.`;
+    }
     renderProjects(setup.watch.projects);
+    renderStatusBar(setup);
     if (!selectedProject && setup.watch.projects.length) {
       const requested = setup.watch.projects.find(project => project.project_id === requestedProject);
       await selectProject((requested || setup.watch.projects[0]).project_id);
@@ -426,33 +610,93 @@ async function refresh(options = {}) {
   } catch (error) {
     els.statusDot.className = 'status-dot warn';
     els.topStatus.textContent = error.message;
+    els.sbDot.className = 'sb-dot warn';
+    els.sbConn.textContent = 'Daemon offline';
+  }
+}
+
+async function loadHealth() {
+  try {
+    healthInfo = await api('/v1/health', {headers});
+    if (lastSetup) renderStatusBar(lastSetup);
+  } catch (_) { /* best-effort */ }
+}
+
+function renderStatusBar(setup) {
+  const pair = setup.pair_status || {};
+  const paired = pair.status === 'paired';
+  const watching = setup.watch && setup.watch.active_watchers > 0;
+  els.sbDot.className = `sb-dot ${paired && watching ? 'ok' : (paired || watching ? 'warn' : '')}`;
+  els.sbConn.textContent = paired ? 'Connected' : (pair.status === 'pending' ? 'Pairing…' : 'Not paired');
+  const account = pair.account_name || pair.account_email || pair.device_label;
+  if (paired && account) {
+    els.sbAccountItem.style.display = '';
+    els.sbAccount.textContent = account;
+  } else {
+    els.sbAccountItem.style.display = 'none';
+  }
+  if (setup.watch) {
+    els.sbWatch.textContent = `${setup.watch.active_watchers}/${setup.watch.configured_projects} watching`;
+  }
+  if (selectedProject) {
+    const project = (setup.watch && setup.watch.projects || []).find(p => p.project_id === selectedProject);
+    els.sbActivity.textContent = project ? `${escapeHtml(project.project_name || project.project_id)} · ${project.seen_import_count} caught` : '';
+  } else {
+    els.sbActivity.textContent = '';
+  }
+  if (healthInfo) {
+    const engine = healthInfo.vex_version ? ` · engine ${healthInfo.vex_version}` : '';
+    els.sbVersions.textContent = `bridge ${healthInfo.version}${engine}`;
   }
 }
 
 function updatePairButton(status) {
   const kind = status && status.status;
   if (kind === 'paired') {
-    els.pairButton.textContent = 'Paired';
-    els.pairButton.disabled = true;
+    const account = status.account_name || status.account_email || status.device_label;
+    els.pairButton.textContent = account ? `Sign out (${account})` : 'Sign out';
+    els.pairButton.disabled = false;
+    els.pairButton.dataset.mode = 'signout';
   } else if (kind === 'pending') {
     els.pairButton.textContent = 'Check Pairing';
     els.pairButton.disabled = false;
+    els.pairButton.dataset.mode = 'pair';
     ensurePairPolling();
   } else {
     els.pairButton.textContent = 'Pair Device';
     els.pairButton.disabled = false;
+    els.pairButton.dataset.mode = 'pair';
   }
 }
 
 function pairText(status) {
   const kind = status && status.status;
-  if (kind === 'paired') return `Paired as ${status.device_label || 'this workstation'}`;
+  if (kind === 'paired') {
+    const account = status.account_name || status.account_email;
+    return account ? `Signed in as ${account}` : `Paired as ${status.device_label || 'this workstation'}`;
+  }
   if (kind === 'pending') return `Pairing code ${status.code}`;
   return 'Not paired';
 }
 
+async function signOut() {
+  if (!window.confirm('Sign out of this account? The device key will be removed and you will need to pair again.')) return;
+  try {
+    const status = await api('/v1/pair/forget', {method: 'POST', headers});
+    if (lastSetup) lastSetup.pair_status = status;
+    els.topStatus.textContent = 'Signed out';
+    await refresh();
+  } catch (error) {
+    els.topStatus.textContent = error.message;
+  }
+}
+
 async function startOrPollPairing() {
   const status = lastSetup && lastSetup.pair_status;
+  if (els.pairButton.dataset.mode === 'signout') {
+    await signOut();
+    return;
+  }
   if (status && status.status === 'pending') {
     await pollPairing();
     return;
@@ -658,23 +902,220 @@ class RealIfcViewer {
     this.planScene = this.makeScene();
     this.modelScene = this.makeScene();
     this.planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000000);
-    this.modelCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
-    this.modelCamera.up.set(0, 0, 1);
+    this.modelPersp = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
+    this.modelOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000000, 1000000);
+    this.modelPersp.up.set(0, 0, 1);
+    this.modelOrtho.up.set(0, 0, 1);
+    this.modelCamera = this.modelPersp;
+    this.projection = 'perspective';
     this.planCamera.up.set(0, 1, 0);
     this.planRenderer = this.makeRenderer(planCanvas);
     this.modelRenderer = this.makeRenderer(modelCanvas);
+    this.modelRenderer.localClippingEnabled = true;
     this.controls = new OrbitControls(this.modelCamera, modelCanvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
+    this.helpers = new THREE.Group();
+    this.modelScene.add(this.helpers);
+    this.raycaster = new THREE.Raycaster();
+    this.pointer = new THREE.Vector2();
+    this.downAt = null;
+    this.selectionSubset = null;
+    this.selectedId = null;
+    this.sectionActive = false;
+    this.sectionPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+    this.modelBox = null;
+    this.gizmo = this.makeGizmo();
     this.currentKey = '';
     this.loadToken = 0;
     this.model = null;
     this.planModel = null;
     this.highlightObjects = [];
     this.removedObjects = [];
+    this.modelCanvas.addEventListener('pointerdown', event => { this.downAt = {x: event.clientX, y: event.clientY}; });
+    this.modelCanvas.addEventListener('pointerup', event => this.handlePointerUp(event));
     this.resize();
     this.animate();
     this.clear('Select a project with an imported IFC.');
+  }
+
+  makeGizmo() {
+    const canvas = document.getElementById('gizmoCanvas');
+    if (!canvas) return null;
+    const renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: true});
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(86, 86, false);
+    renderer.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    const axes = new THREE.AxesHelper(1);
+    axes.material.depthTest = false;
+    scene.add(axes);
+    const cam = new THREE.OrthographicCamera(-1.6, 1.6, 1.6, -1.6, 0.1, 100);
+    cam.up.set(0, 0, 1);
+    return {renderer, scene, cam};
+  }
+
+  rebuildHelpers(box) {
+    while (this.helpers.children.length) {
+      const child = this.helpers.children.pop();
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    }
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const span = Math.max(size.x, size.y, 1);
+    const divisions = 20;
+    const grid = new THREE.GridHelper(span * 1.6, divisions, 0x3a3f43, 0x24282b);
+    grid.rotation.x = Math.PI / 2;
+    grid.position.set(center.x, center.y, box.min.z);
+    this.helpers.add(grid);
+    const axes = new THREE.AxesHelper(span * 0.35);
+    axes.position.set(box.min.x, box.min.y, box.min.z);
+    this.helpers.add(axes);
+  }
+
+  handlePointerUp(event) {
+    if (!this.downAt || !this.model) { this.downAt = null; return; }
+    const moved = Math.hypot(event.clientX - this.downAt.x, event.clientY - this.downAt.y);
+    this.downAt = null;
+    if (moved > 5) return;
+    const rect = this.modelCanvas.getBoundingClientRect();
+    this.pointer.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.raycaster.setFromCamera(this.pointer, this.modelCamera);
+    const hits = this.raycaster.intersectObject(this.model, true);
+    const hit = hits.find(item => item.object && item.object.geometry && Number.isFinite(item.faceIndex));
+    if (!hit) { this.clearSelection(); return; }
+    try {
+      const expressId = this.model.getExpressId(hit.object.geometry, hit.faceIndex);
+      if (Number.isFinite(expressId)) this.selectElement(expressId);
+    } catch (_) { /* ignore picking errors */ }
+  }
+
+  async selectElement(expressId) {
+    if (!this.model) return;
+    this.selectedId = expressId;
+    if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
+    const material = new THREE.MeshLambertMaterial({color: 0x4b8fe3, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide});
+    this.selectionSubset = this.model.createSubset({ids: [expressId], material, scene: this.modelScene, removePrevious: true, customID: 'vex-selection'});
+    try {
+      const props = await this.model.getItemProperties(expressId, true);
+      this.showProperties(props, expressId);
+    } catch (_) {
+      this.showProperties(null, expressId);
+    }
+  }
+
+  showProperties(props, expressId) {
+    const panel = document.getElementById('propsPanel');
+    const title = document.getElementById('propsTitle');
+    const body = document.getElementById('propsBody');
+    if (!panel) return;
+    const name = props && valueOf(props.Name);
+    title.textContent = name || `Element ${expressId}`;
+    const rows = [['Express ID', String(expressId)]];
+    if (props) {
+      const tag = valueOf(props.Tag); if (tag) rows.push(['Tag', tag]);
+      const gid = valueOf(props.GlobalId); if (gid) rows.push(['GlobalId', gid]);
+      const desc = valueOf(props.Description); if (desc) rows.push(['Description', desc]);
+      const objType = valueOf(props.ObjectType); if (objType) rows.push(['ObjectType', objType]);
+      if (Number.isFinite(props.type)) rows.push(['IFC Type', String(props.type)]);
+    }
+    body.innerHTML = rows.map(([k, v]) =>
+      `<div class="prop"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`).join('');
+    panel.classList.add('open');
+  }
+
+  clearSelection() {
+    this.selectedId = null;
+    if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
+    this.selectionSubset = null;
+    const panel = document.getElementById('propsPanel');
+    if (panel) panel.classList.remove('open');
+  }
+
+  fit() {
+    if (this.model) this.fitToModel(this.model);
+  }
+
+  setView(name) {
+    if (!this.modelBox) return;
+    const center = this.modelBox.getCenter(new THREE.Vector3());
+    const size = this.modelBox.getSize(new THREE.Vector3());
+    const radius = Math.max(size.x, size.y, size.z, 1);
+    const d = radius * 1.8;
+    const dirs = {
+      iso: new THREE.Vector3(1, -1, 0.8),
+      top: new THREE.Vector3(0, 0, 1),
+      front: new THREE.Vector3(0, -1, 0),
+      right: new THREE.Vector3(1, 0, 0)
+    };
+    const dir = (dirs[name] || dirs.iso).clone().normalize();
+    this.modelCamera.position.copy(center.clone().add(dir.multiplyScalar(d)));
+    this.controls.target.copy(center);
+    this.modelCamera.updateProjectionMatrix();
+    this.controls.update();
+  }
+
+  toggleProjection() {
+    const next = this.projection === 'perspective' ? this.modelOrtho : this.modelPersp;
+    next.position.copy(this.modelCamera.position);
+    next.up.copy(this.modelCamera.up);
+    this.projection = this.projection === 'perspective' ? 'orthographic' : 'perspective';
+    this.modelCamera = next;
+    this.controls.object = next;
+    const btn = document.getElementById('projBtn');
+    if (btn) { btn.textContent = this.projection === 'perspective' ? 'Persp' : 'Ortho'; btn.classList.toggle('active', this.projection === 'orthographic'); }
+    this.resizeRenderer(this.modelRenderer, this.modelCanvas, this.modelCamera);
+    if (this.modelBox) {
+      this.controls.target.copy(this.modelBox.getCenter(new THREE.Vector3()));
+    }
+    this.modelCamera.lookAt(this.controls.target);
+    this.modelCamera.updateProjectionMatrix();
+    this.controls.update();
+  }
+
+  toggleSection(force) {
+    this.sectionActive = (typeof force === 'boolean') ? force : !this.sectionActive;
+    const row = document.getElementById('sectionRow');
+    const btn = document.getElementById('sectionBtn');
+    if (row) row.classList.toggle('open', this.sectionActive);
+    if (btn) btn.classList.toggle('active', this.sectionActive);
+    this.modelRenderer.clippingPlanes = this.sectionActive ? [this.sectionPlane] : [];
+    if (this.sectionActive) {
+      const slider = document.getElementById('sectionSlider');
+      this.setSection(slider ? Number(slider.value) : 100);
+    }
+  }
+
+  setSection(percent) {
+    if (!this.modelBox) return;
+    const minZ = this.modelBox.min.z;
+    const maxZ = this.modelBox.max.z;
+    const z = minZ + (maxZ - minZ) * (percent / 100);
+    // Plane normal points -Z: keep geometry below the cut height visible.
+    this.sectionPlane.set(new THREE.Vector3(0, 0, -1), z);
+  }
+
+  animate() {
+    requestAnimationFrame(() => this.animate());
+    this.controls.update();
+    this.modelRenderer.render(this.modelScene, this.modelCamera);
+    this.planRenderer.render(this.planScene, this.planCamera);
+    this.renderGizmo();
+  }
+
+  renderGizmo() {
+    if (!this.gizmo) return;
+    const offset = this.modelCamera.position.clone().sub(this.controls.target);
+    if (offset.lengthSq() < 1e-9) return;
+    offset.normalize().multiplyScalar(3.2);
+    this.gizmo.cam.position.copy(offset);
+    this.gizmo.cam.up.copy(this.modelCamera.up);
+    this.gizmo.cam.lookAt(0, 0, 0);
+    this.gizmo.renderer.render(this.gizmo.scene, this.gizmo.cam);
   }
 
   makeRenderer(canvas) {
@@ -691,13 +1132,6 @@ class RealIfcViewer {
     sun.position.set(40, -35, 70);
     scene.add(sun);
     return scene;
-  }
-
-  animate() {
-    requestAnimationFrame(() => this.animate());
-    this.controls.update();
-    this.modelRenderer.render(this.modelScene, this.modelCamera);
-    this.planRenderer.render(this.planScene, this.planCamera);
   }
 
   clear(message = '') {
@@ -758,6 +1192,11 @@ class RealIfcViewer {
   }
 
   clearSceneModels() {
+    if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
+    this.selectionSubset = null;
+    this.selectedId = null;
+    const panel = document.getElementById('propsPanel');
+    if (panel) panel.classList.remove('open');
     for (const object of [this.model, this.planModel, ...this.highlightObjects, ...this.removedObjects]) {
       if (object && object.parent) object.parent.remove(object);
     }
@@ -848,16 +1287,24 @@ class RealIfcViewer {
   fitToModel(model) {
     const box = new THREE.Box3().setFromObject(model);
     if (box.isEmpty()) return;
+    this.modelBox = box;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const radius = Math.max(size.x, size.y, size.z, 1);
     this.modelCamera.position.set(center.x + radius, center.y - radius, center.z + radius * 0.7);
-    this.modelCamera.near = Math.max(radius / 1000, 0.01);
-    this.modelCamera.far = radius * 100;
+    if (this.modelCamera.isPerspectiveCamera) {
+      this.modelCamera.near = Math.max(radius / 1000, 0.01);
+      this.modelCamera.far = radius * 100;
+    }
     this.modelCamera.lookAt(center);
     this.modelCamera.updateProjectionMatrix();
     this.controls.target.copy(center);
     this.controls.update();
+    this.rebuildHelpers(box);
+    if (this.sectionActive) {
+      const slider = document.getElementById('sectionSlider');
+      this.setSection(slider ? Number(slider.value) : 100);
+    }
     const rect = this.planCanvas.getBoundingClientRect();
     const aspect = rect.width / Math.max(rect.height, 1);
     const planSize = Math.max(size.x, size.y, 1) * 0.58;
@@ -883,8 +1330,16 @@ class RealIfcViewer {
     const width = Math.max(1, Math.floor(rect.width));
     const height = Math.max(1, Math.floor(rect.height));
     renderer.setSize(width, height, false);
+    const aspect = width / Math.max(height, 1);
     if (camera.isPerspectiveCamera) {
-      camera.aspect = width / height;
+      camera.aspect = aspect;
+      camera.updateProjectionMatrix();
+    } else if (camera === this.modelOrtho) {
+      const extent = this.modelBox ? Math.max(this.modelBox.getSize(new THREE.Vector3()).x, this.modelBox.getSize(new THREE.Vector3()).y, 1) * 0.7 : 10;
+      camera.left = -extent * aspect;
+      camera.right = extent * aspect;
+      camera.top = extent;
+      camera.bottom = -extent;
       camera.updateProjectionMatrix();
     }
   }
@@ -928,8 +1383,13 @@ async function saveInbox(event) {
     include: ['*.ifc'],
     ifc_project_guid: optionalValue('ifcGuid')
   };
+  const root = lastSetup && (lastSetup.inbox_root_path || lastSetup.suggested_inbox_path);
+  if (pickedFolderPath && root && pickedFolderPath.startsWith(root)) {
+    body.local_path = pickedFolderPath;
+  }
   const response = await api('/v1/setup/inbox', {method: 'POST', headers: jsonHeaders, body: JSON.stringify(body)});
   els.setupPanel.classList.remove('open');
+  pickedFolderPath = null;
   await selectProject(response.repo.project_id);
 }
 
@@ -985,7 +1445,9 @@ ifcViewer = new RealIfcViewer({
   modelMeta: els.modelMeta
 });
 refresh();
+loadHealth();
 setInterval(refresh, 15000);
+setInterval(loadHealth, 60000);
 </script>
 </body>
 </html>

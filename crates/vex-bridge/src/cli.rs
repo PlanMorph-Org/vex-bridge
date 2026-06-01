@@ -37,7 +37,14 @@ struct Args {
 enum Cmd {
     /// Run the HTTP daemon in the foreground. Use a service manager (launchd /
     /// systemd / nssm) to keep it alive across reboots.
-    Start,
+    Start {
+        /// Log to stderr instead of the per-user log file. Use this when
+        /// running under a service manager that captures stderr (systemd /
+        /// journald) or when debugging interactively. On Windows this can
+        /// surface a console window, so it is opt-in.
+        #[arg(long)]
+        foreground: bool,
+    },
     /// One-shot: print health JSON to stdout and exit.
     Status,
     /// Open the local dashboard UI served by the running daemon.
@@ -69,12 +76,13 @@ pub fn run() -> BridgeResult<()> {
     // other subcommand is a short-lived CLI invocation the user typed, so
     // stderr is the right destination there.
     match &args.cmd {
-        Cmd::Start => init_tracing_to_file(&args.log, &paths.log_file)?,
+        Cmd::Start { foreground: true } => init_tracing(&args.log),
+        Cmd::Start { foreground: false } => init_tracing_to_file(&args.log, &paths.log_file)?,
         _ => init_tracing(&args.log),
     }
 
     match args.cmd {
-        Cmd::Start => run_start(paths),
+        Cmd::Start { .. } => run_start(paths),
         Cmd::Status => run_status(paths),
         Cmd::Dashboard => run_dashboard(paths),
         Cmd::Pair {
@@ -160,6 +168,14 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
             app.paths.clone(),
         );
         *app.watchers.write().await = watchers;
+        // Drain the durable push outbox in the background: any commit that
+        // landed locally but failed to push is retried here with backoff so a
+        // transient network failure never silently loses a sync.
+        tokio::spawn(crate::pipeline::run_outbox(
+            app.state.clone(),
+            app.paths.clone(),
+            cfg.vex_bin.clone(),
+        ));
         if let Err(e) = server::serve(app, port).await {
             tracing::error!(error = ?e, "server exited");
         }
@@ -223,13 +239,16 @@ fn run_pair(paths: Paths, device_label: String, open_browser: bool) -> BridgeRes
                 ));
             }
             match pairing::poll(&cfg, &outcome.code).await? {
-                Some(key_id) => {
+                Some(approval) => {
                     let mut state = State::load(&paths)?;
                     state.pairing = PairingState::Paired {
                         device_label,
                         key_fingerprint: outcome.key_fingerprint,
-                        key_id,
+                        key_id: approval.key_id,
                         paired_at_unix: now_unix(),
+                        account_id: approval.account_id,
+                        account_email: approval.account_email,
+                        account_name: approval.account_name,
                     };
                     state.save(&paths)?;
                     info!("paired successfully");

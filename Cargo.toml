@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.2.25"
+version      = "0.2.26"
 edition      = "2021"
 license      = "Apache-2.0"
 authors      = ["Architur"]
@@ -55,6 +55,11 @@ png                = "0.18.1"
 # Native system tray. Feature-gated so daemon-only builds stay lean.
 tao                = "0.35.3"
 tray-icon          = "0.24.0"
+
+# Native webview for the standalone desktop window. Pairs with tao 0.35.
+wry                = "0.55.1"
+# Native file dialogs (folder picker) for the desktop app.
+rfd                = "0.15"
 
 [profile.release]
 lto              = "thin"

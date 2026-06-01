@@ -35,6 +35,18 @@ struct PollResp {
     key_id: Option<String>,
     #[allow(dead_code)]
     device_label: Option<String>,
+    account_id: Option<String>,
+    account_email: Option<String>,
+    account_name: Option<String>,
+}
+
+/// Identity + key returned once the user approves in the browser.
+#[derive(Debug, Clone)]
+pub struct PairApproval {
+    pub key_id: String,
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub account_name: Option<String>,
 }
 
 pub struct PairingOutcome {
@@ -88,9 +100,9 @@ pub async fn start(cfg: &Config, device_label: &str) -> BridgeResult<PairingOutc
     })
 }
 
-/// Poll once. Returns `Ok(Some(key_id))` when the user has approved in the
+/// Poll once. Returns `Ok(Some(approval))` when the user has approved in the
 /// browser, `Ok(None)` while still pending. Errors on `expired` / `not_found`.
-pub async fn poll(cfg: &Config, code: &str) -> BridgeResult<Option<String>> {
+pub async fn poll(cfg: &Config, code: &str) -> BridgeResult<Option<PairApproval>> {
     let url = format!(
         "{}/api/device-pairing/{}",
         cfg.api_base.trim_end_matches('/'),
@@ -100,7 +112,17 @@ pub async fn poll(cfg: &Config, code: &str) -> BridgeResult<Option<String>> {
     let status = resp.status();
     let parsed: PollResp = resp.json().await?;
     match parsed.status.as_str() {
-        "approved" => Ok(parsed.key_id),
+        "approved" => match parsed.key_id {
+            Some(key_id) => Ok(Some(PairApproval {
+                key_id,
+                account_id: parsed.account_id,
+                account_email: parsed.account_email,
+                account_name: parsed.account_name,
+            })),
+            None => Err(BridgeError::UpstreamApi(
+                "pairing approved but no key id returned".into(),
+            )),
+        },
         "pending" => Ok(None),
         "expired" => Err(BridgeError::UpstreamApi("pairing code expired".into())),
         "not_found" => Err(BridgeError::UpstreamApi("pairing code not found".into())),
