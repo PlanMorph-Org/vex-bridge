@@ -118,9 +118,18 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(state: AppState, port: u16) -> anyhow::Result<()> {
+/// Bind the loopback listen socket. Split out from [`serve`] so the caller can
+/// claim the port *before* doing any other startup work (spawning watchers,
+/// etc.) and react explicitly to "address already in use" — the common case
+/// where a stale daemon is still holding the port — instead of half-starting
+/// and then dying on the raw OS error.
+pub async fn bind(port: u16) -> std::io::Result<tokio::net::TcpListener> {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tokio::net::TcpListener::bind(addr).await
+}
+
+pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    let addr = listener.local_addr()?;
     info!(%addr, "vex-bridge listening");
     axum::serve(listener, router(state)).await?;
     Ok(())

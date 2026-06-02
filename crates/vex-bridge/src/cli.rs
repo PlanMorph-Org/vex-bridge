@@ -159,6 +159,33 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
     };
     let rt = tokio::runtime::Runtime::new().map_err(BridgeError::Io)?;
     rt.block_on(async move {
+        // Claim the listen port FIRST, before starting any watchers. If another
+        // vex-bridge is already running (the usual cause: a stale daemon from a
+        // previous build still holding 127.0.0.1:<port>), bail out now with a
+        // clear, actionable message instead of spawning watchers and then dying
+        // on the raw OS "address already in use" error — which left the daemon
+        // in a confusing half-started state and let the OLD process keep
+        // serving requests.
+        let listener = match server::bind(port).await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::error!(
+                    port,
+                    "address 127.0.0.1:{port} is already in use: another vex-bridge \
+                     daemon is already running. Refusing to start a second instance. \
+                     Stop the existing daemon (or change `port` in config.toml), then \
+                     relaunch."
+                );
+                return Err(BridgeError::Config(format!(
+                    "another vex-bridge is already running on 127.0.0.1:{port}"
+                )));
+            }
+            Err(e) => {
+                tracing::error!(error = ?e, port, "failed to bind listen port");
+                return Err(BridgeError::Io(e));
+            }
+        };
+
         // Start configured watch → add+commit+push pipelines. The handles
         // must outlive `serve`, so bind them in this scope.
         let watchers = crate::pipeline::spawn_all(
@@ -176,11 +203,11 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
             app.paths.clone(),
             cfg.vex_bin.clone(),
         ));
-        if let Err(e) = server::serve(app, port).await {
+        if let Err(e) = server::serve(app, listener).await {
             tracing::error!(error = ?e, "server exited");
         }
-    });
-    Ok(())
+        Ok(())
+    })
 }
 
 fn run_status(paths: Paths) -> BridgeResult<()> {
