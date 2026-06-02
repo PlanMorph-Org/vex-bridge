@@ -2,15 +2,37 @@
 //! `ProcessStartInfo`-equivalent argument vectors — never concatenated into a
 //! shell string — so nothing the user types becomes a shell metacharacter.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::errors::{BridgeError, BridgeResult};
 use crate::ifc::IfcIntake;
 use vex_bridge_protocol::schema;
+
+/// Per-repository async lock. The vex object store (`.vex/objects.redb`) takes
+/// an exclusive OS-level lock, so two `vex` processes touching the same repo at
+/// once make the second fail with "Database already open. Cannot acquire lock."
+/// That happened whenever the watcher's import/commit overlapped the dashboard's
+/// periodic `log`/`changes` polling, surfacing as a 502. Serialise every
+/// repo-scoped invocation (any call with a working directory) per canonical
+/// path so concurrent calls queue instead of racing the lock.
+fn repo_lock(dir: &Path) -> Arc<AsyncMutex<()>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+    let key = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mut map = LOCKS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .expect("repo lock map poisoned");
+    map.entry(key)
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+}
 
 /// Reject a `vex.visual-diff` payload whose schema name/major differs from
 /// what this bridge build understands. Forwarding an incompatible payload to
@@ -58,6 +80,16 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Hold the per-repo lock across the whole child process so repo-scoped vex
+    // commands never contend for the exclusive redb lock. Commands without a
+    // working directory (e.g. `--version`, `ifc-intake`) touch no repo and run
+    // unserialised.
+    let lock = cwd.map(repo_lock);
+    let _guard = match lock.as_ref() {
+        Some(l) => Some(l.lock().await),
+        None => None,
+    };
 
     let out = cmd.output().await.map_err(BridgeError::Io)?;
     Ok(VexRun {
