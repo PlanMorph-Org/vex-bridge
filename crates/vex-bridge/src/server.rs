@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
+    body::{to_bytes, Body},
     extract::{Path as AxumPath, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
@@ -111,6 +112,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/projects/:project_id/ifc/:commit",
             get(handle_project_ifc_commit),
+        )
+        .route(
+            "/v1/projects/:project_id/inbox",
+            post(handle_project_inbox_upload),
         )
         .route("/v1/projects/:project_id", delete(handle_delete_project))
         .route("/v1/repo/push", post(handle_repo_push))
@@ -464,6 +469,161 @@ async fn handle_setup_inbox(
         repo,
         watch: watch_status_from(&cfg, &daemon_state, &active),
     }))
+}
+
+/// Largest IFC upload we accept in a single request (512 MiB). IFC exports are
+/// text STEP files; even large building models sit comfortably under this, and
+/// the cap stops a misbehaving client from exhausting memory.
+const MAX_INBOX_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
+
+/// Accept an IFC file straight from the desktop app (or any client) and drop it
+/// into the project's watched inbox folder. The existing file watcher then
+/// picks it up and runs the normal import + commit pipeline — i.e. the workflow
+/// is identical to the user manually copying a file into the inbox, only now it
+/// can be done from inside Vex Atlas.
+///
+/// The raw request body is the file's bytes; the desired name is passed via the
+/// `X-Vex-Filename` header (falling back to a timestamped default). We write to
+/// a hidden temp file first and atomically rename it into place so the watcher
+/// never observes a half-written `.ifc`.
+async fn handle_project_inbox_upload(
+    headers: HeaderMap,
+    AxumPath(project_id): AxumPath<String>,
+    State(state): State<AppState>,
+    body: Body,
+) -> Result<Json<serde_json::Value>, Response> {
+    require_token(&headers, &state.access_token)?;
+
+    // Resolve the project's inbox folder from config.
+    let inbox_dir = {
+        let cfg = state.config.read().await;
+        match cfg.watch.iter().find(|w| w.project_id == project_id) {
+            Some(entry) => PathBuf::from(&entry.path),
+            None => return Err(unknown_project_response(&project_id)),
+        }
+    };
+
+    let requested_name = headers
+        .get("x-vex-filename")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let file_name = sanitize_ifc_filename(requested_name);
+
+    let bytes = to_bytes(body, MAX_INBOX_UPLOAD_BYTES)
+        .await
+        .map_err(|error| {
+            err_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                BridgeError::Config(format!(
+                    "upload body exceeded {MAX_INBOX_UPLOAD_BYTES} bytes or could not be read: {error}"
+                )),
+            )
+        })?;
+
+    if bytes.is_empty() {
+        return Err(err_response(
+            StatusCode::BAD_REQUEST,
+            BridgeError::Config("upload body was empty".into()),
+        ));
+    }
+
+    if !looks_like_ifc(&bytes) {
+        return Err(err_response(
+            StatusCode::BAD_REQUEST,
+            BridgeError::Config(
+                "uploaded file does not look like an IFC (STEP) file; expected an ISO-10303-21 header".into(),
+            ),
+        ));
+    }
+
+    if let Err(error) = std::fs::create_dir_all(&inbox_dir) {
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BridgeError::Io(error),
+        ));
+    }
+
+    // Write to a hidden temp file, then atomically rename into place. The temp
+    // name does not match `*.ifc`, so the watcher ignores it until the rename.
+    let temp_path = inbox_dir.join(format!(".vex-upload-{}.tmp", now_unix()));
+    let final_path = inbox_dir.join(&file_name);
+
+    if let Err(error) = std::fs::write(&temp_path, &bytes) {
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BridgeError::Io(error),
+        ));
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &final_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BridgeError::Io(error),
+        ));
+    }
+
+    info!(
+        project_id = %project_id,
+        path = %final_path.display(),
+        bytes = bytes.len(),
+        "received IFC upload into inbox"
+    );
+
+    Ok(Json(serde_json::json!({
+        "project_id": project_id,
+        "file_name": file_name,
+        "stored_path": final_path.to_string_lossy(),
+        "bytes": bytes.len(),
+    })))
+}
+
+/// Quick sniff for an IFC/STEP payload: the spec requires the file to begin with
+/// the `ISO-10303-21;` header (possibly after a BOM or leading whitespace).
+fn looks_like_ifc(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(64)];
+    let text = String::from_utf8_lossy(head);
+    text.trim_start_matches('\u{feff}')
+        .trim_start()
+        .to_ascii_uppercase()
+        .starts_with("ISO-10303-21")
+}
+
+/// Turn a client-supplied filename into a safe `*.ifc` basename. Strips any path
+/// components, keeps a conservative character set, and guarantees a non-empty
+/// name ending in `.ifc`.
+fn sanitize_ifc_filename(requested: &str) -> String {
+    // Keep only the final path component so a client cannot escape the folder.
+    let base = requested.rsplit(['/', '\\']).next().unwrap_or("").trim();
+
+    let mut cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    cleaned = cleaned.trim().trim_matches('.').to_string();
+
+    // Drop a trailing `.ifc` (any case) so we can re-append it canonically.
+    let stem = cleaned
+        .strip_suffix(".ifc")
+        .or_else(|| cleaned.strip_suffix(".IFC"))
+        .unwrap_or(&cleaned)
+        .trim()
+        .trim_matches('.')
+        .to_string();
+
+    let stem = if stem.is_empty() {
+        format!("upload-{}", now_unix())
+    } else {
+        // Guard against pathologically long names on disk.
+        stem.chars().take(120).collect()
+    };
+
+    format!("{stem}.ifc")
 }
 
 async fn handle_watch_status(

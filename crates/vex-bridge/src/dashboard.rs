@@ -385,6 +385,8 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
             <button type="button" data-mode="full" class="active">Full Model</button>
             <button type="button" data-mode="changes">Changes Only</button>
           </div>
+          <button class="primary" id="addIfcButton" type="button" disabled title="Add an IFC file to this project's inbox">Add IFC</button>
+          <input id="addIfcInput" type="file" accept=".ifc" style="display:none">
           <div class="badges" id="countBadges"></div>
         </div>
       </div>
@@ -524,7 +526,8 @@ const els = {
   sbAccountItem: document.getElementById('sbAccountItem'), sbAccount: document.getElementById('sbAccount'),
   sbWatch: document.getElementById('sbWatch'), sbActivity: document.getElementById('sbActivity'),
   sbVersions: document.getElementById('sbVersions'),
-  browseField: document.getElementById('browseField'), browseFolder: document.getElementById('browseFolder')
+  browseField: document.getElementById('browseField'), browseFolder: document.getElementById('browseFolder'),
+  addIfcButton: document.getElementById('addIfcButton'), addIfcInput: document.getElementById('addIfcInput')
 };
 
 // Native desktop bridge (present only inside the vex-desktop window). Falls back
@@ -540,6 +543,8 @@ document.getElementById('refreshButton').addEventListener('click', refresh);
 document.getElementById('setupButton').addEventListener('click', () => els.setupPanel.classList.add('open'));
 els.pairButton.addEventListener('click', startOrPollPairing);
 els.syncButton.addEventListener('click', syncSelectedProject);
+els.addIfcButton.addEventListener('click', () => { if (selectedProject) els.addIfcInput.click(); });
+els.addIfcInput.addEventListener('change', onAddIfcInput);
 document.getElementById('closeSetup').addEventListener('click', () => els.setupPanel.classList.remove('open'));
 document.getElementById('closeDelete').addEventListener('click', closeDeletePanel);
 document.getElementById('cancelDelete').addEventListener('click', closeDeletePanel);
@@ -629,6 +634,7 @@ async function refresh(options = {}) {
     els.topStatus.textContent = `${pairText(setup.pair_status)} / ${setup.watch.active_watchers}/${setup.watch.configured_projects} watching`;
     updatePairButton(setup.pair_status);
     els.syncButton.disabled = !selectedProject;
+    els.addIfcButton.disabled = !selectedProject;
     if (!pickedFolderPath) {
       els.inboxHint.textContent = `Folders are created inside ${setup.inbox_root_path || setup.suggested_inbox_path || 'VexInbox'}.`;
     }
@@ -778,6 +784,45 @@ async function syncSelectedProject() {
   }
 }
 
+async function onAddIfcInput(event) {
+  const input = event.target;
+  const file = input.files && input.files[0];
+  if (!file || !selectedProject) { input.value = ''; return; }
+  if (!/\.ifc$/i.test(file.name)) {
+    els.topStatus.textContent = 'Please choose a .ifc file.';
+    input.value = '';
+    return;
+  }
+  const project = selectedProject;
+  els.addIfcButton.disabled = true;
+  const previousLabel = els.addIfcButton.textContent;
+  els.addIfcButton.textContent = 'Adding…';
+  els.topStatus.textContent = `Adding ${file.name}…`;
+  try {
+    const response = await fetch(`/v1/projects/${encodeURIComponent(project)}/inbox`, {
+      method: 'POST',
+      headers: {'X-Vex-Bridge-Token': TOKEN, 'X-Vex-Filename': file.name, 'Content-Type': 'application/octet-stream'},
+      body: file
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try { const body = await response.json(); if (body && (body.message || body.error)) detail = body.message || body.error; } catch (_) {}
+      throw new Error(detail);
+    }
+    const result = await response.json();
+    els.topStatus.textContent = `Added ${result.file_name} — importing…`;
+    // The watcher debounces ~2s before importing; refresh shortly after so the
+    // new commit shows up in the history without the user clicking Refresh.
+    setTimeout(() => { if (selectedProject === project) reloadSelectedProject(); }, 3500);
+  } catch (error) {
+    els.topStatus.textContent = `Add IFC failed: ${error.message}`;
+  } finally {
+    input.value = '';
+    els.addIfcButton.textContent = previousLabel;
+    els.addIfcButton.disabled = !selectedProject;
+  }
+}
+
 function renderProjects(projects) {
   els.projectCount.textContent = String(projects.length);
   els.projects.innerHTML = projects.length ? '' : '<div class="empty">No inboxes configured.</div>';
@@ -810,6 +855,7 @@ async function selectProject(projectId) {
   selectedProject = projectId;
   selectedCommit = null;
   projectCommits = [];
+  els.addIfcButton.disabled = false;
   await reloadSelectedProject();
   await refresh({reloadSelected: false});
 }
