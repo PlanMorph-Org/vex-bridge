@@ -68,14 +68,14 @@ button:disabled { opacity: .45; cursor: default; }
 .main {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(260px, 360px) minmax(520px, 1fr);
+  grid-template-columns: minmax(180px, 260px) minmax(210px, 320px) minmax(360px, 1fr);
 }
 .sidebar, .history, .viewer {
   min-height: 0;
   border-right: 1px solid var(--line);
   background: var(--panel);
 }
-.viewer { border-right: 0; display: grid; grid-template-rows: auto 1fr; }
+.viewer { border-right: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 .panel-head {
   height: 46px;
   display: flex;
@@ -201,6 +201,7 @@ canvas { width: 100%; height: 100%; display: block; }
 .change-table {
   overflow: auto;
   border-top: 1px solid var(--line);
+  min-height: 0;
   max-height: 190px;
 }
 table { width: 100%; border-collapse: collapse; }
@@ -334,8 +335,8 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 .sb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); flex: none; }
 .sb-dot.ok { background: var(--green); }
 .sb-dot.warn { background: var(--amber); }
-@media (max-width: 980px) {
-  .main { grid-template-columns: 1fr; grid-template-rows: 220px 260px 1fr; }
+@media (max-width: 760px) {
+  .main { grid-template-columns: 1fr; grid-template-rows: minmax(160px, 220px) minmax(180px, 240px) minmax(220px, 1fr); }
   .sidebar, .history { border-right: 0; border-bottom: 1px solid var(--line); }
   .view-grid { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
 }
@@ -899,8 +900,11 @@ class RealIfcViewer {
     this.modelStatus = modelStatus;
     this.planMeta = planMeta;
     this.modelMeta = modelMeta;
-    this.planScene = this.makeScene();
     this.modelScene = this.makeScene();
+    // The 2D plan renders the SAME scene from a top-down camera. Sharing the
+    // scene avoids cloning the web-ifc model (clone(true) frequently yields an
+    // empty object, which is why the 2D pane rendered nothing).
+    this.planScene = this.modelScene;
     this.planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000000);
     this.modelPersp = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
     this.modelOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000000, 1000000);
@@ -929,12 +933,16 @@ class RealIfcViewer {
     this.currentKey = '';
     this.loadToken = 0;
     this.model = null;
-    this.planModel = null;
     this.highlightObjects = [];
     this.removedObjects = [];
     this.modelCanvas.addEventListener('pointerdown', event => { this.downAt = {x: event.clientX, y: event.clientY}; });
     this.modelCanvas.addEventListener('pointerup', event => this.handlePointerUp(event));
     this.resize();
+    if (window.ResizeObserver) {
+      this.resizeObserver = new ResizeObserver(() => this.resize());
+      if (this.modelCanvas.parentElement) this.resizeObserver.observe(this.modelCanvas.parentElement);
+      if (this.planCanvas.parentElement) this.resizeObserver.observe(this.planCanvas.parentElement);
+    }
     this.animate();
     this.clear('Select a project with an imported IFC.');
   }
@@ -1160,11 +1168,14 @@ class RealIfcViewer {
         const model = await this.loadIfcModel(projectId, latestCommit);
         if (token !== this.loadToken) return;
         this.model = model;
-        this.planModel = model.clone(true);
         this.modelScene.add(this.model);
-        this.planScene.add(this.planModel);
         this.currentKey = key;
         this.fitToModel(this.model);
+        if (!this.modelBox) {
+          if (token !== this.loadToken) return;
+          this.clear('No 3D geometry found in this commit.');
+          return;
+        }
       }
       await this.applyDiff(changes, mode, token);
       if (token !== this.loadToken) return;
@@ -1197,17 +1208,17 @@ class RealIfcViewer {
     this.selectedId = null;
     const panel = document.getElementById('propsPanel');
     if (panel) panel.classList.remove('open');
-    for (const object of [this.model, this.planModel, ...this.highlightObjects, ...this.removedObjects]) {
+    for (const object of [this.model, ...this.highlightObjects, ...this.removedObjects]) {
       if (object && object.parent) object.parent.remove(object);
     }
     this.model = null;
-    this.planModel = null;
+    this.modelBox = null;
     this.highlightObjects = [];
     this.removedObjects = [];
   }
 
   async applyDiff(changes, mode, token) {
-    if (!this.model || !this.planModel) return;
+    if (!this.model) return;
     for (const object of [...this.highlightObjects, ...this.removedObjects]) {
       if (object && object.parent) object.parent.remove(object);
     }
@@ -1216,9 +1227,7 @@ class RealIfcViewer {
     const grouped = groupedGlobalIds(changes);
     const hasChanges = Object.values(grouped).some(set => set.size > 0);
     this.setObjectOpacity(this.model, mode === 'changes' ? 0.08 : 1);
-    this.setObjectOpacity(this.planModel, mode === 'changes' ? 0.06 : 0.9);
     this.model.visible = mode !== 'changes' || !hasChanges;
-    this.planModel.visible = mode !== 'changes' || !hasChanges;
     for (const [kind, ids] of Object.entries(grouped)) {
       if (!ids.size || kind === 'removed') continue;
       const expressIds = await this.globalIdsToExpressIds(this.model, ids);
@@ -1226,9 +1235,7 @@ class RealIfcViewer {
       if (!expressIds.length) continue;
       const material = highlightMaterial(kind);
       const subset = this.model.createSubset({ids: expressIds, material, scene: this.modelScene, removePrevious: false, customID: `vex-${kind}`});
-      const planSubset = subset.clone(true);
-      this.planScene.add(planSubset);
-      this.highlightObjects.push(subset, planSubset);
+      this.highlightObjects.push(subset);
     }
     if (grouped.removed.size && changes.previous_commit) {
       await this.addRemovedSubset(changes, grouped.removed, token);
@@ -1245,9 +1252,7 @@ class RealIfcViewer {
       previous.visible = false;
       const material = highlightMaterial('removed');
       const subset = previous.createSubset({ids: expressIds, material, scene: this.modelScene, removePrevious: false, customID: 'vex-removed'});
-      const planSubset = subset.clone(true);
-      this.planScene.add(planSubset);
-      this.removedObjects.push(previous, subset, planSubset);
+      this.removedObjects.push(previous, subset);
     } catch (error) {
       this.modelMeta.textContent = `removed unavailable: ${error.message}`;
     }
@@ -1305,6 +1310,14 @@ class RealIfcViewer {
       const slider = document.getElementById('sectionSlider');
       this.setSection(slider ? Number(slider.value) : 100);
     }
+    this.updatePlanFraming();
+  }
+
+  updatePlanFraming() {
+    if (!this.modelBox) return;
+    const center = this.modelBox.getCenter(new THREE.Vector3());
+    const size = this.modelBox.getSize(new THREE.Vector3());
+    const radius = Math.max(size.x, size.y, size.z, 1);
     const rect = this.planCanvas.getBoundingClientRect();
     const aspect = rect.width / Math.max(rect.height, 1);
     const planSize = Math.max(size.x, size.y, 1) * 0.58;
@@ -1322,7 +1335,7 @@ class RealIfcViewer {
   resize() {
     this.resizeRenderer(this.modelRenderer, this.modelCanvas, this.modelCamera);
     this.resizeRenderer(this.planRenderer, this.planCanvas, this.planCamera);
-    if (this.model) this.fitToModel(this.model);
+    this.updatePlanFraming();
   }
 
   resizeRenderer(renderer, canvas, camera) {
