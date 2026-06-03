@@ -219,6 +219,29 @@ pub async fn compare_json(
     Ok(value)
 }
 
+/// Authoritative element inventory at `reference` via `vex elements --rooted`.
+///
+/// Returns the parsed `vex.elements/1` payload. Reads node blobs directly from
+/// the committed tree, so it reflects exactly what was committed — no IFC
+/// re-parsing or filename guessing. Errors (including older engines that lack
+/// the `elements` subcommand) propagate so callers can fall back gracefully.
+pub async fn elements_json(
+    bin: &str,
+    dir: &Path,
+    reference: &str,
+) -> BridgeResult<serde_json::Value> {
+    let r = run(
+        bin,
+        Some(dir),
+        ["--json", "elements", "--rooted", reference],
+    )
+    .await?;
+    if !r.ok() {
+        return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
+    }
+    Ok(serde_json::from_str(&r.stdout)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

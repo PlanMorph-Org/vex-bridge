@@ -573,7 +573,9 @@ async fn handle_project_changes(
             .await
             .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?
     } else {
-        baseline_visual_json(&dir).unwrap_or_else(|error| {
+        baseline_visual_json(&cfg.vex_bin, &dir, latest_commit.as_deref())
+            .await
+            .unwrap_or_else(|error| {
             serde_json::json!({
                 "status": "baseline-unavailable",
                 "summary": "Baseline model",
@@ -583,7 +585,13 @@ async fn handle_project_changes(
             })
         })
     };
-    attach_model_elements(&mut visual_diff, &dir);
+    attach_model_elements(
+        &mut visual_diff,
+        &cfg.vex_bin,
+        &dir,
+        latest_commit.as_deref(),
+    )
+    .await;
     Ok(Json(proto::ProjectChangesResponse {
         project_id,
         project_name: entry.project_name.clone(),
@@ -1049,8 +1057,13 @@ fn path_label(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-fn attach_model_elements(visual_diff: &mut serde_json::Value, dir: &Path) {
-    let Ok(elements) = model_preview_elements(dir) else {
+async fn attach_model_elements(
+    visual_diff: &mut serde_json::Value,
+    bin: &str,
+    dir: &Path,
+    reference: Option<&str>,
+) {
+    let Ok(elements) = model_preview_elements(bin, dir, reference).await else {
         return;
     };
     if elements.is_empty() {
@@ -1063,8 +1076,12 @@ fn attach_model_elements(visual_diff: &mut serde_json::Value, dir: &Path) {
     }
 }
 
-fn baseline_visual_json(dir: &Path) -> Result<serde_json::Value, BridgeError> {
-    let elements = model_preview_elements(dir)?;
+async fn baseline_visual_json(
+    bin: &str,
+    dir: &Path,
+    reference: Option<&str>,
+) -> Result<serde_json::Value, BridgeError> {
+    let elements = model_preview_elements(bin, dir, reference).await?;
     Ok(serde_json::json!({
         "schema": "vex.visual-diff/1",
         "status": "baseline",
@@ -1081,21 +1098,91 @@ fn baseline_visual_json(dir: &Path) -> Result<serde_json::Value, BridgeError> {
     }))
 }
 
-fn model_preview_elements(dir: &Path) -> Result<Vec<serde_json::Value>, BridgeError> {
+/// Build the current element inventory for a project. Prefers the authoritative
+/// `vex elements` engine command (reads the committed tree directly); falls back
+/// to an approximate regex scan of the newest IFC snapshot when the engine lacks
+/// the command or the directory is not a local Vex repo. Each element is tagged
+/// with `data_source` so consumers can tell authoritative data from a guess.
+async fn model_preview_elements(
+    bin: &str,
+    dir: &Path,
+    reference: Option<&str>,
+) -> Result<Vec<serde_json::Value>, BridgeError> {
+    if is_local_vex_repo(dir) {
+        let reference = reference.unwrap_or("HEAD");
+        match vex_cli::elements_json(bin, dir, reference).await {
+            Ok(payload) => {
+                if let Some(list) = payload.get("elements").and_then(|value| value.as_array()) {
+                    let elements = list
+                        .iter()
+                        .take(2000)
+                        .enumerate()
+                        .map(|(index, element)| authoritative_element(element, index))
+                        .collect();
+                    return Ok(elements);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "vex elements unavailable; using approximate preview parse"
+                );
+            }
+        }
+    }
+    approximate_preview_elements(dir)
+}
+
+/// Map one `vex.elements/1` record to the dashboard's element shape.
+fn authoritative_element(element: &serde_json::Value, index: usize) -> serde_json::Value {
+    let type_name = element
+        .get("type_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("IFC element");
+    let name = element.get("name").and_then(serde_json::Value::as_str);
+    let global_id = element.get("global_id").and_then(serde_json::Value::as_str);
+    let step_id = element.get("step_id").and_then(serde_json::Value::as_u64);
+    let id = global_id
+        .map(str::to_string)
+        .or_else(|| step_id.map(|value| format!("#{value}")))
+        .unwrap_or_else(|| format!("element-{index}"));
+    serde_json::json!({
+        "kind": "unchanged",
+        "type": type_name,
+        "type_name": type_name,
+        "name": name,
+        "hint": name,
+        "id": id,
+        "stable_id": global_id.unwrap_or_default(),
+        "global_id": global_id,
+        "step_id": step_id,
+        "preview_index": index,
+        "data_source": "authoritative",
+    })
+}
+
+/// Approximate inventory: a regex scan of the newest IFC snapshot. Used only as
+/// a fallback. Names are surfaced when the parser found them but are never
+/// fabricated from STEP ids.
+fn approximate_preview_elements(dir: &Path) -> Result<Vec<serde_json::Value>, BridgeError> {
     let Some(path) = latest_ifc_snapshot(dir)? else {
         return Ok(Vec::new());
     };
-    let elements = parse_preview_elements(&path, 300)?
+    let elements = parse_preview_elements(&path, 2000)?
         .into_iter()
         .enumerate()
         .map(|(index, element)| {
             serde_json::json!({
                 "kind": "unchanged",
                 "type": element.type_name,
-                "name": element.name.unwrap_or_else(|| element.step_id.clone()),
-                "id": element.step_id,
-                "stable_id": element.step_id,
+                "type_name": element.type_name,
+                "name": element.name,
+                "hint": element.name,
+                "id": format!("#{}", element.step_id),
+                "stable_id": "",
+                "step_id": element.step_id,
                 "preview_index": index,
+                "data_source": "approximate",
             })
         })
         .collect();
