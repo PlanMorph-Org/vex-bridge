@@ -242,6 +242,30 @@ pub async fn elements_json(
     Ok(serde_json::from_str(&r.stdout)?)
 }
 
+/// Materialize the IFC model committed at `reference` to `out` via
+/// `vex checkout`. Returns the number of bytes written. This reconstructs the
+/// exact committed model from the object store — independent of whatever IFC
+/// files currently sit on disk — so callers can serve commit-exact geometry
+/// even for historical commits whose original snapshot is gone.
+pub async fn checkout(bin: &str, dir: &Path, reference: &str, out: &Path) -> BridgeResult<u64> {
+    let args: Vec<OsString> = vec![
+        "--json".into(),
+        "checkout".into(),
+        reference.into(),
+        "-o".into(),
+        out.as_os_str().to_os_string(),
+    ];
+    let r = run(bin, Some(dir), args).await?;
+    if !r.ok() {
+        return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
+    }
+    let value: serde_json::Value = serde_json::from_str(&r.stdout)?;
+    Ok(value
+        .get("bytes")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

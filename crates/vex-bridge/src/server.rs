@@ -830,27 +830,32 @@ async fn resolve_ifc_snapshot_path(
     let dir = PathBuf::from(&entry.path);
 
     if let Some(commit) = commit.filter(|value| !value.trim().is_empty()) {
-        let daemon_state = state.state.read().await;
-        if let Some(snapshot) = daemon_state.ifc_snapshot(project_id, commit) {
-            let path = PathBuf::from(snapshot.path);
-            validate_project_file_path(&dir, &path)
-                .map_err(|error| err_response(error.status, error.error))?;
-            if path.is_file() {
+        {
+            let daemon_state = state.state.read().await;
+            if let Some(snapshot) = daemon_state.ifc_snapshot(project_id, commit) {
+                let path = PathBuf::from(snapshot.path);
+                validate_project_file_path(&dir, &path)
+                    .map_err(|error| err_response(error.status, error.error))?;
+                if path.is_file() {
+                    return Ok(path);
+                }
+            }
+        }
+        // No recorded snapshot file is on disk for this commit. If this is a
+        // local Vex repo, reconstruct the exact committed model from the object
+        // store via `vex checkout` so historical commits remain viewable even
+        // after their original IFC file was moved or overwritten.
+        if is_local_vex_repo(&dir) {
+            if let Some(path) = materialize_commit_ifc(&cfg.vex_bin, &dir, commit).await {
                 return Ok(path);
             }
         }
-        if daemon_state
-            .ifc_snapshots
-            .iter()
-            .any(|snapshot| snapshot.project_id == project_id)
-        {
-            return Err(err_response(
-                StatusCode::NOT_FOUND,
-                BridgeError::Config(format!(
-                    "no IFC snapshot found for project `{project_id}` at commit `{commit}`"
-                )),
-            ));
-        }
+        return Err(err_response(
+            StatusCode::NOT_FOUND,
+            BridgeError::Config(format!(
+                "no IFC snapshot found for project `{project_id}` at commit `{commit}`"
+            )),
+        ));
     }
 
     // No explicit commit requested: prefer the newest recorded snapshot (the
@@ -869,17 +874,60 @@ async fn resolve_ifc_snapshot_path(
         }
     }
 
-    let path = latest_ifc_snapshot(&dir)
+    if let Some(path) = latest_ifc_snapshot(&dir)
         .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?
-        .ok_or_else(|| {
-            err_response(
-                StatusCode::NOT_FOUND,
-                BridgeError::Config(format!("no IFC snapshot found for project `{project_id}`")),
-            )
-        })?;
-    validate_project_file_path(&dir, &path)
-        .map_err(|error| err_response(error.status, error.error))?;
-    Ok(path)
+    {
+        validate_project_file_path(&dir, &path)
+            .map_err(|error| err_response(error.status, error.error))?;
+        return Ok(path);
+    }
+
+    // Nothing on disk: reconstruct the latest committed model from the store.
+    if is_local_vex_repo(&dir) {
+        if let Some(path) = materialize_commit_ifc(&cfg.vex_bin, &dir, "HEAD").await {
+            return Ok(path);
+        }
+    }
+
+    Err(err_response(
+        StatusCode::NOT_FOUND,
+        BridgeError::Config(format!("no IFC snapshot found for project `{project_id}`")),
+    ))
+}
+
+/// Reconstruct the IFC model committed at `reference` into a cache file under
+/// the project's `.vex/cache/ifc/` directory via `vex checkout`, returning the
+/// cached path. Full 64-char commit hashes are immutable and reused across
+/// requests; shorter refs (branches, tags, abbreviated hashes) are always
+/// re-materialized. Returns `None` on any failure so callers fall through to a
+/// 404 rather than surfacing engine errors.
+async fn materialize_commit_ifc(bin: &str, dir: &Path, reference: &str) -> Option<PathBuf> {
+    let safe: String = reference
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(64)
+        .collect();
+    if safe.is_empty() {
+        return None;
+    }
+    let cache_dir = dir.join(".vex").join("cache").join("ifc");
+    if let Err(error) = tokio::fs::create_dir_all(&cache_dir).await {
+        tracing::debug!(%error, "failed to create ifc cache dir");
+        return None;
+    }
+    let out = cache_dir.join(format!("{safe}.ifc"));
+    let immutable = safe.len() == 64;
+    if immutable && out.is_file() {
+        return Some(out);
+    }
+    match vex_cli::checkout(bin, dir, reference, &out).await {
+        Ok(bytes) if bytes > 0 => Some(out),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::debug!(%error, "vex checkout failed");
+            None
+        }
+    }
 }
 
 fn validate_project_file_path(project_dir: &Path, file: &Path) -> Result<(), PathValidationError> {

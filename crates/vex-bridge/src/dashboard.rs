@@ -183,6 +183,17 @@ button:disabled { opacity: .45; cursor: default; }
   color: var(--muted);
 }
 canvas { width: 100%; height: 100%; display: block; }
+.plan-tools { display: flex; align-items: center; gap: 6px; }
+.plan-tools select {
+  background: #121414;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  max-width: 150px;
+}
+.plan-tools .tool-btn { padding: 3px 8px; }
 .view-status {
   position: absolute;
   inset: 38px 0 0 0;
@@ -379,7 +390,14 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
       </div>
       <div class="view-grid">
         <div class="view-pane">
-          <header><span>2D Plan</span><span id="planMeta"></span></header>
+          <header>
+            <span>2D Plan</span>
+            <span class="plan-tools">
+              <select id="planLevel" title="Floor level"><option value="auto">Auto level</option></select>
+              <button class="tool-btn" id="planModeBtn" data-act="plan-mode" title="Toggle section plan / top view">Plan</button>
+              <span id="planMeta"></span>
+            </span>
+          </header>
           <canvas id="planCanvas"></canvas>
           <div class="view-status" id="planStatus"></div>
         </div>
@@ -490,6 +508,7 @@ const els = {
   planCanvas: document.getElementById('planCanvas'), modelCanvas: document.getElementById('modelCanvas'),
   planMeta: document.getElementById('planMeta'), modelMeta: document.getElementById('modelMeta'),
   planStatus: document.getElementById('planStatus'), modelStatus: document.getElementById('modelStatus'),
+  planLevel: document.getElementById('planLevel'), planModeBtn: document.getElementById('planModeBtn'),
   pairButton: document.getElementById('pairButton'), syncButton: document.getElementById('syncButton'),
   setupPanel: document.getElementById('setupPanel'), setupForm: document.getElementById('setupForm'),
   deletePanel: document.getElementById('deletePanel'), deleteForm: document.getElementById('deleteForm'),
@@ -550,6 +569,19 @@ els.sectionRow.addEventListener('click', event => {
   if (event.target.closest('button[data-act="section-off"]') && ifcViewer) ifcViewer.toggleSection(false);
 });
 els.sectionSlider.addEventListener('input', () => { if (ifcViewer) ifcViewer.setSection(Number(els.sectionSlider.value)); });
+els.planLevel.addEventListener('change', () => {
+  if (!ifcViewer) return;
+  const value = els.planLevel.value;
+  ifcViewer.setPlanLevel(value === 'auto' ? 0 : Number(value));
+});
+els.planModeBtn.addEventListener('click', () => {
+  if (!ifcViewer) return;
+  const next = ifcViewer.planCutMode === 'plan' ? 'top' : 'plan';
+  ifcViewer.setPlanCutMode(next);
+  els.planModeBtn.textContent = next === 'plan' ? 'Plan' : 'Top';
+  els.planModeBtn.classList.toggle('active', next === 'top');
+  els.planLevel.disabled = next === 'top';
+});
 els.propsPanel.addEventListener('click', event => {
   if (event.target.closest('button[data-act="props-close"]') && ifcViewer) ifcViewer.clearSelection();
 });
@@ -914,6 +946,15 @@ class RealIfcViewer {
     this.projection = 'perspective';
     this.planCamera.up.set(0, 1, 0);
     this.planRenderer = this.makeRenderer(planCanvas);
+    // The 2D pane renders the shared scene through a horizontal cut plane so it
+    // reads as a true floor plan (everything above the cut height is removed)
+    // rather than a top-down roof view. Toggle to 'top' to see the full model.
+    this.planCutMode = 'plan';
+    this.planClipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+    this.planRenderer.clippingPlanes = [this.planClipPlane];
+    this.storeys = [];
+    this.planLevelIndex = 0;
+    this.planCutZ = null;
     this.modelRenderer = this.makeRenderer(modelCanvas);
     this.modelRenderer.localClippingEnabled = true;
     this.controls = new OrbitControls(this.modelCamera, modelCanvas);
@@ -1107,6 +1148,85 @@ class RealIfcViewer {
     this.sectionPlane.set(new THREE.Vector3(0, 0, -1), z);
   }
 
+  // Distance above a storey level where a floor plan is conventionally cut
+  // (~1.2 m). web-ifc normalises to model units, so detect mm vs m by extent.
+  planCutOffset() {
+    if (!this.modelBox) return 1.2;
+    const height = this.modelBox.max.z - this.modelBox.min.z;
+    return height > 400 ? 1200 : 1.2;
+  }
+
+  async extractStoreys(model) {
+    this.storeys = [];
+    try {
+      const structure = await model.getSpatialStructure();
+      const found = [];
+      const visit = node => {
+        if (!node) return;
+        const type = String(node.type || '').toUpperCase();
+        if (type.indexOf('STOREY') !== -1 && Number.isFinite(node.expressID)) {
+          found.push(node.expressID);
+        }
+        for (const child of node.children || []) visit(child);
+      };
+      visit(structure);
+      for (const expressID of found) {
+        let name = `Level ${this.storeys.length + 1}`;
+        let elevation = null;
+        try {
+          const props = await model.getItemProperties(expressID, false);
+          name = valueOf(props && props.Name) || valueOf(props && props.LongName) || name;
+          const raw = props && props.Elevation;
+          const value = raw && typeof raw === 'object' ? raw.value : raw;
+          if (Number.isFinite(value)) elevation = Number(value);
+        } catch (_) { /* keep defaults */ }
+        this.storeys.push({expressID, name, elevation});
+      }
+      // Sort by elevation so the level list reads ground-up.
+      this.storeys.sort((a, b) => (a.elevation ?? 0) - (b.elevation ?? 0));
+    } catch (_) {
+      this.storeys = [];
+    }
+    this.planLevelIndex = 0;
+    if (typeof this.onStoreys === 'function') this.onStoreys(this.storeys);
+  }
+
+  setPlanCutMode(mode) {
+    this.planCutMode = mode === 'top' ? 'top' : 'plan';
+    this.applyPlanCut();
+  }
+
+  setPlanLevel(index) {
+    this.planLevelIndex = index;
+    this.applyPlanCut();
+  }
+
+  planCutHeight() {
+    if (!this.modelBox) return 0;
+    const minZ = this.modelBox.min.z;
+    const maxZ = this.modelBox.max.z;
+    const storey = this.storeys[this.planLevelIndex];
+    if (storey && Number.isFinite(storey.elevation)) {
+      const z = storey.elevation + this.planCutOffset();
+      // Clamp a hair below the roof so a single-storey plan still shows walls.
+      return Math.min(z, maxZ - (maxZ - minZ) * 0.02);
+    }
+    // No storey metadata: cut low through the model so it reads as a plan.
+    return minZ + (maxZ - minZ) * 0.25;
+  }
+
+  applyPlanCut() {
+    if (!this.modelBox) return;
+    if (this.planCutMode === 'top') {
+      this.planRenderer.clippingPlanes = [];
+      this.planCutZ = null;
+      return;
+    }
+    this.planCutZ = this.planCutHeight();
+    this.planClipPlane.set(new THREE.Vector3(0, 0, -1), this.planCutZ);
+    this.planRenderer.clippingPlanes = [this.planClipPlane];
+  }
+
   animate() {
     requestAnimationFrame(() => this.animate());
     this.controls.update();
@@ -1176,6 +1296,9 @@ class RealIfcViewer {
           this.clear('No 3D geometry found in this commit.');
           return;
         }
+        await this.extractStoreys(this.model);
+        if (token !== this.loadToken) return;
+        this.applyPlanCut();
       }
       await this.applyDiff(changes, mode, token);
       if (token !== this.loadToken) return;
@@ -1199,6 +1322,9 @@ class RealIfcViewer {
     if (loader.ifcManager.applyWebIfcConfig) {
       await loader.ifcManager.applyWebIfcConfig({COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true});
     }
+    // Yield once so the "Loading IFC geometry..." status paints before the
+    // synchronous web-ifc parse takes over the main thread.
+    await new Promise(resolve => setTimeout(resolve, 0));
     return await loader.parse(buffer);
   }
 
@@ -1215,6 +1341,11 @@ class RealIfcViewer {
     this.modelBox = null;
     this.highlightObjects = [];
     this.removedObjects = [];
+    this.storeys = [];
+    this.planLevelIndex = 0;
+    this.planCutZ = null;
+    this.planRenderer.clippingPlanes = this.planCutMode === 'top' ? [] : [this.planClipPlane];
+    if (typeof this.onStoreys === 'function') this.onStoreys([]);
   }
 
   async applyDiff(changes, mode, token) {
@@ -1311,6 +1442,7 @@ class RealIfcViewer {
       this.setSection(slider ? Number(slider.value) : 100);
     }
     this.updatePlanFraming();
+    this.applyPlanCut();
   }
 
   updatePlanFraming() {
@@ -1443,6 +1575,22 @@ async function deleteProject(event) {
 
 function optionalValue(id) { const value = document.getElementById(id).value.trim(); return value || null; }
 function parentFor(commit) { return commit && commit.parents && commit.parents.length ? commit.parents[0] : null; }
+function populatePlanLevels(storeys) {
+  if (!els.planLevel) return;
+  const list = Array.isArray(storeys) ? storeys : [];
+  if (!list.length) {
+    els.planLevel.innerHTML = '<option value="auto">Auto level</option>';
+    els.planLevel.disabled = true;
+    return;
+  }
+  const options = list.map((storey, index) => {
+    const elevation = Number.isFinite(storey.elevation) ? ` (${Math.round(storey.elevation)})` : '';
+    return `<option value="${index}">${escapeHtml(storey.name || ('Level ' + (index + 1)))}${escapeHtml(elevation)}</option>`;
+  });
+  els.planLevel.innerHTML = options.join('');
+  els.planLevel.value = '0';
+  els.planLevel.disabled = ifcViewer ? ifcViewer.planCutMode === 'top' : false;
+}
 function short(value) { return value ? value.slice(0, 12) : 'none'; }
 function idLabel(id) { return typeof id === 'string' ? id : id && (id.GlobalId || id.StepId || id.step_id); }
 function elementType(element) { return element.type_name || element.type || 'IFC element'; }
@@ -1458,6 +1606,7 @@ try {
     planMeta: els.planMeta,
     modelMeta: els.modelMeta
   });
+  ifcViewer.onStoreys = populatePlanLevels;
 } catch (error) {
   // 3D rendering may be unavailable (e.g. no WebGL/GPU context). Keep the rest
   // of the dashboard fully usable for pairing and project management instead of
