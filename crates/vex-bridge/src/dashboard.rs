@@ -137,6 +137,7 @@ button:disabled { opacity: .45; cursor: default; }
 .badge.modified { border-color: rgba(217,154,43,.45); color: #f0c06a; }
 .badge.moved { border-color: rgba(75,143,227,.45); color: #93baf0; }
 .badge.renamed { border-color: rgba(155,107,211,.45); color: #c5a8e7; }
+.badge.internal { border-color: rgba(255,255,255,.12); color: var(--muted); }
 .viewer-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -225,6 +226,19 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 .kind.moved { color: var(--blue); }
 .kind.renamed { color: var(--violet); }
 .kind.unchanged { color: var(--muted); }
+.layer-chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  border: 1px solid rgba(255,255,255,.14);
+  font-size: 10px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  vertical-align: 1px;
+}
+.layer-chip.shape { border-color: rgba(75,143,227,.5); color: #93baf0; }
 .setup {
   display: none;
   position: fixed;
@@ -953,13 +967,32 @@ function renderBadges(counts) {
     badge.textContent = `${kind} ${counts[kind] || 0}`;
     els.countBadges.appendChild(badge);
   }
+  if (counts.internal > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'badge internal';
+    badge.title = 'Anonymous helper entities (placements, geometry carriers) that changed alongside the elements above.';
+    badge.textContent = `+${counts.internal} internal`;
+    els.countBadges.appendChild(badge);
+  }
+}
+
+function layerChip(element) {
+  const layer = element.layer;
+  if (!layer || element.kind === 'added' || element.kind === 'removed') return '';
+  if (layer === 'shape') {
+    return ' <span class="layer-chip shape" title="The element\'s geometry changed">geometry</span>';
+  }
+  if (layer === 'relationship') {
+    return ' <span class="layer-chip" title="Only the element\'s relationships changed">links</span>';
+  }
+  return '';
 }
 
 function renderRows(elements) {
   els.changeRows.innerHTML = elements.length ? '' : '<tr><td colspan="3" class="row-meta">No element-level changes.</td></tr>';
   for (const element of elements.slice(0, 150)) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="kind ${element.kind}">${escapeHtml(element.kind)}</td>
+    tr.innerHTML = `<td class="kind ${element.kind}">${escapeHtml(element.kind)}${layerChip(element)}</td>
       <td>${escapeHtml(elementType(element))}</td>
       <td>${escapeHtml(element.hint || idLabel(element.id) || '')}</td>`;
     els.changeRows.appendChild(tr);
