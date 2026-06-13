@@ -383,6 +383,9 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 .statusbar .sb-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .statusbar .sb-item strong { color: var(--text); font-weight: 620; }
 .statusbar .sb-spacer { flex: 1; }
+.statusbar .sb-action { margin-left: 10px; padding: 2px 8px; font: inherit; font-size: 11px; color: var(--text); background: transparent; border: 1px solid var(--subtle); border-radius: 5px; cursor: pointer; flex: none; }
+.statusbar .sb-action:hover { border-color: var(--text); }
+.statusbar .sb-action:disabled { opacity: 0.55; cursor: default; }
 .sb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); flex: none; }
 .sb-dot.ok { background: var(--green); }
 .sb-dot.warn { background: var(--amber); }
@@ -487,6 +490,8 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     <span class="sb-spacer"></span>
     <span class="sb-item" id="sbActivity"></span>
     <span class="sb-item" id="sbVersions"></span>
+    <button class="sb-action" id="sbDiag" type="button" title="Copy a diagnostics report to share with support">Copy diagnostics</button>
+    <button class="sb-action" id="sbRepair" type="button" title="Restart the Vex background daemon">Repair</button>
   </footer>
 </div>
 <div class="setup" id="setupPanel">
@@ -567,6 +572,7 @@ const els = {
   sbAccountItem: document.getElementById('sbAccountItem'), sbAccount: document.getElementById('sbAccount'),
   sbWatch: document.getElementById('sbWatch'), sbActivity: document.getElementById('sbActivity'),
   sbVersions: document.getElementById('sbVersions'),
+  sbDiag: document.getElementById('sbDiag'), sbRepair: document.getElementById('sbRepair'),
   browseField: document.getElementById('browseField'), browseFolder: document.getElementById('browseFolder'),
   addIfcButton: document.getElementById('addIfcButton'), addIfcInput: document.getElementById('addIfcInput'),
   updateBanner: document.getElementById('updateBanner')
@@ -587,7 +593,8 @@ document.getElementById('setupButton').addEventListener('click', () => els.setup
 els.pairButton.addEventListener('click', startOrPollPairing);
 els.syncButton.addEventListener('click', syncSelectedProject);
 els.addIfcButton.addEventListener('click', () => { if (selectedProject) els.addIfcInput.click(); });
-els.addIfcInput.addEventListener('change', onAddIfcInput);
+if (els.sbDiag) els.sbDiag.addEventListener('click', copyDiagnostics);
+if (els.sbRepair) els.sbRepair.addEventListener('click', repairDaemon);els.addIfcInput.addEventListener('change', onAddIfcInput);
 document.getElementById('closeSetup').addEventListener('click', () => els.setupPanel.classList.remove('open'));
 document.getElementById('closeDelete').addEventListener('click', closeDeletePanel);
 document.getElementById('cancelDelete').addEventListener('click', closeDeletePanel);
@@ -727,6 +734,48 @@ async function loadHealth() {
 function openExternalUrl(url) {
   if (native && typeof native.openExternal === 'function') native.openExternal(url);
   else window.open(url, '_blank', 'noopener');
+}
+
+// Fetch the (redacted) diagnostics report and copy it to the clipboard so the
+// user can paste it into a support thread.
+async function copyDiagnostics() {
+  const btn = els.sbDiag;
+  const original = btn ? btn.textContent : '';
+  try {
+    const report = await api('/v1/diagnostics', {headers});
+    const text = JSON.stringify(report, null, 2);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const area = document.createElement('textarea');
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      document.body.removeChild(area);
+    }
+    if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = original; }, 2000); }
+  } catch (error) {
+    if (btn) { btn.textContent = 'Copy failed'; setTimeout(() => { btn.textContent = original; }, 2000); }
+  }
+}
+
+// Ask the daemon to shut down cleanly. The page itself can't respawn a process,
+// so we guide the user: the tray/desktop launcher brings a fresh daemon back on
+// the next open. For an immediate restart, the tray's "Repair / Restart" item
+// does the full retire-and-relaunch.
+async function repairDaemon() {
+  const btn = els.sbRepair;
+  const original = btn ? btn.textContent : '';
+  if (!window.confirm('Restart the Vex background daemon? In-flight syncs will be interrupted.')) return;
+  if (btn) { btn.textContent = 'Restarting…'; btn.disabled = true; }
+  try {
+    await api('/v1/daemon/shutdown', {method: 'POST', headers});
+  } catch (_) { /* the daemon may drop the connection as it stops */ }
+  setTimeout(() => {
+    if (btn) { btn.textContent = original; btn.disabled = false; }
+    els.sbConn.textContent = 'Daemon restarting — reopen Vex Atlas if it does not reconnect.';
+  }, 1500);
 }
 
 async function checkUpdates() {

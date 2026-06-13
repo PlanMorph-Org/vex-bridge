@@ -30,6 +30,11 @@ pub struct Paths {
     pub state_file: PathBuf,
     pub access_token_file: PathBuf,
     pub log_file: PathBuf,
+    /// Advisory record of the running daemon (`{pid, version, port, started_at}`).
+    /// The bound TCP port is the hard singleton; this file adds PID + version
+    /// visibility so launchers can self-heal a stale daemon and the Repair flow
+    /// can force-kill a hung one.
+    pub daemon_lock_file: PathBuf,
 }
 
 impl Paths {
@@ -43,6 +48,7 @@ impl Paths {
             access_token_file: config_dir.join("access-token"),
             log_file: data_dir.join("vex-bridge.log"),
             state_file: data_dir.join("state.json"),
+            daemon_lock_file: data_dir.join("daemon.lock"),
             config_dir,
             data_dir,
         })

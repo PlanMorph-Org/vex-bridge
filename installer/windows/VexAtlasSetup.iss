@@ -30,6 +30,15 @@ SolidCompression=yes
 WizardStyle=modern
 ChangesEnvironment=yes
 UninstallDisplayIcon={app}\vex-desktop.exe
+; Stop a running Vex Atlas before overwriting its binaries. Without this,
+; Windows refuses to replace a locked .exe, leaving a stale daemon running next
+; to freshly-copied binaries (version skew) — the root cause of the
+; "uninstall and reinstall" ritual. We additionally force-stop the processes in
+; PrepareToInstall below, because the daemon/tray run windowless and the built-in
+; "applications in use" detector only catches windowed apps reliably.
+CloseApplications=yes
+CloseApplicationsFilter=vex-bridge.exe,vex-tray.exe,vex-desktop.exe,vex.exe
+RestartApplications=no
 
 [Tasks]
 Name: "autostart"; Description: "Start Vex Atlas tray when I sign in"; GroupDescription: "Startup:"; Flags: checkedonce
@@ -118,6 +127,32 @@ begin
   BroadcastEnvironmentChange();
 end;
 
+procedure StopVexProcesses();
+var
+  ResultCode: Integer;
+begin
+  // Force-stop every Vex Atlas process before we touch the binaries. The daemon
+  // and tray run windowless, so Inno's built-in in-use detection is unreliable
+  // for them; taskkill /T also reaps any child `vex.exe` the daemon spawned.
+  // /F is required because the daemon ignores WM_CLOSE (it has no message loop).
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM vex-desktop.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM vex-tray.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM vex-bridge.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM vex.exe', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Give Windows a moment to release the file handles before the copy step.
+  Sleep(800);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopVexProcesses();
+  Result := '';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
@@ -126,6 +161,8 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usPostUninstall then
+  if CurUninstallStep = usUninstall then
+    StopVexProcesses()
+  else if CurUninstallStep = usPostUninstall then
     RemoveAppFromUserPath();
 end;

@@ -188,6 +188,12 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
             }
         };
 
+        // Port is ours: publish the advisory lockfile so launchers and the
+        // diagnostics endpoint can see which PID/version is live. The bound
+        // port is the real singleton; this is metadata only.
+        crate::daemon_lock::write(&app.paths, port);
+        let lock_paths = app.paths.clone();
+
         // Start configured watch → add+commit+push pipelines. The handles
         // must outlive `serve`, so bind them in this scope.
         let watchers = crate::pipeline::spawn_all(
@@ -208,6 +214,9 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
         if let Err(e) = server::serve(app, listener).await {
             tracing::error!(error = ?e, "server exited");
         }
+        // Graceful shutdown completed: drop the advisory lockfile so launchers
+        // don't mistake a cleanly-exited daemon for a hung one.
+        crate::daemon_lock::remove(&lock_paths);
         Ok(())
     })
 }

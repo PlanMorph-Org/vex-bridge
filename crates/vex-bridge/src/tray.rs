@@ -16,6 +16,7 @@ const MENU_OPEN: &str = "open-dashboard";
 const MENU_SETUP: &str = "open-setup";
 const MENU_PAIR: &str = "pair-device";
 const MENU_REFRESH: &str = "refresh-status";
+const MENU_REPAIR: &str = "repair-daemon";
 const MENU_QUIT: &str = "quit-tray";
 
 #[derive(Debug)]
@@ -52,13 +53,11 @@ pub fn run() -> BridgeResult<()> {
     let cfg = Config::load_or_default(&paths)?;
     let mut state = TrayState::new(cfg.port, &paths);
 
-    if state.probe_health().is_none() {
-        let _ = start_daemon();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && state.probe_health().is_none() {
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    }
+    // Guarantee a single, version-matched, responsive daemon before we show the
+    // tray. This is the same self-healing policy the desktop window uses, so a
+    // stale daemon left over from an update is retired (gracefully, or by
+    // force) instead of the tray silently attaching to old code.
+    crate::daemon_supervisor::ensure_daemon(&paths, cfg.port);
     state.refresh_from_daemon();
     state.last_seen_activity_id = state.latest_activity.as_ref().map(|event| event.id.clone());
     state.last_notified_activity_id = state.last_seen_activity_id.clone();
@@ -72,11 +71,13 @@ pub fn run() -> BridgeResult<()> {
     let setup = MenuItem::with_id(MENU_SETUP, "Choose IFC Inbox", true, None);
     let pair = MenuItem::with_id(MENU_PAIR, "Pair Device", true, None);
     let refresh = MenuItem::with_id(MENU_REFRESH, "Refresh Status", true, None);
+    let repair = MenuItem::with_id(MENU_REPAIR, "Repair / Restart", true, None);
     let quit = MenuItem::with_id(MENU_QUIT, "Quit Tray", true, None);
     let sep_one = PredefinedMenuItem::separator();
     let sep_two = PredefinedMenuItem::separator();
     menu.append_items(&[
-        &status, &inbox, &activity, &sep_one, &open, &setup, &pair, &refresh, &sep_two, &quit,
+        &status, &inbox, &activity, &sep_one, &open, &setup, &pair, &refresh, &repair, &sep_two,
+        &quit,
     ])
     .map_err(|error| BridgeError::Config(format!("tray menu failed: {error}")))?;
 
@@ -97,6 +98,8 @@ pub fn run() -> BridgeResult<()> {
         .build()
         .map_err(|error| BridgeError::Config(format!("tray icon failed: {error}")))?;
 
+    // The Repair action needs the daemon paths inside the (move) event loop.
+    let repair_paths = paths.clone();
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
         let _keep_alive = &tray;
@@ -117,6 +120,23 @@ pub fn run() -> BridgeResult<()> {
                         notify_activity(&event, &state.activity_url_for(&event));
                     }
                     update_menu(&state, &tray, &status, &inbox, &activity);
+                }
+                MENU_REPAIR => {
+                    // Force a clean daemon: retire whatever is on the port
+                    // (gracefully, or by force if it's hung), clear the stale
+                    // lockfile, and relaunch a fresh, version-matched daemon.
+                    let repaired =
+                        crate::daemon_supervisor::force_repair(&repair_paths, state.port);
+                    state.refresh_from_daemon();
+                    update_menu(&state, &tray, &status, &inbox, &activity);
+                    send_notification(
+                        "Vex Atlas - Repair",
+                        if repaired {
+                            "Restarted the Vex daemon successfully."
+                        } else {
+                            "Repair attempted; the daemon is still not responding."
+                        },
+                    );
                 }
                 MENU_QUIT => *control_flow = ControlFlow::Exit,
                 _ => {}
@@ -441,18 +461,6 @@ fn pair_device() {
     if let Err(error) = command.spawn() {
         eprintln!("could not start pairing: {error}");
     }
-}
-
-fn start_daemon() -> BridgeResult<()> {
-    let exe = bridge_exe()?;
-    let mut command = Command::new(exe);
-    command
-        .arg("start")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    hide_console_window(&mut command);
-    command.spawn().map(|_| ()).map_err(BridgeError::Io)
 }
 
 #[cfg(target_os = "windows")]

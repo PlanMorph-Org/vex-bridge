@@ -6,6 +6,9 @@
 
 pub mod cli;
 pub mod config;
+pub mod daemon_lock;
+#[cfg(any(feature = "tray", feature = "desktop"))]
+pub mod daemon_supervisor;
 pub mod dashboard;
 #[cfg(feature = "desktop")]
 pub mod desktop;

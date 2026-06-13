@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/repo/register", post(handle_repo_register))
         .route("/v1/daemon/shutdown", post(handle_daemon_shutdown))
         .route("/v1/update/check", get(handle_update_check))
+        .route("/v1/diagnostics", get(handle_diagnostics))
         .with_state(state)
 }
 
@@ -242,6 +243,11 @@ fn classify_error(
             Some("Check your network connection and retry."),
             true,
         ),
+        BridgeError::VexCli(msg) if is_repo_locked(msg) => (
+            "repo_locked",
+            Some("Another vex process is using this project. Click Repair, then retry."),
+            true,
+        ),
         BridgeError::VexCli(_) => (
             "vex_cli_error",
             Some("Ensure the bundled vex engine is available and compatible."),
@@ -278,6 +284,15 @@ fn classify_error(
             true,
         ),
     }
+}
+
+/// Detect the engine's redb exclusive-lock failure in a CLI error message. The
+/// object store takes an OS-level lock, so two `vex` processes touching the same
+/// repo fail with this signature. We classify it distinctly so the UI can offer
+/// "Repair" (retire the stale daemon) instead of a generic engine error.
+fn is_repo_locked(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("database already open") || m.contains("cannot acquire lock")
 }
 
 fn viewer_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
@@ -378,6 +393,80 @@ async fn handle_daemon_shutdown(
         shutdown.notify_waiters();
     });
     Ok(Json(serde_json::json!({ "stopping": true })))
+}
+
+/// `GET /v1/diagnostics` — a one-shot, copy-pasteable health report for support.
+///
+/// Bundles everything needed to diagnose the "stale daemon / version skew / repo
+/// locked" class of problems in a single token-gated payload: the running
+/// build, PID/uptime, the advisory lockfile, the bundled engine version and its
+/// schema compatibility, how many watchers are active, pair state, and a short
+/// tail of the daemon log. Sensitive values (the access token, and the user's
+/// home-directory prefix) are redacted before they leave the process so the
+/// report is safe to paste into a bug tracker.
+async fn handle_diagnostics(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let cfg = state.config.read().await.clone();
+    let daemon_state = state.state.read().await.clone();
+    let vex_version = vex_cli::version(&cfg.vex_bin).await.ok().flatten();
+    let vex_schema_compatible = vex_version
+        .as_deref()
+        .and_then(|version| version_at_least(version, 0, 1, 3));
+    let active_watchers = state.watchers.read().await.len();
+    let lock = crate::daemon_lock::read(&state.paths);
+    let log_tail = read_log_tail(&state.paths.log_file, 40);
+
+    let report = serde_json::json!({
+        "bridge_version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "uptime_seconds": state.started_at.elapsed().as_secs(),
+        "port": cfg.port,
+        "paired": matches!(daemon_state.pairing, PairingState::Paired { .. }),
+        "active_watchers": active_watchers,
+        "vex_version": vex_version,
+        "vex_bin": cfg.vex_bin,
+        "expected_visual_diff_schema": proto::schema::VISUAL_DIFF,
+        "vex_schema_compatible": vex_schema_compatible,
+        "lockfile": lock,
+        "log_tail": redact(&log_tail, &state.access_token),
+    });
+    Ok(Json(report))
+}
+
+/// Read the last `lines` lines of the daemon log, best-effort. Returns an empty
+/// string if the log can't be read.
+fn read_log_tail(path: &std::path::Path, lines: usize) -> String {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let all: Vec<&str> = content.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    all[start..].join("\n")
+}
+
+/// Redact secrets before diagnostics leave the process: the user's home prefix
+/// (so absolute paths don't leak the username) and the access token.
+fn redact(text: &str, token: &str) -> String {
+    let mut out = text.to_string();
+    if let Some(home) = dirs_home() {
+        if !home.is_empty() {
+            out = out.replace(&home, "~");
+        }
+    }
+    if token.len() >= 8 {
+        out = out.replace(token, "[redacted-token]");
+    }
+    out
+}
+
+fn dirs_home() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .filter(|h| !h.is_empty())
 }
 
 /// Default GitHub repo whose releases drive the in-app update check. Overridable
@@ -2105,5 +2194,39 @@ mod tests {
         assert_eq!(semver_tuple("1.2.3-rc.1+build5"), Some((1, 2, 3)));
         assert_eq!(semver_tuple("1.2"), Some((1, 2, 0)));
         assert_eq!(semver_tuple(""), None);
+    }
+
+    #[test]
+    fn repo_locked_signature_is_detected() {
+        assert!(is_repo_locked(
+            "Database already open. Cannot acquire lock."
+        ));
+        assert!(is_repo_locked("error: CANNOT ACQUIRE LOCK on objects.redb"));
+        assert!(!is_repo_locked("some unrelated engine failure"));
+    }
+
+    #[test]
+    fn repo_locked_error_classifies_as_retryable_repair() {
+        let err = BridgeError::VexCli("Database already open. Cannot acquire lock.".into());
+        let (code, hint, retryable) = classify_error(StatusCode::INTERNAL_SERVER_ERROR, &err);
+        assert_eq!(code, "repo_locked");
+        assert!(retryable);
+        assert!(hint.unwrap().contains("Repair"));
+    }
+
+    #[test]
+    fn generic_vex_cli_error_is_not_repo_locked() {
+        let err = BridgeError::VexCli("vex import failed: bad ifc".into());
+        let (code, _hint, _retryable) = classify_error(StatusCode::INTERNAL_SERVER_ERROR, &err);
+        assert_eq!(code, "vex_cli_error");
+    }
+
+    #[test]
+    fn redact_replaces_token_and_home() {
+        let token = "supersecrettoken1234";
+        let text = format!("token={token} path=/home/me/file");
+        let out = redact(&text, token);
+        assert!(!out.contains(token));
+        assert!(out.contains("[redacted-token]"));
     }
 }

@@ -12,7 +12,6 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
@@ -38,136 +37,12 @@ pub fn run() -> BridgeResult<()> {
     let paths = Paths::discover()?;
     paths.ensure_dirs()?;
     let cfg = Config::load_or_default(&paths)?;
-    ensure_daemon(&paths, cfg.port)?;
+    crate::daemon_supervisor::ensure_daemon(&paths, cfg.port);
     let url = std::env::args()
         .nth(1)
         .filter(|value| value.starts_with("http://127.0.0.1:"))
         .unwrap_or_else(|| format!("http://127.0.0.1:{}/ui", cfg.port));
     open_desktop_window(&url)
-}
-
-/// Ensure a *compatible* daemon is running before we attach the UI.
-///
-/// A common failure after an in-place update was a stale daemon from the
-/// previous build still holding the port: the new desktop window would attach
-/// to old code and behave inconsistently (mismatched API contract, missing
-/// routes). Here we treat a version mismatch as "unhealthy": we ask the stale
-/// daemon to shut down cleanly, wait for the port to free, then launch a fresh
-/// daemon built from this binary's sibling. Self-healing instead of requiring
-/// an uninstall/reinstall.
-fn ensure_daemon(paths: &Paths, port: u16) -> BridgeResult<()> {
-    let want = env!("CARGO_PKG_VERSION");
-    match daemon_version(port) {
-        // Healthy and matching: nothing to do.
-        Some(version) if version == want => return Ok(()),
-        // Healthy but stale: retire it deterministically before relaunching.
-        Some(version) => {
-            tracing::warn!(
-                running = %version,
-                expected = %want,
-                "daemon version mismatch; requesting clean restart"
-            );
-            request_shutdown(paths, port);
-            wait_for_port_free(port, Duration::from_secs(5));
-        }
-        // Not running (or not answering): just start one.
-        None => {}
-    }
-
-    start_daemon()?;
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline {
-        match daemon_version(port) {
-            Some(version) if version == want => return Ok(()),
-            _ => std::thread::sleep(Duration::from_millis(250)),
-        }
-    }
-    Ok(())
-}
-
-/// Probe `/v1/health` and return the daemon's reported version, or `None` if
-/// nothing healthy is answering on the port.
-fn daemon_version(port: u16) -> Option<String> {
-    let body = health_body(port)?;
-    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
-    value
-        .get("version")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-}
-
-/// Issue a raw `GET /v1/health` and return the JSON response body, if the
-/// daemon answered `200 OK`.
-fn health_body(port: u16) -> Option<String> {
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-    use std::io::{Read, Write};
-    write!(
-        stream,
-        "GET /v1/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-    if !response.starts_with("HTTP/1.1 200") {
-        return None;
-    }
-    // Body follows the blank line separating headers from payload.
-    response
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body.trim().to_string())
-}
-
-/// Best-effort: ask a stale daemon to shut down gracefully via the token-gated
-/// shutdown endpoint. We read the access token the daemon wrote to the per-user
-/// data dir (same user, same machine) to authenticate.
-fn request_shutdown(paths: &Paths, port: u16) {
-    let Ok(token) = std::fs::read_to_string(&paths.access_token_file) else {
-        return;
-    };
-    let token = token.trim();
-    if token.is_empty() {
-        return;
-    }
-    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
-        return;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    use std::io::{Read, Write};
-    let request = format!(
-        "POST /v1/daemon/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
-         X-Vex-Bridge-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return;
-    }
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-}
-
-/// Poll until the daemon stops answering on the port (it has shut down) or the
-/// deadline passes.
-fn wait_for_port_free(port: u16, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if health_body(port).is_none() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(150));
-    }
-}
-
-fn start_daemon() -> BridgeResult<()> {
-    let mut command = Command::new(sibling_exe("vex-bridge"));
-    command
-        .arg("start")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    hide_console_window(&mut command);
-    command.spawn().map(|_| ()).map_err(BridgeError::Io)
 }
 
 fn open_desktop_window(url: &str) -> BridgeResult<()> {
@@ -317,31 +192,6 @@ fn try_app_window(url: &str) -> bool {
         }
     }
     false
-}
-
-#[cfg(target_os = "windows")]
-fn hide_console_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn hide_console_window(_command: &mut Command) {}
-
-fn sibling_exe(name: &str) -> PathBuf {
-    let filename = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
-    if let Ok(mut exe) = std::env::current_exe() {
-        exe.set_file_name(&filename);
-        if exe.is_file() {
-            return exe;
-        }
-    }
-    PathBuf::from(filename)
 }
 
 #[cfg(target_os = "windows")]
