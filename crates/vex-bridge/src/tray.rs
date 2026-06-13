@@ -43,6 +43,7 @@ struct TrayState {
 struct HealthSnapshot {
     paired: bool,
     vex_version: Option<String>,
+    bridge_version: Option<String>,
 }
 
 pub fn run() -> BridgeResult<()> {
@@ -168,16 +169,29 @@ impl TrayState {
             .unwrap_or_default();
         match &self.last_health {
             Some(health) if health.paired => format!(
-                "Vex is running / paired / vex {}{}",
+                "Vex is running / paired / vex {}{}{}",
                 health.vex_version.as_deref().unwrap_or("unknown"),
-                watching
+                watching,
+                self.stale_suffix(health),
             ),
             Some(health) => format!(
-                "Vex is running / not paired / vex {}{}",
+                "Vex is running / not paired / vex {}{}{}",
                 health.vex_version.as_deref().unwrap_or("unknown"),
-                watching
+                watching,
+                self.stale_suffix(health),
             ),
             None => format!("Vex daemon is not reachable on port {}", self.port),
+        }
+    }
+
+    /// If the running daemon's build differs from this tray binary, an update
+    /// was installed but the background daemon is still on the old code. Surface
+    /// that so the user knows a restart (reboot/relaunch) is pending rather than
+    /// silently running mismatched components.
+    fn stale_suffix(&self, health: &HealthSnapshot) -> &'static str {
+        match health.bridge_version.as_deref() {
+            Some(running) if running != env!("CARGO_PKG_VERSION") => " / update pending (restart)",
+            _ => "",
         }
     }
 
@@ -214,9 +228,11 @@ impl TrayState {
         };
         let paired = json_bool(&response, "paired").unwrap_or(false);
         let vex_version = json_string(&response, "vex_version");
+        let bridge_version = json_string(&response, "version");
         let health = HealthSnapshot {
             paired,
             vex_version,
+            bridge_version,
         };
         self.last_health = Some(health.clone());
         Some(health)

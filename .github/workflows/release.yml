@@ -75,8 +75,24 @@ jobs:
           gh release download "$tag" --repo "$VEX_REPO" \
             --pattern "$asset" --dir vex-stage
           tar -xzf "vex-stage/$asset" -C vex-stage
-          bin="vex-stage/vex-${tag}-${{ matrix.artifact_suffix }}/vex${{ matrix.exe }}"
+          extracted="vex-stage/vex-${tag}-${{ matrix.artifact_suffix }}"
+          bin="$extracted/vex${{ matrix.exe }}"
           test -f "$bin"
+          # Integrity gate: the vex release bundles a SHA256SUMS computed by its
+          # own build. Verify the extracted binary against it before we ship it
+          # inside Vex Atlas, so a truncated/corrupted download can never be
+          # silently bundled into a release that users install.
+          if [[ -f "$extracted/SHA256SUMS" ]]; then
+            ( cd "$extracted" && \
+              if command -v sha256sum >/dev/null 2>&1; then \
+                sha256sum --check --strict "SHA256SUMS"; \
+              else \
+                shasum -a 256 --check --strict "SHA256SUMS"; \
+              fi )
+          else
+            echo "::error::vex bundle $asset is missing SHA256SUMS; refusing to ship an unverifiable engine"
+            exit 1
+          fi
           echo "VEX_BIN_PATH=$bin" >> "$GITHUB_ENV"
 
       # ── Package ──────────────────────────────────────────────────────────
@@ -149,15 +165,32 @@ jobs:
         with:
           path: dist/
 
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Aggregate one SHA256SUMS.txt across every published archive and
+          # installer. The in-app updater downloads this alongside an asset and
+          # verifies the bytes before swapping anything on disk, so a corrupted
+          # or tampered download is rejected instead of installed.
+          out="dist/SHA256SUMS.txt"
+          : > "$out"
+          while IFS= read -r -d '' file; do
+            ( cd "$(dirname "$file")" && sha256sum "$(basename "$file")" ) >> "$out"
+          done < <(find dist -type f \( -name '*.tar.gz' -o -name '*.exe' \) -print0 | sort -z)
+          cat "$out"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           # Per platform we publish raw .tar.gz bundles containing vex-bridge,
           # vex-tray, vex, and SHA256SUMS. Windows also gets a one-click setup
-          # executable for normal users.
+          # executable for normal users. SHA256SUMS.txt lets the in-app updater
+          # verify any download before installing it.
           files: |
             dist/**/*.tar.gz
             dist/**/*.exe
+            dist/SHA256SUMS.txt
             docs/early-access-distribution.md
           generate_release_notes: true
           draft: false

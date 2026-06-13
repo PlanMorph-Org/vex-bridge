@@ -156,6 +156,8 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
         access_token: Arc::new(token),
         started_at: Instant::now(),
         watchers: Arc::new(RwLock::new(Vec::new())),
+        shutdown: Arc::new(tokio::sync::Notify::new()),
+        update_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
     let rt = tokio::runtime::Runtime::new().map_err(BridgeError::Io)?;
     rt.block_on(async move {

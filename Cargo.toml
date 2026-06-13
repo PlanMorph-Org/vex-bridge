@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.2.33"
+version      = "0.2.34"
 edition      = "2021"
 license      = "Apache-2.0"
 authors      = ["Architur"]
@@ -35,6 +35,7 @@ rand               = "0.8"
 sha2               = "0.10"
 blake3             = "1.5"
 base64             = "0.22"
+uuid               = { version = "1", features = ["v7", "serde"] }
 
 # OS integration
 keyring            = "3"          # cross-platform secret storage

@@ -65,6 +65,32 @@ button:disabled { opacity: .45; cursor: default; }
 .status-dot.ok { background: var(--green); }
 .status-dot.warn { background: var(--amber); }
 .toolbar-spacer { flex: 1; }
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+}
+.update-banner.info { background: #14233a; color: #cfe3ff; border-bottom-color: #1f3b63; }
+.update-banner.warn { background: #3a2c10; color: #ffe6b0; border-bottom-color: #5c4516; }
+.update-banner .ub-text { flex: 1; min-width: 0; }
+.update-banner .ub-text strong { font-weight: 650; }
+.update-banner .ub-sub { opacity: 0.8; margin-left: 8px; font-size: 12px; }
+.update-banner button {
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.9;
+}
+.update-banner button:hover { opacity: 1; }
+.update-banner button.ub-dismiss { border-color: transparent; opacity: 0.65; }
+.update-banner button.ub-dismiss:hover { opacity: 1; }
 .main {
   min-height: 0;
   display: grid;
@@ -379,6 +405,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     <button id="syncButton">Sync</button>
     <button class="primary" id="refreshButton">Refresh</button>
   </div>
+  <div class="update-banner" id="updateBanner" style="display:none"></div>
   <main class="main">
     <section class="sidebar">
       <div class="panel-head"><div class="panel-title">Projects</div><div id="projectCount" class="row-meta"></div></div>
@@ -541,7 +568,8 @@ const els = {
   sbWatch: document.getElementById('sbWatch'), sbActivity: document.getElementById('sbActivity'),
   sbVersions: document.getElementById('sbVersions'),
   browseField: document.getElementById('browseField'), browseFolder: document.getElementById('browseFolder'),
-  addIfcButton: document.getElementById('addIfcButton'), addIfcInput: document.getElementById('addIfcInput')
+  addIfcButton: document.getElementById('addIfcButton'), addIfcInput: document.getElementById('addIfcInput'),
+  updateBanner: document.getElementById('updateBanner')
 };
 
 // Native desktop bridge (present only inside the vex-desktop window). Falls back
@@ -550,6 +578,7 @@ const native = (typeof window !== 'undefined' && window.__vexNative && window.__
   ? window.__vexNative : null;
 let pickedFolderPath = null;
 let healthInfo = null;
+let updateInfo = null;
 
 let ifcViewer = null;
 
@@ -635,8 +664,25 @@ async function pickFolder() {
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
-  if (!response.ok) throw new Error(`${path} -> ${response.status}`);
-  return await response.json();
+  const raw = await response.text();
+  let body = null;
+  if (raw) {
+    try { body = JSON.parse(raw); } catch (_) { body = null; }
+  }
+  if (!response.ok) {
+    const message = body && body.message ? body.message : `${path} -> ${response.status}`;
+    const hint = body && body.hint ? body.hint : null;
+    const error = new Error(hint ? `${message} (${hint})` : message);
+    error.status = response.status;
+    error.code = body && body.code ? body.code : null;
+    error.hint = hint;
+    error.correlationId = body && body.correlation_id ? body.correlation_id : null;
+    throw error;
+  }
+  if (body === null) {
+    throw new Error(`${path} returned an unexpected response.`);
+  }
+  return body;
 }
 
 async function refresh(options = {}) {
@@ -672,7 +718,75 @@ async function loadHealth() {
   try {
     healthInfo = await api('/v1/health', {headers});
     if (lastSetup) renderStatusBar(lastSetup);
+    renderSystemBanner();
   } catch (_) { /* best-effort */ }
+}
+
+// Open a URL in the user's real browser. Inside the desktop window this hands
+// off to the native shell; in a plain browser it falls back to a new tab.
+function openExternalUrl(url) {
+  if (native && typeof native.openExternal === 'function') native.openExternal(url);
+  else window.open(url, '_blank', 'noopener');
+}
+
+async function checkUpdates() {
+  try {
+    updateInfo = await api('/v1/update/check', {headers});
+  } catch (_) {
+    updateInfo = null;
+  }
+  renderSystemBanner();
+}
+
+// One banner drives both the "update available" and "engine/bridge schema
+// mismatch" notices, with the safety-critical mismatch taking priority. Keeping
+// it as a persistent strip (not transient toast) means a user who steps away
+// still sees the state when they return.
+function renderSystemBanner() {
+  const banner = els.updateBanner;
+  if (!banner) return;
+
+  if (healthInfo && healthInfo.vex_schema_compatible === false) {
+    banner.className = 'update-banner warn';
+    banner.style.display = '';
+    banner.innerHTML = '';
+    const text = document.createElement('div');
+    text.className = 'ub-text';
+    text.innerHTML = '<strong>Engine / bridge version mismatch.</strong>'
+      + '<span class="ub-sub">Visual diffs may be inaccurate until the components are realigned. Install matching versions.</span>';
+    banner.appendChild(text);
+    return;
+  }
+
+  if (updateInfo && updateInfo.update_available && updateInfo.latest_version) {
+    const dismissed = localStorage.getItem('vexDismissedUpdate');
+    if (dismissed === updateInfo.latest_version) { banner.style.display = 'none'; return; }
+    banner.className = 'update-banner info';
+    banner.style.display = '';
+    banner.innerHTML = '';
+    const text = document.createElement('div');
+    text.className = 'ub-text';
+    text.innerHTML = `<strong>Vex Atlas ${escapeHtml(updateInfo.latest_version)} is available.</strong>`
+      + `<span class="ub-sub">You're on ${escapeHtml(updateInfo.current_version)}.</span>`;
+    banner.appendChild(text);
+    if (updateInfo.release_url) {
+      const view = document.createElement('button');
+      view.textContent = 'View release';
+      view.addEventListener('click', () => openExternalUrl(updateInfo.release_url));
+      banner.appendChild(view);
+    }
+    const dismiss = document.createElement('button');
+    dismiss.className = 'ub-dismiss';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', () => {
+      localStorage.setItem('vexDismissedUpdate', updateInfo.latest_version);
+      banner.style.display = 'none';
+    });
+    banner.appendChild(dismiss);
+    return;
+  }
+
+  banner.style.display = 'none';
 }
 
 function renderStatusBar(setup) {
@@ -693,7 +807,7 @@ function renderStatusBar(setup) {
   }
   if (selectedProject) {
     const project = (setup.watch && setup.watch.projects || []).find(p => p.project_id === selectedProject);
-    els.sbActivity.textContent = project ? `${escapeHtml(project.project_name || project.project_id)} · ${project.seen_import_count} caught` : '';
+    els.sbActivity.textContent = project ? `${escapeHtml(project.project_name || project.project_id)} · ${project.seen_import_count} imports` : '';
   } else {
     els.sbActivity.textContent = '';
   }
@@ -847,7 +961,7 @@ function renderProjects(projects) {
     button.className = `row ${project.project_id === selectedProject ? 'active' : ''}`;
     button.innerHTML = `<div class="row-title">${escapeHtml(project.project_name || project.project_id)}</div>
       <div class="row-meta">${project.active ? 'Watching' : 'Inactive'} / ${escapeHtml(project.local_path)}</div>
-      <div class="row-meta">${project.seen_import_count} caught</div>`;
+      <div class="row-meta">${project.seen_import_count} imports</div>`;
     button.addEventListener('click', () => selectProject(project.project_id));
     const remove = document.createElement('button');
     remove.className = 'icon-button danger';
@@ -1698,8 +1812,10 @@ try {
 }
 refresh();
 loadHealth();
+checkUpdates();
 setInterval(refresh, 15000);
 setInterval(loadHealth, 60000);
+setInterval(checkUpdates, 1800000);
 </script>
 </body>
 </html>

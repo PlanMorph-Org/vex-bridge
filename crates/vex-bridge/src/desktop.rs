@@ -38,7 +38,7 @@ pub fn run() -> BridgeResult<()> {
     let paths = Paths::discover()?;
     paths.ensure_dirs()?;
     let cfg = Config::load_or_default(&paths)?;
-    ensure_daemon(cfg.port)?;
+    ensure_daemon(&paths, cfg.port)?;
     let url = std::env::args()
         .nth(1)
         .filter(|value| value.starts_with("http://127.0.0.1:"))
@@ -46,39 +46,117 @@ pub fn run() -> BridgeResult<()> {
     open_desktop_window(&url)
 }
 
-fn ensure_daemon(port: u16) -> BridgeResult<()> {
-    if daemon_is_healthy(port) {
-        return Ok(());
+/// Ensure a *compatible* daemon is running before we attach the UI.
+///
+/// A common failure after an in-place update was a stale daemon from the
+/// previous build still holding the port: the new desktop window would attach
+/// to old code and behave inconsistently (mismatched API contract, missing
+/// routes). Here we treat a version mismatch as "unhealthy": we ask the stale
+/// daemon to shut down cleanly, wait for the port to free, then launch a fresh
+/// daemon built from this binary's sibling. Self-healing instead of requiring
+/// an uninstall/reinstall.
+fn ensure_daemon(paths: &Paths, port: u16) -> BridgeResult<()> {
+    let want = env!("CARGO_PKG_VERSION");
+    match daemon_version(port) {
+        // Healthy and matching: nothing to do.
+        Some(version) if version == want => return Ok(()),
+        // Healthy but stale: retire it deterministically before relaunching.
+        Some(version) => {
+            tracing::warn!(
+                running = %version,
+                expected = %want,
+                "daemon version mismatch; requesting clean restart"
+            );
+            request_shutdown(paths, port);
+            wait_for_port_free(port, Duration::from_secs(5));
+        }
+        // Not running (or not answering): just start one.
+        None => {}
     }
 
     start_daemon()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
-        if daemon_is_healthy(port) {
-            return Ok(());
+        match daemon_version(port) {
+            Some(version) if version == want => return Ok(()),
+            _ => std::thread::sleep(Duration::from_millis(250)),
         }
-        std::thread::sleep(Duration::from_millis(250));
     }
     Ok(())
 }
 
-fn daemon_is_healthy(port: u16) -> bool {
-    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
-        return false;
-    };
+/// Probe `/v1/health` and return the daemon's reported version, or `None` if
+/// nothing healthy is answering on the port.
+fn daemon_version(port: u16) -> Option<String> {
+    let body = health_body(port)?;
+    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+    value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Issue a raw `GET /v1/health` and return the JSON response body, if the
+/// daemon answered `200 OK`.
+fn health_body(port: u16) -> Option<String> {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     use std::io::{Read, Write};
-    if write!(
+    write!(
         stream,
         "GET /v1/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     )
-    .is_err()
-    {
-        return false;
+    .ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    if !response.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    // Body follows the blank line separating headers from payload.
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.trim().to_string())
+}
+
+/// Best-effort: ask a stale daemon to shut down gracefully via the token-gated
+/// shutdown endpoint. We read the access token the daemon wrote to the per-user
+/// data dir (same user, same machine) to authenticate.
+fn request_shutdown(paths: &Paths, port: u16) {
+    let Ok(token) = std::fs::read_to_string(&paths.access_token_file) else {
+        return;
+    };
+    let token = token.trim();
+    if token.is_empty() {
+        return;
+    }
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    use std::io::{Read, Write};
+    let request = format!(
+        "POST /v1/daemon/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+         X-Vex-Bridge-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return;
     }
     let mut response = String::new();
-    stream.read_to_string(&mut response).is_ok() && response.starts_with("HTTP/1.1 200")
+    let _ = stream.read_to_string(&mut response);
+}
+
+/// Poll until the daemon stops answering on the port (it has shut down) or the
+/// deadline passes.
+fn wait_for_port_free(port: u16, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if health_body(port).is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 fn start_daemon() -> BridgeResult<()> {

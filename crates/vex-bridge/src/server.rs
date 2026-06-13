@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::{to_bytes, Body},
@@ -23,6 +23,7 @@ use axum::{
 };
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use vex_bridge_protocol as proto;
 
@@ -44,6 +45,13 @@ pub struct AppState {
     pub access_token: Arc<String>,
     pub started_at: Instant,
     pub watchers: Arc<RwLock<Vec<WatchPipeline>>>,
+    /// Notified when the daemon should shut down gracefully (e.g. a desktop
+    /// client detected a version mismatch and requested a clean restart).
+    pub shutdown: Arc<tokio::sync::Notify>,
+    /// Per-channel cache of the last GitHub update lookup, so the in-app
+    /// update check doesn't hammer the GitHub API (or its rate limit) on every
+    /// dashboard poll.
+    pub update_cache: Arc<tokio::sync::Mutex<HashMap<String, (Instant, proto::UpdateInfo)>>>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -120,6 +128,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/projects/:project_id", delete(handle_delete_project))
         .route("/v1/repo/push", post(handle_repo_push))
         .route("/v1/repo/register", post(handle_repo_register))
+        .route("/v1/daemon/shutdown", post(handle_daemon_shutdown))
+        .route("/v1/update/check", get(handle_update_check))
         .with_state(state)
 }
 
@@ -136,7 +146,13 @@ pub async fn bind(port: u16) -> std::io::Result<tokio::net::TcpListener> {
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     info!(%addr, "vex-bridge listening");
-    axum::serve(listener, router(state)).await?;
+    let shutdown = state.shutdown.clone();
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            shutdown.notified().await;
+            info!("graceful shutdown requested");
+        })
+        .await?;
     Ok(())
 }
 
@@ -147,14 +163,21 @@ fn require_token(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
         .and_then(|value| value.to_str().ok())
     {
         Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => Ok(()),
-        _ => Err((
-            StatusCode::UNAUTHORIZED,
-            Json(proto::ApiError {
-                error: "unauthorized".into(),
-                message: "missing or invalid X-Vex-Bridge-Token header".into(),
-            }),
-        )
-            .into_response()),
+        _ => {
+            let correlation_id = Uuid::now_v7().to_string();
+            Err((
+                StatusCode::UNAUTHORIZED,
+                Json(proto::ApiError {
+                    error: "unauthorized".into(),
+                    message: "missing or invalid X-Vex-Bridge-Token header".into(),
+                    code: Some("unauthorized".into()),
+                    hint: Some("Open Vex Atlas from the local desktop app and retry.".into()),
+                    retryable: Some(false),
+                    correlation_id: Some(correlation_id),
+                }),
+            )
+                .into_response())
+        }
     }
 }
 
@@ -170,7 +193,15 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn err_response(status: StatusCode, error: BridgeError) -> Response {
-    warn!(error = %error, "request failed");
+    let correlation_id = Uuid::now_v7().to_string();
+    let (code, hint, retryable) = classify_error(status, &error);
+    warn!(
+        error = %error,
+        %correlation_id,
+        code,
+        retryable,
+        "request failed"
+    );
     (
         status,
         Json(proto::ApiError {
@@ -180,9 +211,73 @@ fn err_response(status: StatusCode, error: BridgeError) -> Response {
                 .unwrap_or("error")
                 .to_lowercase(),
             message: error.to_string(),
+            code: Some(code.to_string()),
+            hint: hint.map(str::to_string),
+            retryable: Some(retryable),
+            correlation_id: Some(correlation_id),
         }),
     )
         .into_response()
+}
+
+fn classify_error(
+    status: StatusCode,
+    error: &BridgeError,
+) -> (&'static str, Option<&'static str>, bool) {
+    if status == StatusCode::CONFLICT {
+        return (
+            "project_id_conflict",
+            Some("Choose a different project id or retry with allow_replace=true."),
+            false,
+        );
+    }
+    match error {
+        BridgeError::NotPaired => (
+            "not_paired",
+            Some("Pair this device before syncing projects."),
+            false,
+        ),
+        BridgeError::UpstreamApi(_) => (
+            "upstream_api_error",
+            Some("Check your network connection and retry."),
+            true,
+        ),
+        BridgeError::VexCli(_) => (
+            "vex_cli_error",
+            Some("Ensure the bundled vex engine is available and compatible."),
+            true,
+        ),
+        BridgeError::Config(_) if status == StatusCode::BAD_REQUEST => (
+            "invalid_request",
+            Some("Review the input and try again."),
+            false,
+        ),
+        BridgeError::Config(_) => (
+            "config_error",
+            Some("Review Vex Atlas settings and project mappings."),
+            false,
+        ),
+        BridgeError::Keychain(_) => (
+            "keychain_error",
+            Some("Unlock your OS keychain and retry."),
+            false,
+        ),
+        BridgeError::Io(_) => (
+            "io_error",
+            Some("Check filesystem permissions and disk space, then retry."),
+            true,
+        ),
+        BridgeError::Serde(_) => (
+            "serialization_error",
+            Some("The daemon received malformed JSON data."),
+            false,
+        ),
+        BridgeError::Reqwest(_) => (
+            "network_error",
+            Some("Check your network connection and retry."),
+            true,
+        ),
+    }
 }
 
 fn viewer_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
@@ -249,13 +344,185 @@ async fn handle_health(State(state): State<AppState>) -> Json<proto::Health> {
     let cfg = state.config.read().await.clone();
     let daemon_state = state.state.read().await.clone();
     let vex_version = vex_cli::version(&cfg.vex_bin).await.ok().flatten();
+    let vex_schema_compatible = vex_version
+        .as_deref()
+        .and_then(|version| version_at_least(version, 0, 1, 3));
     Json(proto::Health {
         version: env!("CARGO_PKG_VERSION").to_string(),
         paired: matches!(daemon_state.pairing, PairingState::Paired { .. }),
         vex_bin: cfg.vex_bin,
         vex_version,
+        expected_visual_diff_schema: Some(proto::schema::VISUAL_DIFF.to_string()),
+        vex_schema_compatible,
         uptime_seconds: state.started_at.elapsed().as_secs(),
     })
+}
+
+/// Request a clean, graceful shutdown of the daemon. This exists so a desktop
+/// or tray client that detects a version mismatch (a stale daemon left over
+/// from a previous build) can retire it deterministically and relaunch a fresh
+/// one, instead of forcibly killing the process and risking a half-flushed
+/// object store. Token-gated and localhost-only like every other mutating
+/// route, so a hostile web page cannot stop the daemon.
+async fn handle_daemon_shutdown(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, Response> {
+    require_token(&headers, &state.access_token)?;
+    info!("daemon shutdown requested via API");
+    // Notify after a short delay so this response is flushed to the caller
+    // before the listener stops accepting connections.
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        shutdown.notify_waiters();
+    });
+    Ok(Json(serde_json::json!({ "stopping": true })))
+}
+
+/// Default GitHub repo whose releases drive the in-app update check. Overridable
+/// via `VEX_BRIDGE_UPDATE_REPO` for testing or forks.
+const UPDATE_REPO_DEFAULT: &str = "PlanMorph-Org/vex-bridge";
+/// How long a successful (or failed) GitHub lookup is cached per channel.
+const UPDATE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct UpdateQuery {
+    #[serde(default)]
+    channel: Option<String>,
+    /// Bypass the cache and force a fresh GitHub lookup.
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// `GET /v1/update/check?channel=stable|canary` — report whether a newer bridge
+/// build is available. Results are cached per channel so the dashboard can poll
+/// freely. A lookup failure is reported in the payload's `error` field rather
+/// than failing the request, so transient GitHub hiccups never break the UI.
+async fn handle_update_check(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Query(query): Query<UpdateQuery>,
+) -> Result<Json<proto::UpdateInfo>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let channel = match query.channel.as_deref() {
+        Some("canary") => "canary",
+        _ => "stable",
+    }
+    .to_string();
+
+    if !query.refresh {
+        let cache = state.update_cache.lock().await;
+        if let Some((fetched, info)) = cache.get(&channel) {
+            if fetched.elapsed() < UPDATE_CACHE_TTL {
+                return Ok(Json(info.clone()));
+            }
+        }
+    }
+
+    let info = compute_update_info(&channel).await;
+    state
+        .update_cache
+        .lock()
+        .await
+        .insert(channel, (Instant::now(), info.clone()));
+    Ok(Json(info))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
+}
+
+async fn compute_update_info(channel: &str) -> proto::UpdateInfo {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let mut info = proto::UpdateInfo {
+        current_version: current.clone(),
+        latest_version: None,
+        update_available: false,
+        channel: channel.to_string(),
+        release_url: None,
+        release_notes: None,
+        published_at: None,
+        checked_at: rfc3339_from_unix(now_unix()),
+        error: None,
+    };
+    match fetch_latest_release(channel).await {
+        Ok(Some(release)) => {
+            let latest = release.tag_name.trim_start_matches('v').to_string();
+            info.update_available = version_greater(&latest, &current).unwrap_or(false);
+            info.latest_version = Some(latest);
+            info.release_url = Some(release.html_url);
+            info.release_notes = release.body;
+            info.published_at = release.published_at;
+        }
+        Ok(None) => info.error = Some("no published releases found".into()),
+        Err(message) => info.error = Some(message),
+    }
+    info
+}
+
+/// Fetch the newest release matching `channel` from the GitHub Releases API.
+/// `stable` skips prereleases; `canary` includes them. Drafts are always
+/// skipped. Returns `Ok(None)` when no matching release exists.
+async fn fetch_latest_release(channel: &str) -> Result<Option<GithubRelease>, String> {
+    let repo = std::env::var("VEX_BRIDGE_UPDATE_REPO")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| UPDATE_REPO_DEFAULT.to_string());
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=20");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client
+        .get(&url)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("vex-bridge/", env!("CARGO_PKG_VERSION")),
+        )
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json");
+    // A token lifts the unauthenticated rate limit; entirely optional.
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        if !token.trim().is_empty() {
+            request = request.bearer_auth(token.trim().to_string());
+        }
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub API returned HTTP {}", response.status()));
+    }
+    let releases: Vec<GithubRelease> = response.json().await.map_err(|error| error.to_string())?;
+    let want_prerelease = channel == "canary";
+    Ok(releases
+        .into_iter()
+        .filter(|release| !release.draft)
+        .find(|release| want_prerelease || !release.prerelease))
+}
+
+/// True when `candidate` is a strictly newer semantic version than `baseline`.
+/// Prerelease/build metadata is ignored for the comparison.
+fn version_greater(candidate: &str, baseline: &str) -> Option<bool> {
+    Some(semver_tuple(candidate)? > semver_tuple(baseline)?)
+}
+
+fn semver_tuple(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.trim().trim_start_matches('v');
+    let core = core.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parse_version_part(parts.next()?)?;
+    let minor = parse_version_part(parts.next().unwrap_or("0"))?;
+    let patch = parse_version_part(parts.next().unwrap_or("0"))?;
+    Some((major, minor, patch))
 }
 
 async fn handle_pair_status(
@@ -450,8 +717,8 @@ async fn handle_setup_inbox(
     Json(req): Json<proto::SetupInboxRequest>,
 ) -> Result<Json<proto::SetupInboxResponse>, Response> {
     require_token(&headers, &state.access_token)?;
-    let project_id = setup_project_id(&req);
-    let repo = register_watch(
+    let (project_id, project_id_auto_generated) = setup_project_id(&req);
+    let mut repo = register_watch(
         &state,
         proto::RepoRegisterRequest {
             project_id,
@@ -459,9 +726,11 @@ async fn handle_setup_inbox(
             include: req.include,
             ifc_project_guid: req.ifc_project_guid,
             project_name: req.project_name,
+            allow_replace: true,
         },
     )
     .await?;
+    repo.project_id_auto_generated = Some(project_id_auto_generated);
     let cfg = state.config.read().await.clone();
     let daemon_state = state.state.read().await.clone();
     let active = active_project_ids(&state).await;
@@ -873,24 +1142,32 @@ async fn register_watch(
     state: &AppState,
     req: proto::RepoRegisterRequest,
 ) -> Result<proto::RepoRegisterResponse, Response> {
-    if req.project_id.trim().is_empty() {
+    let proto::RepoRegisterRequest {
+        project_id,
+        local_path,
+        include,
+        ifc_project_guid,
+        project_name,
+        allow_replace,
+    } = req;
+
+    let project_id = project_id.trim().to_string();
+    if let Err(message) = validate_project_id(&project_id) {
         return Err(err_response(
             StatusCode::BAD_REQUEST,
-            BridgeError::Config("project_id must not be empty".into()),
+            BridgeError::Config(message),
         ));
     }
 
-    let local_path = match req.local_path {
+    let local_path = match local_path {
         Some(path) if !path.trim().is_empty() => resolve_inbox_path(&path)
             .map_err(|error| err_response(StatusCode::BAD_REQUEST, BridgeError::Config(error)))?,
-        _ => default_inbox_path(&req.project_id, req.project_name.as_deref(), None).map_err(
-            |error| {
-                err_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    BridgeError::Config(error),
-                )
-            },
-        )?,
+        _ => default_inbox_path(&project_id, project_name.as_deref(), None).map_err(|error| {
+            err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                BridgeError::Config(error),
+            )
+        })?,
     };
 
     if let Err(error) = std::fs::create_dir_all(&local_path) {
@@ -900,36 +1177,60 @@ async fn register_watch(
         ));
     }
 
-    let include = req
-        .include
+    let include = include
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| vec!["*.ifc".to_string()]);
 
     let entry = crate::config::WatchEntry {
-        project_id: req.project_id.clone(),
+        project_id: project_id.clone(),
         path: local_path.to_string_lossy().to_string(),
         include: include.clone(),
-        ifc_project_guid: req.ifc_project_guid.clone(),
-        project_name: req.project_name.clone(),
+        ifc_project_guid: ifc_project_guid.clone(),
+        project_name: project_name.clone(),
     };
 
-    let replaced = {
+    enum RegisterUpdate {
+        Inserted,
+        Updated,
+        Conflict { existing_path: String },
+    }
+
+    let update = {
         let mut cfg = state.config.write().await;
         match cfg
             .watch
             .iter()
-            .position(|watch| watch.project_id == req.project_id)
+            .position(|watch| watch.project_id == project_id)
         {
             Some(index) => {
-                cfg.watch[index] = entry.clone();
-                true
+                let existing = &cfg.watch[index];
+                let path_changed = !same_local_path(&existing.path, &entry.path);
+                if path_changed && !allow_replace {
+                    RegisterUpdate::Conflict {
+                        existing_path: existing.path.clone(),
+                    }
+                } else {
+                    cfg.watch[index] = entry.clone();
+                    RegisterUpdate::Updated
+                }
             }
             None => {
                 cfg.watch.push(entry.clone());
-                false
+                RegisterUpdate::Inserted
             }
         }
     };
+
+    if let RegisterUpdate::Conflict { existing_path } = update {
+        return Err(err_response(
+            StatusCode::CONFLICT,
+            BridgeError::Config(format!(
+                "project_id `{project_id}` already maps to `{existing_path}`; pass allow_replace=true to remap"
+            )),
+        ));
+    }
+
+    let replaced = matches!(update, RegisterUpdate::Updated);
 
     let cfg_snapshot = {
         let cfg = state.config.read().await;
@@ -948,26 +1249,27 @@ async fn register_watch(
     ) {
         Ok(pipeline) => {
             let mut watchers = state.watchers.write().await;
-            watchers.retain(|watcher| watcher.project_id != req.project_id);
+            watchers.retain(|watcher| watcher.project_id != project_id);
             watchers.push(pipeline);
             true
         }
         Err(error) => {
-            warn!(project_id = %req.project_id, error = %error, "registered project but watch activation failed");
+            warn!(project_id = %project_id, error = %error, "registered project but watch activation failed");
             false
         }
     };
 
-    info!(project_id = %req.project_id, path = %local_path.display(), replaced, watching, "registered project");
+    info!(project_id = %project_id, path = %local_path.display(), replaced, watching, "registered project");
 
     Ok(proto::RepoRegisterResponse {
-        project_id: req.project_id,
+        project_id,
         local_path: local_path.to_string_lossy().to_string(),
         include,
-        ifc_project_guid: req.ifc_project_guid,
-        project_name: req.project_name,
+        ifc_project_guid,
+        project_name,
         replaced,
         watching,
+        project_id_auto_generated: None,
     })
 }
 
@@ -1237,16 +1539,62 @@ fn safe_header_value(value: &str) -> String {
         .collect()
 }
 
-fn setup_project_id(req: &proto::SetupInboxRequest) -> String {
-    let seed = req
+fn setup_project_id(req: &proto::SetupInboxRequest) -> (String, bool) {
+    if let Some(project_id) = req
         .project_id
         .as_deref()
-        .or(req.project_name.as_deref())
-        .or(req.folder_name.as_deref())
-        .or(req.local_path.as_deref())
-        .unwrap_or("project");
-    let segment = safe_path_segment(path_label(seed));
-    format!("vex-{}", segment.to_ascii_lowercase())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return (project_id.to_string(), false);
+    }
+    (format!("vex-{}", Uuid::now_v7().simple()), true)
+}
+
+fn validate_project_id(project_id: &str) -> Result<(), String> {
+    if project_id.is_empty() {
+        return Err("project_id must not be empty".into());
+    }
+    if project_id.len() > 120 {
+        return Err("project_id is too long (max 120 characters)".into());
+    }
+    if !project_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return Err("project_id may only contain ASCII letters, numbers, '-' or '_'".into());
+    }
+    Ok(())
+}
+
+fn same_local_path(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let a_path = Path::new(a);
+    let b_path = Path::new(b);
+    match (a_path.canonicalize(), b_path.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+fn version_at_least(version: &str, major: u64, minor: u64, patch: u64) -> Option<bool> {
+    let mut parts = version.trim_start_matches('v').split('.');
+    let parsed_major = parse_version_part(parts.next()?)?;
+    let parsed_minor = parse_version_part(parts.next()?)?;
+    let parsed_patch = parse_version_part(parts.next()?)?;
+    let current = (parsed_major, parsed_minor, parsed_patch);
+    Some(current >= (major, minor, patch))
+}
+
+fn parse_version_part(value: &str) -> Option<u64> {
+    let digits: String = value.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
 }
 
 fn setup_local_path(req: &proto::SetupInboxRequest) -> Option<String> {
@@ -1688,5 +2036,74 @@ fn safe_path_segment(value: &str) -> String {
         "project".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_project_id_uses_explicit_value() {
+        let req = proto::SetupInboxRequest {
+            project_id: Some("prj_manual_001".into()),
+            project_name: None,
+            folder_name: None,
+            local_path: None,
+            include: None,
+            ifc_project_guid: None,
+        };
+        let (project_id, auto_generated) = setup_project_id(&req);
+        assert_eq!(project_id, "prj_manual_001");
+        assert!(!auto_generated);
+    }
+
+    #[test]
+    fn setup_project_id_generates_uuid_when_missing() {
+        let req = proto::SetupInboxRequest {
+            project_id: None,
+            project_name: Some("Tower A".into()),
+            folder_name: Some("tower-a".into()),
+            local_path: None,
+            include: None,
+            ifc_project_guid: None,
+        };
+        let (project_id, auto_generated) = setup_project_id(&req);
+        assert!(auto_generated);
+        assert!(project_id.starts_with("vex-"));
+        assert_eq!(project_id.len(), 36);
+    }
+
+    #[test]
+    fn validate_project_id_rejects_invalid_chars() {
+        assert!(validate_project_id("ok-Project_123").is_ok());
+        assert!(validate_project_id("bad id").is_err());
+        assert!(validate_project_id("bad/id").is_err());
+    }
+
+    #[test]
+    fn version_at_least_parses_semver_prefixes() {
+        assert_eq!(version_at_least("0.1.4", 0, 1, 3), Some(true));
+        assert_eq!(version_at_least("v0.1.2", 0, 1, 3), Some(false));
+        assert_eq!(version_at_least("0.1.3-beta.1", 0, 1, 3), Some(true));
+        assert_eq!(version_at_least("unknown", 0, 1, 3), None);
+    }
+
+    #[test]
+    fn version_greater_compares_semver() {
+        assert_eq!(version_greater("0.2.34", "0.2.33"), Some(true));
+        assert_eq!(version_greater("v0.3.0", "0.2.33"), Some(true));
+        assert_eq!(version_greater("0.2.33", "0.2.33"), Some(false));
+        assert_eq!(version_greater("0.2.32", "0.2.33"), Some(false));
+        assert_eq!(version_greater("0.2.34-canary.1", "0.2.33"), Some(true));
+        assert_eq!(version_greater("garbage", "0.2.33"), None);
+    }
+
+    #[test]
+    fn semver_tuple_strips_prefix_and_metadata() {
+        assert_eq!(semver_tuple("v1.2.3"), Some((1, 2, 3)));
+        assert_eq!(semver_tuple("1.2.3-rc.1+build5"), Some((1, 2, 3)));
+        assert_eq!(semver_tuple("1.2"), Some((1, 2, 0)));
+        assert_eq!(semver_tuple(""), None);
     }
 }
