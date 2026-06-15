@@ -89,6 +89,8 @@ button:disabled { opacity: .45; cursor: default; }
   opacity: 0.9;
 }
 .update-banner button:hover { opacity: 1; }
+.update-banner button.ub-apply { background: #cfe3ff; color: #0b3a66; border-color: #cfe3ff; font-weight: 600; }
+.update-banner button.ub-apply:disabled { opacity: 0.6; cursor: default; }
 .update-banner button.ub-dismiss { border-color: transparent; opacity: 0.65; }
 .update-banner button.ub-dismiss:hover { opacity: 1; }
 .main {
@@ -236,6 +238,23 @@ canvas { width: 100%; height: 100%; display: block; }
   pointer-events: none;
 }
 .view-status:empty { display: none; }
+.orbit-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(17, 19, 19, 0.82);
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  z-index: 4;
+}
+.orbit-hint.show { opacity: 1; }
 .empty {
   padding: 18px;
   color: var(--muted);
@@ -458,6 +477,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
         <div class="view-pane" id="modelPane">
           <header><span>3D Model</span><span id="modelMeta"></span></header>
           <canvas id="modelCanvas"></canvas>
+          <div class="orbit-hint" id="orbitHint">Drag to orbit · scroll to zoom · right-drag to pan</div>
           <div class="viewer-toolbar" id="viewerToolbar">
             <button class="tool-btn" data-act="fit" title="Fit to model (F)">Fit</button>
             <span class="sep"></span>
@@ -821,6 +841,27 @@ async function checkUpdates() {
   renderSystemBanner();
 }
 
+// Trigger the daemon's verified in-app installer download + launch. The daemon
+// downloads the installer, checks its SHA-256 against the release manifest, and
+// launches it; the installer then closes the app and relaunches the new build.
+async function applyUpdate(button) {
+  if (button) { button.disabled = true; button.textContent = 'Downloading…'; }
+  try {
+    const result = await api('/v1/update/apply', {method: 'POST', headers});
+    if (result && result.launched) {
+      if (button) button.textContent = 'Installing…';
+      return;
+    }
+    // Apply not possible (unsupported platform / unverified asset): fall back to
+    // opening the release page so the user can install manually.
+    if (result && result.release_url) openExternalUrl(result.release_url);
+    if (button) { button.disabled = false; button.textContent = 'Download & install'; }
+  } catch (_) {
+    if (updateInfo && updateInfo.release_url) openExternalUrl(updateInfo.release_url);
+    if (button) { button.disabled = false; button.textContent = 'Download & install'; }
+  }
+}
+
 // One banner drives both the "update available" and "engine/bridge schema
 // mismatch" notices, with the safety-critical mismatch taking priority. Keeping
 // it as a persistent strip (not transient toast) means a user who steps away
@@ -852,6 +893,13 @@ function renderSystemBanner() {
     text.innerHTML = `<strong>Vex Atlas ${escapeHtml(updateInfo.latest_version)} is available.</strong>`
       + `<span class="ub-sub">You're on ${escapeHtml(updateInfo.current_version)}.</span>`;
     banner.appendChild(text);
+    if (updateInfo.can_apply) {
+      const apply = document.createElement('button');
+      apply.className = 'ub-apply';
+      apply.textContent = 'Download & install';
+      apply.addEventListener('click', () => applyUpdate(apply));
+      banner.appendChild(apply);
+    }
     if (updateInfo.release_url) {
       const view = document.createElement('button');
       view.textContent = 'View release';
@@ -1236,6 +1284,29 @@ class RealIfcViewer {
     this.controls = new OrbitControls(this.modelCamera, modelCanvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
+    // ArchiCAD-style orbit: left-drag rotates the model around the target, wheel
+    // zooms, right/middle drag pans. Set explicitly so a later tweak can't
+    // silently disable rotation, and allow the full polar range so you can orbit
+    // under the model to inspect its underside.
+    this.controls.enableRotate = true;
+    this.controls.enableZoom = true;
+    this.controls.enablePan = true;
+    this.controls.rotateSpeed = 0.9;
+    this.controls.zoomSpeed = 1.1;
+    this.controls.panSpeed = 0.9;
+    this.controls.screenSpacePanning = true;
+    this.controls.minPolarAngle = 0;
+    this.controls.maxPolarAngle = Math.PI;
+    this.controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN
+    };
+    this.controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN
+    };
+    if ('zoomToCursor' in this.controls) this.controls.zoomToCursor = true;
     this.helpers = new THREE.Group();
     this.modelScene.add(this.helpers);
     this.raycaster = new THREE.Raycaster();
@@ -1257,6 +1328,18 @@ class RealIfcViewer {
     this.planDrag = null;
     this.modelCanvas.addEventListener('pointerdown', event => { this.downAt = {x: event.clientX, y: event.clientY}; });
     this.modelCanvas.addEventListener('pointerup', event => this.handlePointerUp(event));
+    // Hide the orbit hint the first time the user actually drags the model.
+    this.modelCanvas.addEventListener('pointerdown', () => this.dismissOrbitHint(true));
+    // The navigation cube doubles as a quick view switcher: click to step
+    // Iso -> Top -> Front -> Right -> Iso, like the corner gizmo in ArchiCAD.
+    this.viewCycle = ['iso', 'top', 'front', 'right'];
+    this.viewCycleIndex = 0;
+    if (this.gizmo && this.gizmo.renderer && this.gizmo.renderer.domElement) {
+      const gizmoEl = this.gizmo.renderer.domElement;
+      gizmoEl.style.cursor = 'pointer';
+      gizmoEl.title = 'Click to step through standard views';
+      gizmoEl.addEventListener('click', () => this.cycleView());
+    }
     this.planCanvas.addEventListener('pointerdown', event => this.beginPlanPan(event));
     this.planCanvas.addEventListener('pointermove', event => this.movePlanPan(event));
     this.planCanvas.addEventListener('pointerup', event => this.endPlanPan(event));
@@ -1390,6 +1473,30 @@ class RealIfcViewer {
     this.controls.target.copy(center);
     this.modelCamera.updateProjectionMatrix();
     this.controls.update();
+  }
+
+  cycleView() {
+    if (!this.modelBox) return;
+    this.viewCycleIndex = (this.viewCycleIndex + 1) % this.viewCycle.length;
+    this.setView(this.viewCycle[this.viewCycleIndex]);
+  }
+
+  showOrbitHint() {
+    const hint = document.getElementById('orbitHint');
+    if (!hint) return;
+    try { if (localStorage.getItem('vexOrbitHintSeen')) return; } catch (_) {}
+    hint.classList.add('show');
+    clearTimeout(this.orbitHintTimer);
+    this.orbitHintTimer = setTimeout(() => this.dismissOrbitHint(false), 5000);
+  }
+
+  dismissOrbitHint(persist) {
+    const hint = document.getElementById('orbitHint');
+    if (hint) hint.classList.remove('show');
+    clearTimeout(this.orbitHintTimer);
+    if (persist) {
+      try { localStorage.setItem('vexOrbitHintSeen', '1'); } catch (_) {}
+    }
   }
 
   toggleProjection() {
@@ -1587,6 +1694,7 @@ class RealIfcViewer {
         await this.extractStoreys(this.model);
         if (token !== this.loadToken) return;
         this.applyPlanCut();
+        this.showOrbitHint();
       }
       await this.applyDiff(changes, mode, token);
       if (token !== this.loadToken) return;
@@ -1723,6 +1831,9 @@ class RealIfcViewer {
     this.modelCamera.lookAt(center);
     this.modelCamera.updateProjectionMatrix();
     this.controls.target.copy(center);
+    // Bound the dolly so the wheel can't fly past the model or invert through it.
+    this.controls.minDistance = radius * 0.05;
+    this.controls.maxDistance = radius * 40;
     this.controls.update();
     this.rebuildHelpers(box);
     if (this.sectionActive) {

@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/repo/register", post(handle_repo_register))
         .route("/v1/daemon/shutdown", post(handle_daemon_shutdown))
         .route("/v1/update/check", get(handle_update_check))
+        .route("/v1/update/apply", post(handle_update_apply))
         .route("/v1/diagnostics", get(handle_diagnostics))
         .with_state(state)
 }
@@ -518,6 +519,125 @@ async fn handle_update_check(
     Ok(Json(info))
 }
 
+/// `POST /v1/update/apply?channel=stable|canary` — download the verified
+/// platform installer and launch it. The installer (already trusted; it ships
+/// the app) closes the running app, swaps binaries, and relaunches. We only
+/// download, integrity-check, and launch it detached so a process-tree kill by
+/// the installer can't take the spawning daemon's child with it.
+async fn handle_update_apply(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Query(query): Query<UpdateQuery>,
+) -> Result<Json<proto::UpdateApplyResponse>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let channel = match query.channel.as_deref() {
+        Some("canary") => "canary",
+        _ => "stable",
+    }
+    .to_string();
+
+    // Always recompute (never trust a possibly-stale cache for an action that
+    // launches an executable), then refresh the cache as a side effect.
+    let info = compute_update_info(&channel).await;
+    state
+        .update_cache
+        .lock()
+        .await
+        .insert(channel, (Instant::now(), info.clone()));
+
+    let mut response = proto::UpdateApplyResponse {
+        launched: false,
+        target_version: info.latest_version.clone(),
+        release_url: info.release_url.clone(),
+        error: None,
+    };
+
+    if !info.update_available {
+        response.error = Some("already up to date".into());
+        return Ok(Json(response));
+    }
+    let (Some(url), Some(expected_sha)) = (info.installer_url, info.installer_sha256) else {
+        response.error = Some("no verifiable installer for this platform".into());
+        return Ok(Json(response));
+    };
+
+    match apply_installer(&url, &expected_sha, info.latest_version.as_deref()).await {
+        Ok(()) => response.launched = true,
+        Err(message) => response.error = Some(message),
+    }
+    Ok(Json(response))
+}
+
+/// Download the installer, verify its SHA-256 against the release manifest, and
+/// launch it detached. The platform-specific launch lives in `launch_installer`.
+async fn apply_installer(
+    url: &str,
+    expected_sha: &str,
+    version: Option<&str>,
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let bytes = client
+        .get(url)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("vex-bridge/", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await
+        .map_err(|error| format!("download failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("download failed: {error}"))?
+        .bytes()
+        .await
+        .map_err(|error| format!("download failed: {error}"))?;
+
+    let digest = Sha256::digest(&bytes);
+    let actual_sha = hex_lower(&digest);
+    if actual_sha != expected_sha.to_ascii_lowercase() {
+        return Err("installer checksum mismatch; refusing to launch".into());
+    }
+
+    let label = version.unwrap_or("latest");
+    let file_name = format!("VexAtlasSetup-{}.exe", safe_path_segment(label));
+    let path = std::env::temp_dir().join(file_name);
+    std::fs::write(&path, &bytes).map_err(|error| format!("write failed: {error}"))?;
+
+    launch_installer(&path)
+}
+
+/// Launch the downloaded installer detached from this daemon. On Windows the
+/// installer taskkills `vex-bridge.exe` and its tree, so we route through
+/// `cmd /C start` to reparent it away from us first. Unsupported elsewhere.
+#[cfg(target_os = "windows")]
+fn launch_installer(path: &std::path::Path) -> Result<(), String> {
+    let target = path.to_string_lossy().to_string();
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", &target])
+        .spawn()
+        .map_err(|error| format!("launch failed: {error}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launch_installer(_path: &std::path::Path) -> Result<(), String> {
+    Err("in-app install is only supported on Windows".into())
+}
+
+/// Lowercase hex encoding of a byte slice (digest formatting).
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct GithubRelease {
     tag_name: String,
@@ -530,6 +650,83 @@ struct GithubRelease {
     prerelease: bool,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// Filename fragments that identify the Windows installer asset the apply flow
+/// can launch. Other platforms have no equivalent one-click installer (only
+/// tarballs), so their asset match fails and apply falls back to the release
+/// page. Always compiled so `GithubAsset` is exercised on every target.
+const INSTALLER_ASSET_PREFIX: &str = "VexAtlasSetup";
+const INSTALLER_ASSET_SUFFIX: &str = "-windows-x86_64.exe";
+
+/// Locate the platform installer asset and its published SHA-256 for `release`.
+/// Returns `(installer_url, installer_sha256)`. Either may be `None`: a missing
+/// digest disables apply (the daemon never launches an unverified installer).
+async fn resolve_installer_asset(release: &GithubRelease) -> (Option<String>, Option<String>) {
+    let Some(installer) = release.assets.iter().find(|asset| {
+        asset.name.starts_with(INSTALLER_ASSET_PREFIX)
+            && asset.name.ends_with(INSTALLER_ASSET_SUFFIX)
+    }) else {
+        return (None, None);
+    };
+    let url = Some(installer.browser_download_url.clone());
+    let Some(checksums) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS.txt")
+    else {
+        return (url, None);
+    };
+    let sha = fetch_installer_sha256(&checksums.browser_download_url, &installer.name).await;
+    (url, sha)
+}
+
+/// Download the small `SHA256SUMS.txt` manifest and return the lowercase hex
+/// digest recorded for `asset_name`, if present. Format per line:
+/// `<hex>  <filename>` (sha256sum style; the name may carry a `*`/path prefix).
+async fn fetch_installer_sha256(checksums_url: &str, asset_name: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let text = client
+        .get(checksums_url)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("vex-bridge/", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    parse_sha256sums(&text, asset_name)
+}
+
+/// Pure parse of a `sha256sum`-style manifest: return the lowercase hex digest
+/// recorded for `asset_name`. Lines look like `<hex>  <filename>`; the filename
+/// may carry a leading `*` (binary mode marker) or a path prefix.
+fn parse_sha256sums(text: &str, asset_name: &str) -> Option<String> {
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(hash), Some(name)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let name = name.trim_start_matches('*');
+        if name.rsplit('/').next().unwrap_or(name) == asset_name {
+            return Some(hash.to_ascii_lowercase());
+        }
+    }
+    None
 }
 
 async fn compute_update_info(channel: &str) -> proto::UpdateInfo {
@@ -542,6 +739,9 @@ async fn compute_update_info(channel: &str) -> proto::UpdateInfo {
         release_url: None,
         release_notes: None,
         published_at: None,
+        installer_url: None,
+        installer_sha256: None,
+        can_apply: false,
         checked_at: rfc3339_from_unix(now_unix()),
         error: None,
     };
@@ -550,9 +750,17 @@ async fn compute_update_info(channel: &str) -> proto::UpdateInfo {
             let latest = release.tag_name.trim_start_matches('v').to_string();
             info.update_available = version_greater(&latest, &current).unwrap_or(false);
             info.latest_version = Some(latest);
-            info.release_url = Some(release.html_url);
-            info.release_notes = release.body;
-            info.published_at = release.published_at;
+            info.release_url = Some(release.html_url.clone());
+            info.release_notes = release.body.clone();
+            info.published_at = release.published_at.clone();
+            if info.update_available {
+                let (installer_url, installer_sha256) = resolve_installer_asset(&release).await;
+                info.can_apply = cfg!(target_os = "windows")
+                    && installer_url.is_some()
+                    && installer_sha256.is_some();
+                info.installer_url = installer_url;
+                info.installer_sha256 = installer_sha256;
+            }
         }
         Ok(None) => info.error = Some("no published releases found".into()),
         Err(message) => info.error = Some(message),
@@ -2131,6 +2339,35 @@ fn safe_path_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_lower_formats_bytes() {
+        assert_eq!(hex_lower(&[0x00, 0x0f, 0xa3, 0xff]), "000fa3ff");
+        assert_eq!(hex_lower(&[]), "");
+    }
+
+    #[test]
+    fn parse_sha256sums_matches_asset() {
+        let manifest = concat!(
+            "aaaa1111  vex-bridge-v0.2.38-windows-x86_64.tar.gz\n",
+            "BBBB2222  VexAtlasSetup-v0.2.38-windows-x86_64.exe\n",
+            "cccc3333  early-access-distribution.md\n",
+        );
+        assert_eq!(
+            parse_sha256sums(manifest, "VexAtlasSetup-v0.2.38-windows-x86_64.exe"),
+            Some("bbbb2222".to_string())
+        );
+        assert_eq!(parse_sha256sums(manifest, "does-not-exist.exe"), None);
+    }
+
+    #[test]
+    fn parse_sha256sums_handles_star_and_path_prefixes() {
+        let manifest = "dddd4444 *dist/VexAtlasSetup-v0.2.38-windows-x86_64.exe\n";
+        assert_eq!(
+            parse_sha256sums(manifest, "VexAtlasSetup-v0.2.38-windows-x86_64.exe"),
+            Some("dddd4444".to_string())
+        );
+    }
 
     #[test]
     fn setup_project_id_uses_explicit_value() {

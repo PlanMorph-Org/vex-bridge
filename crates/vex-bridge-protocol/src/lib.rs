@@ -85,9 +85,45 @@ pub struct UpdateInfo {
     /// RFC3339 publish timestamp of the latest release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_at: Option<String>,
+    /// Download URL of the platform installer asset for the latest release, if
+    /// one exists for this OS (e.g. the Windows `VexAtlasSetup-*.exe`). Drives
+    /// the one-click "Download & install" apply flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_url: Option<String>,
+    /// Lowercase hex SHA-256 of the installer asset, parsed from the release's
+    /// published `SHA256SUMS.txt`. The daemon refuses to launch an installer
+    /// whose bytes do not match this digest, so apply is integrity-checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_sha256: Option<String>,
+    /// True when the daemon can perform an in-app apply on this platform (the
+    /// installer asset exists, has a verified digest, and the OS is supported).
+    #[serde(default)]
+    pub can_apply: bool,
     /// RFC3339 time this check was performed (or served from cache).
     pub checked_at: String,
     /// Human-readable reason the lookup could not complete, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `POST /v1/update/apply` — result of an in-app update attempt.
+///
+/// On success the daemon has downloaded the installer, verified its SHA-256
+/// against the release manifest, and launched it detached; the installer then
+/// closes the running app, swaps the binaries, and relaunches. `launched` is
+/// false when apply is unavailable (unsupported OS, missing/unverified asset),
+/// in which case `release_url` lets the UI fall back to a manual download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateApplyResponse {
+    /// True when the verified installer was launched.
+    pub launched: bool,
+    /// Version the installer will move the user to, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    /// Release page to open when an in-app apply is not possible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_url: Option<String>,
+    /// Human-readable reason apply did not launch, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
