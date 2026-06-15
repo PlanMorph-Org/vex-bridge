@@ -136,15 +136,15 @@ impl Config {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(&paths.config_file)?;
-        let explicit_vex_bin = raw
-            .parse::<toml::Value>()
-            .ok()
-            .and_then(|value| value.get("vex_bin").cloned())
-            .is_some();
         let mut cfg: Self = toml::from_str(&raw).map_err(|e| BridgeError::Config(e.to_string()))?;
-        if !explicit_vex_bin {
-            cfg.vex_bin = default_vex_bin();
-        }
+        // Re-resolve the engine binary on every load. `save` always serialises
+        // `vex_bin`, so a previously-persisted value — the bare "vex" placeholder
+        // written on dev boxes, or an absolute path from an older install that no
+        // longer exists after an update moved the app — would otherwise stick
+        // forever, and every engine call would fail with a cryptic
+        // "No such file or directory (os error 2)". Self-heal by preferring a
+        // user-pinned path that still exists, else the bundled engine.
+        cfg.vex_bin = resolve_vex_bin(&cfg.vex_bin);
         Ok(cfg)
     }
 
@@ -165,6 +165,34 @@ impl Config {
 
 fn bundled_vex_bin() -> Option<String> {
     bundled_vex_bin_next_to(&std::env::current_exe().ok()?)
+}
+
+/// Pick the engine binary to use given whatever was persisted in `config.toml`.
+///
+/// Order of preference:
+/// 1. A non-placeholder path that points at an existing file — the user (or a
+///    prior install) pinned a specific engine build, so honour it.
+/// 2. The `vex`/`vex.exe` bundled next to the current executable — the normal
+///    installed layout, and always version-matched to this bridge.
+/// 3. The stored value as-is (e.g. bare `vex` resolved from `PATH` on a dev
+///    machine), or `vex` when nothing was stored.
+fn resolve_vex_bin(stored: &str) -> String {
+    let trimmed = stored.trim();
+    // An explicit path that still points at a real file wins — the user (or a
+    // prior install) pinned a specific engine build.
+    if !trimmed.is_empty() && Path::new(trimmed).is_file() {
+        return trimmed.to_string();
+    }
+    // A bare command name the user chose (e.g. `vex-nightly`) is a PATH lookup
+    // worth preserving — but not the default `vex` placeholder, which we'd
+    // rather satisfy from the bundled engine when one is present.
+    let looks_like_path = trimmed.contains('/') || trimmed.contains('\\');
+    if !trimmed.is_empty() && trimmed != "vex" && !looks_like_path {
+        return trimmed.to_string();
+    }
+    // Placeholder, blank, or a stale path that no longer exists: prefer the
+    // bundled engine, else fall back to a bare `vex` PATH lookup.
+    bundled_vex_bin().unwrap_or_else(|| "vex".to_string())
 }
 
 fn bundled_vex_bin_next_to(executable: &Path) -> Option<String> {
@@ -220,6 +248,44 @@ mod tests {
         assert_eq!(bundled_vex_bin_next_to(&executable), None);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_vex_bin_keeps_existing_custom_path() {
+        let dir = temp_case_dir("resolve-custom");
+        let custom = dir.join(if cfg!(windows) {
+            "engine.exe"
+        } else {
+            "engine"
+        });
+        fs::write(&custom, b"").unwrap();
+        let custom_str = custom.to_string_lossy().to_string();
+
+        // A pinned path that exists on disk is honoured verbatim.
+        assert_eq!(resolve_vex_bin(&custom_str), custom_str);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_vex_bin_drops_stale_absolute_path() {
+        // An absolute path from an older install that no longer exists must not
+        // stick: with no bundled engine available we fall back to the bare
+        // `vex` (PATH lookup) rather than the dead absolute path.
+        let stale = if cfg!(windows) {
+            "C:/old/install/vex.exe"
+        } else {
+            "/opt/old-install/vex"
+        };
+        assert_eq!(resolve_vex_bin(stale), "vex");
+    }
+
+    #[test]
+    fn resolve_vex_bin_normalises_placeholder() {
+        // The bare placeholder and blank values both collapse to `vex` when no
+        // bundled engine sits next to the test binary.
+        assert_eq!(resolve_vex_bin("vex"), "vex");
+        assert_eq!(resolve_vex_bin("   "), "vex");
     }
 
     #[test]

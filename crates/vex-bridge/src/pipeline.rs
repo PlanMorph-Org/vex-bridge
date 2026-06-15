@@ -251,6 +251,16 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
     let author_email = author_email.as_deref();
     let entry = &entry;
 
+    // Two triggers can race for the same file: the live watcher event and the
+    // startup/existing-file scan, both serialised by the per-repo lock. Whichever
+    // runs first imports and archives the file (moving it out of the inbox); the
+    // loser then finds the path gone. That is a successful no-op, not a failure —
+    // returning Ok keeps it from surfacing a bogus "Could not process" error.
+    if !changed.exists() {
+        info!(file = %changed.display(), "file already processed by a concurrent run; skipping");
+        return Ok(());
+    }
+
     wait_for_stable_file(changed).await?;
 
     record_activity(
@@ -460,7 +470,13 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
 async fn wait_for_stable_file(path: &Path) -> BridgeResult<()> {
     let mut last: Option<(u64, Option<SystemTime>)> = None;
     for _ in 0..FILE_STABLE_ATTEMPTS {
-        let meta = tokio::fs::metadata(path).await?;
+        let meta = match tokio::fs::metadata(path).await {
+            Ok(meta) => meta,
+            // The file was archived/removed by a concurrent run while we polled.
+            // Treat as settled; the caller re-checks existence and skips cleanly.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
         let current = (meta.len(), meta.modified().ok());
         if last.as_ref() == Some(&current) {
             return Ok(());

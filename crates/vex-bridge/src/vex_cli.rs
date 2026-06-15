@@ -91,12 +91,86 @@ where
         None => None,
     };
 
-    let out = cmd.output().await.map_err(BridgeError::Io)?;
+    let out = match cmd.output().await {
+        Ok(out) => out,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(engine_not_found(bin));
+        }
+        Err(err) => return Err(BridgeError::Io(err)),
+    };
     Ok(VexRun {
         status: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
+}
+
+/// Wall-clock cap on a single `vex push`. Push is the only network-bound engine
+/// call: it opens an SSH connection to the remote object store. An unreachable
+/// or slow remote would otherwise block the per-repo pipeline indefinitely —
+/// which is exactly what made imports appear to "stick at 0", because the
+/// commit/hash/snapshot/archive bookkeeping only runs *after* push returns.
+/// Bounding it lets a stalled push fail fast and be queued for retry instead.
+const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Engine-binary-missing error shared by [`run`] and [`run_bounded`].
+fn engine_not_found(bin: &str) -> BridgeError {
+    BridgeError::VexCli(format!(
+        "could not launch the vex engine binary `{bin}` — it was not found. \
+         Reinstall Vex Atlas, or set `vex_bin` in config.toml to a valid engine path."
+    ))
+}
+
+/// Like [`run`], but abandons (and kills) the child if it exceeds `timeout`.
+/// Used for the network-bound `push` so a wedged remote cannot stall the
+/// pipeline forever. The child is spawned with `kill_on_drop`, so timing out —
+/// which drops the handle — reaps the process and releases the per-repo lock.
+async fn run_bounded<I, S>(
+    bin: &str,
+    cwd: Option<&Path>,
+    args: I,
+    timeout: std::time::Duration,
+) -> BridgeResult<VexRun>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut cmd = Command::new(bin);
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let lock = cwd.map(repo_lock);
+    let _guard = match lock.as_ref() {
+        Some(l) => Some(l.lock().await),
+        None => None,
+    };
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(engine_not_found(bin));
+        }
+        Err(err) => return Err(BridgeError::Io(err)),
+    };
+
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => Ok(VexRun {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }),
+        Ok(Err(err)) => Err(BridgeError::Io(err)),
+        Err(_elapsed) => Err(BridgeError::VexCli(format!(
+            "engine command timed out after {}s (remote unreachable?); will retry",
+            timeout.as_secs()
+        ))),
+    }
 }
 
 pub async fn version(bin: &str) -> BridgeResult<Option<String>> {
@@ -179,7 +253,7 @@ pub async fn commit(
 }
 
 pub async fn push(bin: &str, dir: &Path, remote: &str, branch: &str) -> BridgeResult<()> {
-    let r = run(bin, Some(dir), ["push", remote, branch]).await?;
+    let r = run_bounded(bin, Some(dir), ["push", remote, branch], PUSH_TIMEOUT).await?;
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }

@@ -884,6 +884,18 @@ function renderSystemBanner() {
   const banner = els.updateBanner;
   if (!banner) return;
 
+  if (healthInfo && healthInfo.vex_bin && !healthInfo.vex_version) {
+    banner.className = 'update-banner warn';
+    banner.style.display = '';
+    banner.innerHTML = '';
+    const text = document.createElement('div');
+    text.className = 'ub-text';
+    text.innerHTML = '<strong>Vex engine not found.</strong>'
+      + '<span class="ub-sub">IFC files can\'t be imported until the bundled engine is available. Reinstall Vex Atlas to restore it.</span>';
+    banner.appendChild(text);
+    return;
+  }
+
   if (healthInfo && healthInfo.vex_schema_compatible === false) {
     banner.className = 'update-banner warn';
     banner.style.display = '';
@@ -1080,6 +1092,14 @@ async function onAddIfcInput(event) {
     if (!response.ok) {
       let detail = `HTTP ${response.status}`;
       try { const body = await response.json(); if (body && (body.message || body.error)) detail = body.message || body.error; } catch (_) {}
+      if (response.status === 404) {
+        // The daemon no longer knows this project (its config changed underneath
+        // the UI). Re-sync the project list and drop the stale selection so the
+        // user re-selects or re-adds the inbox instead of retrying a dead id.
+        selectedProject = null;
+        await refresh();
+        throw new Error('This project is no longer configured. Re-select or re-add the inbox, then try again.');
+      }
       throw new Error(detail);
     }
     const result = await response.json();
