@@ -189,10 +189,14 @@ button:disabled { opacity: .45; cursor: default; }
 .view-grid {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 1px;
   background: var(--line);
 }
+.view-grid.dim-3d #planPane { display: none; }
+.view-grid.dim-2d #modelPane { display: none; }
+#planCanvas { cursor: grab; }
+#planCanvas.panning { cursor: grabbing; }
 .view-pane {
   min-width: 0;
   min-height: 0;
@@ -392,7 +396,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 @media (max-width: 760px) {
   .main { grid-template-columns: 1fr; grid-template-rows: minmax(160px, 220px) minmax(180px, 240px) minmax(220px, 1fr); }
   .sidebar, .history { border-right: 0; border-bottom: 1px solid var(--line); }
-  .view-grid { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  .view-grid { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
 }
 </style>
 </head>
@@ -425,6 +429,10 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
           <div id="changeTime" class="time-line"></div>
         </div>
         <div>
+          <div class="view-toggle" id="dimToggle">
+            <button type="button" data-dim="3d">3D</button>
+            <button type="button" data-dim="2d" class="active">2D</button>
+          </div>
           <div class="view-toggle" id="viewToggle">
             <button type="button" data-mode="full" class="active">Full Model</button>
             <button type="button" data-mode="changes">Changes Only</button>
@@ -434,8 +442,8 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
           <div class="badges" id="countBadges"></div>
         </div>
       </div>
-      <div class="view-grid">
-        <div class="view-pane">
+      <div class="view-grid dim-2d" id="viewGrid">
+        <div class="view-pane" id="planPane">
           <header>
             <span>2D Plan</span>
             <span class="plan-tools">
@@ -497,11 +505,10 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 <div class="setup" id="setupPanel">
   <div class="panel-head"><div class="panel-title">Add Inbox</div><button id="closeSetup" type="button">Close</button></div>
   <form id="setupForm">
-    <div class="field"><label for="projectName">Project Name</label><input id="projectName" placeholder="Commercial Tower"></div>
-    <div class="field"><label for="folderName">Folder Name</label><input id="folderName" required placeholder="Commercial-Tower"></div>
+    <div class="field"><label for="projectName">Project Name</label><input id="projectName" required placeholder="Commercial Tower"></div>
+    <div class="field"><label for="projectId">Project ID (auto)</label><input id="projectId" readonly placeholder="vex-…"></div>
     <div class="field" id="browseField" style="display:none"><button type="button" id="browseFolder">Browse for folder…</button></div>
-    <div class="row-meta" id="inboxHint">Folder will be created inside VexInbox.</div>
-    <div class="field"><label for="ifcGuid">IFC Project GUID</label><input id="ifcGuid" placeholder="2HnQxDrSH5sBbC4NkVOGR8"></div>
+    <div class="row-meta" id="inboxHint">A managed folder named after the project will be created inside VexInbox.</div>
     <button class="primary" type="submit">Save Inbox</button>
   </form>
 </div>
@@ -562,6 +569,8 @@ const els = {
   deletePanel: document.getElementById('deletePanel'), deleteForm: document.getElementById('deleteForm'),
   deleteProjectText: document.getElementById('deleteProjectText'),
   inboxHint: document.getElementById('inboxHint'), viewToggle: document.getElementById('viewToggle'),
+  dimToggle: document.getElementById('dimToggle'), viewGrid: document.getElementById('viewGrid'),
+  projectName: document.getElementById('projectName'), projectId: document.getElementById('projectId'),
   viewerToolbar: document.getElementById('viewerToolbar'), projBtn: document.getElementById('projBtn'),
   sectionBtn: document.getElementById('sectionBtn'), sectionRow: document.getElementById('sectionRow'),
   sectionSlider: document.getElementById('sectionSlider'),
@@ -589,7 +598,10 @@ let updateInfo = null;
 let ifcViewer = null;
 
 document.getElementById('refreshButton').addEventListener('click', refresh);
-document.getElementById('setupButton').addEventListener('click', () => els.setupPanel.classList.add('open'));
+document.getElementById('setupButton').addEventListener('click', () => {
+  if (!els.projectId.value.trim()) els.projectId.value = genProjectId();
+  els.setupPanel.classList.add('open');
+});
 els.pairButton.addEventListener('click', startOrPollPairing);
 els.syncButton.addEventListener('click', syncSelectedProject);
 els.addIfcButton.addEventListener('click', () => { if (selectedProject) els.addIfcInput.click(); });
@@ -606,6 +618,11 @@ els.viewToggle.addEventListener('click', event => {
   currentViewMode = button.dataset.mode;
   for (const item of els.viewToggle.querySelectorAll('button')) item.classList.toggle('active', item === button);
   renderChanges(latestChanges);
+});
+els.dimToggle.addEventListener('click', event => {
+  const button = event.target.closest('button[data-dim]');
+  if (!button) return;
+  setViewDimension(button.dataset.dim);
 });
 window.addEventListener('resize', () => { if (ifcViewer) ifcViewer.resize(); });
 els.viewerToolbar.addEventListener('click', event => {
@@ -659,7 +676,7 @@ async function pickFolder() {
     if (!path) return;
     pickedFolderPath = path;
     const base = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
-    document.getElementById('folderName').value = base;
+    if (!els.projectName.value.trim()) els.projectName.value = base;
     const root = lastSetup && (lastSetup.inbox_root_path || lastSetup.suggested_inbox_path);
     els.inboxHint.textContent = (root && path.startsWith(root))
       ? `Tracking ${path}`
@@ -667,6 +684,23 @@ async function pickFolder() {
   } catch (error) {
     els.inboxHint.textContent = `Folder pick failed: ${error.message || error}`;
   }
+}
+
+function genProjectId() {
+  const uuid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID().replace(/-/g, '')
+    : (Date.now().toString(16) + Math.random().toString(16).slice(2)).slice(0, 32);
+  return `vex-${uuid}`;
+}
+
+function setViewDimension(dim) {
+  const wanted = dim === '2d' ? '2d' : '3d';
+  els.viewGrid.classList.toggle('dim-2d', wanted === '2d');
+  els.viewGrid.classList.toggle('dim-3d', wanted === '3d');
+  for (const item of els.dimToggle.querySelectorAll('button')) {
+    item.classList.toggle('active', item.dataset.dim === wanted);
+  }
+  if (ifcViewer) requestAnimationFrame(() => ifcViewer.resize());
 }
 
 async function api(path, options = {}) {
@@ -1218,8 +1252,16 @@ class RealIfcViewer {
     this.model = null;
     this.highlightObjects = [];
     this.removedObjects = [];
+    this.planPan = new THREE.Vector2(0, 0);
+    this.planZoom = 1;
+    this.planDrag = null;
     this.modelCanvas.addEventListener('pointerdown', event => { this.downAt = {x: event.clientX, y: event.clientY}; });
     this.modelCanvas.addEventListener('pointerup', event => this.handlePointerUp(event));
+    this.planCanvas.addEventListener('pointerdown', event => this.beginPlanPan(event));
+    this.planCanvas.addEventListener('pointermove', event => this.movePlanPan(event));
+    this.planCanvas.addEventListener('pointerup', event => this.endPlanPan(event));
+    this.planCanvas.addEventListener('pointerleave', event => this.endPlanPan(event));
+    this.planCanvas.addEventListener('wheel', event => this.zoomPlan(event), {passive: false});
     this.resize();
     if (window.ResizeObserver) {
       this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -1472,9 +1514,13 @@ class RealIfcViewer {
   animate() {
     requestAnimationFrame(() => this.animate());
     this.controls.update();
-    this.modelRenderer.render(this.modelScene, this.modelCamera);
-    this.planRenderer.render(this.planScene, this.planCamera);
-    this.renderGizmo();
+    if (this.modelCanvas.offsetParent !== null) {
+      this.modelRenderer.render(this.modelScene, this.modelCamera);
+      this.renderGizmo();
+    }
+    if (this.planCanvas.offsetParent !== null) {
+      this.planRenderer.render(this.planScene, this.planCamera);
+    }
   }
 
   renderGizmo() {
@@ -1683,6 +1729,8 @@ class RealIfcViewer {
       const slider = document.getElementById('sectionSlider');
       this.setSection(slider ? Number(slider.value) : 100);
     }
+    this.planPan.set(0, 0);
+    this.planZoom = 1;
     this.updatePlanFraming();
     this.applyPlanCut();
   }
@@ -1694,16 +1742,52 @@ class RealIfcViewer {
     const radius = Math.max(size.x, size.y, size.z, 1);
     const rect = this.planCanvas.getBoundingClientRect();
     const aspect = rect.width / Math.max(rect.height, 1);
-    const planSize = Math.max(size.x, size.y, 1) * 0.58;
+    const planSize = (Math.max(size.x, size.y, 1) * 0.58) / this.planZoom;
+    const cx = center.x + this.planPan.x;
+    const cy = center.y + this.planPan.y;
     this.planCamera.left = -planSize * aspect;
     this.planCamera.right = planSize * aspect;
     this.planCamera.top = planSize;
     this.planCamera.bottom = -planSize;
     this.planCamera.near = -radius * 10;
     this.planCamera.far = radius * 10;
-    this.planCamera.position.set(center.x, center.y, center.z + radius * 2);
-    this.planCamera.lookAt(center);
+    this.planCamera.position.set(cx, cy, center.z + radius * 2);
+    this.planCamera.lookAt(cx, cy, center.z);
     this.planCamera.updateProjectionMatrix();
+  }
+
+  beginPlanPan(event) {
+    if (!this.modelBox) return;
+    this.planDrag = {x: event.clientX, y: event.clientY};
+    try { this.planCanvas.setPointerCapture(event.pointerId); } catch (e) {}
+    this.planCanvas.classList.add('panning');
+  }
+
+  movePlanPan(event) {
+    if (!this.planDrag) return;
+    const rect = this.planCanvas.getBoundingClientRect();
+    const worldPerPx = (this.planCamera.top - this.planCamera.bottom) / Math.max(rect.height, 1);
+    const dx = event.clientX - this.planDrag.x;
+    const dy = event.clientY - this.planDrag.y;
+    this.planPan.x -= dx * worldPerPx;
+    this.planPan.y += dy * worldPerPx;
+    this.planDrag = {x: event.clientX, y: event.clientY};
+    this.updatePlanFraming();
+  }
+
+  endPlanPan(event) {
+    if (!this.planDrag) return;
+    this.planDrag = null;
+    try { this.planCanvas.releasePointerCapture(event.pointerId); } catch (e) {}
+    this.planCanvas.classList.remove('panning');
+  }
+
+  zoomPlan(event) {
+    if (!this.modelBox) return;
+    event.preventDefault();
+    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.planZoom = Math.min(50, Math.max(0.1, this.planZoom * factor));
+    this.updatePlanFraming();
   }
 
   resize() {
@@ -1763,12 +1847,17 @@ function valueOf(value) {
 
 async function saveInbox(event) {
   event.preventDefault();
-  const folderName = document.getElementById('folderName').value.trim();
+  const projectName = els.projectName.value.trim();
+  if (!projectName) {
+    els.inboxHint.textContent = 'Enter a project name first.';
+    els.projectName.focus();
+    return;
+  }
+  if (!els.projectId.value.trim()) els.projectId.value = genProjectId();
   const body = {
-    project_name: optionalValue('projectName'),
-    folder_name: folderName,
-    include: ['*.ifc'],
-    ifc_project_guid: optionalValue('ifcGuid')
+    project_id: els.projectId.value.trim(),
+    project_name: projectName,
+    include: ['*.ifc']
   };
   const root = lastSetup && (lastSetup.inbox_root_path || lastSetup.suggested_inbox_path);
   if (pickedFolderPath && root && pickedFolderPath.startsWith(root)) {
@@ -1776,6 +1865,8 @@ async function saveInbox(event) {
   }
   const response = await api('/v1/setup/inbox', {method: 'POST', headers: jsonHeaders, body: JSON.stringify(body)});
   els.setupPanel.classList.remove('open');
+  els.setupForm.reset();
+  els.projectId.value = '';
   pickedFolderPath = null;
   await selectProject(response.repo.project_id);
 }
