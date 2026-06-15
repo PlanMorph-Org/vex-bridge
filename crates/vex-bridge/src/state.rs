@@ -117,8 +117,15 @@ impl State {
         Ok(())
     }
 
-    pub fn has_seen_ifc_hash(&self, hash: &str) -> bool {
-        self.seen_ifc_hashes.iter().any(|seen| seen.hash == hash)
+    /// True only when this exact IFC content has already been imported into
+    /// *this* project. Dedup is intentionally per-project: the same model can
+    /// legitimately be added to more than one inbox, and a global check would
+    /// silently archive the file without ever importing it into the new
+    /// project (leaving its import count stuck at 0).
+    pub fn has_seen_ifc_hash_for_project(&self, hash: &str, project_id: &str) -> bool {
+        self.seen_ifc_hashes
+            .iter()
+            .any(|seen| seen.hash == hash && seen.project_id == project_id)
     }
 
     pub fn mark_ifc_hash_seen(
@@ -127,7 +134,7 @@ impl State {
         project_id: String,
         ifc_project_guid: Option<String>,
     ) {
-        if self.has_seen_ifc_hash(&hash) {
+        if self.has_seen_ifc_hash_for_project(&hash, &project_id) {
             return;
         }
         self.seen_ifc_hashes.push(SeenIfcHash {
@@ -333,6 +340,28 @@ mod tests {
         assert_eq!(snapshot.commit_hash, "abcdef123456");
         assert_eq!(snapshot.path, "/tmp/model.ifc");
         assert_eq!(snapshot.ifc_project_guid.as_deref(), Some("ifc-guid"));
+    }
+
+    #[test]
+    fn ifc_hash_dedup_is_per_project() {
+        let mut state = State::default();
+        state.mark_ifc_hash_seen("hash-a".to_string(), "project-1".to_string(), None);
+
+        // Same content already imported into project-1 must NOT count as a
+        // duplicate for a different project; otherwise the file would be
+        // archived without importing and project-2's count would stay at 0.
+        assert!(state.has_seen_ifc_hash_for_project("hash-a", "project-1"));
+        assert!(!state.has_seen_ifc_hash_for_project("hash-a", "project-2"));
+
+        // A genuine same-project re-add is still deduped (no second entry).
+        state.mark_ifc_hash_seen("hash-a".to_string(), "project-1".to_string(), None);
+        assert_eq!(state.seen_ifc_hashes.len(), 1);
+
+        // Importing the same content into project-2 records its own entry so
+        // its import count reflects the import.
+        state.mark_ifc_hash_seen("hash-a".to_string(), "project-2".to_string(), None);
+        assert!(state.has_seen_ifc_hash_for_project("hash-a", "project-2"));
+        assert_eq!(state.seen_ifc_hashes.len(), 2);
     }
 
     fn sample_push(project: &str, refspec: &str, commit: &str, at: i64) -> PendingPush {

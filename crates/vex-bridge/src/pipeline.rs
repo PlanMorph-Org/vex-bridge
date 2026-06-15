@@ -272,7 +272,11 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
     .await;
 
     let content_hash = hash_file_async(changed).await?;
-    if state.read().await.has_seen_ifc_hash(&content_hash) {
+    if state
+        .read()
+        .await
+        .has_seen_ifc_hash_for_project(&content_hash, &entry.project_id)
+    {
         info!(file = %changed.display(), hash = %content_hash, "duplicate IFC skipped");
         record_activity(
             &state,

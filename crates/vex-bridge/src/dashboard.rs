@@ -288,6 +288,20 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
   vertical-align: 1px;
 }
 .layer-chip.shape { border-color: rgba(75,143,227,.5); color: #93baf0; }
+.layer-chip.property { border-color: rgba(245,191,68,.5); color: #f0cf93; }
+.change-row.expandable { cursor: pointer; }
+.change-row.expandable:hover { background: rgba(255,255,255,.035); }
+.caret { display: inline-block; width: 12px; color: var(--muted); transition: transform .12s ease; }
+.change-row.open .caret { transform: rotate(90deg); }
+.change-detail > td { padding: 2px 10px 8px 30px; background: rgba(255,255,255,.02); }
+.delta-table { width: 100%; border-collapse: collapse; }
+.delta-table td { border-bottom: 1px solid rgba(255,255,255,.05); padding: 4px 8px; font-size: 12px; }
+.delta-table tr:last-child td { border-bottom: none; }
+.delta-table .dk { color: var(--muted); width: 32%; white-space: nowrap; }
+.delta-table .dv { font-family: var(--mono, ui-monospace, monospace); word-break: break-word; }
+.delta-table .dv.before { color: #f0a9a0; }
+.delta-table .dv.arrow { color: var(--muted); width: 16px; text-align: center; }
+.delta-table .dv.after { color: #8fd0a0; }
 .setup {
   display: none;
   position: fixed;
@@ -1230,18 +1244,79 @@ function layerChip(element) {
   if (layer === 'relationship') {
     return ' <span class="layer-chip" title="Only the element\'s relationships changed">links</span>';
   }
+  if (layer === 'property') {
+    return ' <span class="layer-chip property" title="Attribute / property values changed">props</span>';
+  }
   return '';
 }
 
 function renderRows(elements) {
   els.changeRows.innerHTML = elements.length ? '' : '<tr><td colspan="3" class="row-meta">No element-level changes.</td></tr>';
   for (const element of elements.slice(0, 150)) {
+    const deltas = Array.isArray(element.deltas) ? element.deltas : [];
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="kind ${element.kind}">${escapeHtml(element.kind)}${layerChip(element)}</td>
+    if (deltas.length) tr.className = 'change-row expandable';
+    const caret = deltas.length ? '<span class="caret">\u25B8</span>' : '';
+    tr.innerHTML = `<td class="kind ${element.kind}">${caret}${escapeHtml(element.kind)}${layerChip(element)}</td>
       <td>${escapeHtml(elementType(element))}</td>
       <td>${escapeHtml(element.hint || idLabel(element.id) || '')}</td>`;
     els.changeRows.appendChild(tr);
+    if (deltas.length) {
+      const detail = document.createElement('tr');
+      detail.className = 'change-detail';
+      detail.style.display = 'none';
+      detail.innerHTML = `<td colspan="3">${renderDeltaTable(deltas)}</td>`;
+      els.changeRows.appendChild(detail);
+      tr.addEventListener('click', () => {
+        const open = detail.style.display !== 'none';
+        detail.style.display = open ? 'none' : '';
+        tr.classList.toggle('open', !open);
+      });
+    }
   }
+}
+
+// Render the per-element attribute changes (the engine's `deltas`) as a
+// compact before -> after table. Positional IFC slots are mapped to the
+// IfcRoot-stable attribute names where known.
+function renderDeltaTable(deltas) {
+  const rows = deltas.slice(0, 80).map(delta => {
+    const before = escapeHtml(formatSerValue(delta.before));
+    const after = escapeHtml(formatSerValue(delta.after));
+    return `<tr><td class="dk">${escapeHtml(attrLabel(delta.key))}</td>`
+      + `<td class="dv before">${before}</td>`
+      + `<td class="dv arrow">\u2192</td>`
+      + `<td class="dv after">${after}</td></tr>`;
+  }).join('');
+  const more = deltas.length > 80 ? `<tr><td colspan="4" class="row-meta">+${deltas.length - 80} more</td></tr>` : '';
+  return `<table class="delta-table"><tbody>${rows}${more}</tbody></table>`;
+}
+
+// IfcRoot attribute slots are stable across every rooted IFC entity
+// (GlobalId, OwnerHistory, Name, Description). Other positional slots vary by
+// type, so we show them as "field N" rather than risk a wrong label.
+function attrLabel(key) {
+  const known = {_0: 'GlobalId', _1: 'OwnerHistory', _2: 'Name', _3: 'Description'};
+  if (known[key]) return known[key];
+  const match = /^_(\d+)$/.exec(key || '');
+  return match ? `field ${match[1]}` : (key || '');
+}
+
+// Format one engine SerValue (externally-tagged enum) for display. Handles
+// the `Option<SerValue>` wrapper (null), the bare `"Null"` unit variant, and
+// every value variant the engine can emit.
+function formatSerValue(value) {
+  if (value === null || value === undefined) return '\u2014';
+  if (typeof value === 'string') return value === 'Null' ? '\u2014' : value;
+  if (typeof value !== 'object') return String(value);
+  if ('Text' in value) return value.Text;
+  if ('Enum' in value) return `.${value.Enum}.`;
+  if ('Int' in value) return String(value.Int);
+  if ('Real' in value) return String(value.Real);
+  if ('Bool' in value) return value.Bool ? 'true' : 'false';
+  if ('List' in value) return `[${(value.List || []).map(formatSerValue).join(', ')}]`;
+  if ('Typed' in value && value.Typed) return `${value.Typed.name}(${formatSerValue(value.Typed.inner)})`;
+  return JSON.stringify(value);
 }
 
 function drawChanges(changes) {
