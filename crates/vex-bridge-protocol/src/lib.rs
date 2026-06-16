@@ -305,9 +305,9 @@ pub struct WatchStatus {
     pub active_watchers: usize,
     pub configured_projects: usize,
     pub seen_ifc_hash_count: usize,
-    /// Commits committed locally but not yet pushed to the remote. Drained
-    /// by the daemon's background outbox; surfaced so the UI can show
-    /// "N changes pending sync" instead of silently losing pushes.
+    /// Commits committed locally but not yet pushed to the remote. Pushing is
+    /// user-determined, so this is the count of unpushed commits waiting for
+    /// the user to press "Push" — surfaced so the UI can show "N ready to push".
     #[serde(default)]
     pub pending_push_count: usize,
     pub projects: Vec<ProjectSummary>,
@@ -328,6 +328,11 @@ pub struct ProjectSummary {
     pub seen_import_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_imported_at_unix: Option<i64>,
+    /// Locally-committed but not-yet-pushed commits for this project. Pushing is
+    /// user-determined; the dashboard uses this to badge the "Push" button and
+    /// show "N ready to push" per project.
+    #[serde(default)]
+    pub pending_push_count: usize,
 }
 
 /// `GET /v1/projects/:project_id/history` — commit list for dashboard history.

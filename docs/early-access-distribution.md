@@ -72,7 +72,9 @@ https://studio.planmorph.software/pair?code=<code>
 
 After pairing, users choose or create an IFC inbox folder in the setup UI. From
 there, they export IFC from any CAD tool into that folder and `vex-bridge`
-imports, commits, pushes, and archives the export automatically.
+imports, commits, and archives the export automatically. Pushing those commits
+to the cloud is user-determined: the desktop app shows how many commits are
+ready to push, and the user presses **Push** when they want to sync.
 
 ## Revit and AutoCAD
 

@@ -222,6 +222,10 @@ impl State {
     /// Queue (or refresh) a pending push for a project/branch. Any existing
     /// entry for the same `(project_id, refspec)` is replaced, because a push
     /// always advances the remote ref to the latest local HEAD.
+    ///
+    /// Pushing is user-determined: this is a durable "ready to push" ledger of
+    /// locally-committed work, not an auto-retry queue. Entries are added when
+    /// the watch pipeline commits and cleared when the user pushes.
     pub fn enqueue_push(&mut self, mut push: PendingPush) {
         if push.next_attempt_unix == 0 {
             push.next_attempt_unix = push.enqueued_at_unix;
@@ -231,8 +235,8 @@ impl State {
             .iter_mut()
             .find(|p| p.project_id == push.project_id && p.refspec == push.refspec)
         {
-            // Preserve the original enqueue time and attempt count so backoff
-            // keeps growing across repeated failures for the same target.
+            // Preserve the original enqueue time so the ledger reflects when the
+            // oldest unpushed commit landed for this target.
             push.enqueued_at_unix = existing.enqueued_at_unix.min(push.enqueued_at_unix);
             push.attempts = existing.attempts;
             *existing = push;
@@ -250,18 +254,6 @@ impl State {
         }
     }
 
-    /// Pending pushes whose backoff window has elapsed, oldest first.
-    pub fn pending_push_due(&self, now: i64) -> Vec<PendingPush> {
-        let mut due: Vec<PendingPush> = self
-            .pending_push
-            .iter()
-            .filter(|p| p.next_attempt_unix <= now)
-            .cloned()
-            .collect();
-        due.sort_by_key(|p| p.enqueued_at_unix);
-        due
-    }
-
     /// Remove a queued push (called after it syncs successfully). Returns
     /// true if an entry was removed.
     pub fn remove_pending_push(&mut self, project_id: &str, refspec: &str) -> bool {
@@ -271,37 +263,25 @@ impl State {
         self.pending_push.len() != before
     }
 
-    /// Record a failed retry: bump the attempt count and schedule the next
-    /// attempt with capped exponential backoff (base 15s, ceiling 1h).
-    pub fn record_push_failure(
-        &mut self,
-        project_id: &str,
-        refspec: &str,
-        error: String,
-        now: i64,
-    ) {
-        if let Some(p) = self
-            .pending_push
-            .iter_mut()
-            .find(|p| p.project_id == project_id && p.refspec == refspec)
-        {
-            p.attempts = p.attempts.saturating_add(1);
-            p.last_error = Some(error);
-            p.next_attempt_unix = now + backoff_seconds(p.attempts);
-        }
+    /// Clear all pending-push ledger entries for a project (called after a
+    /// successful user-initiated push). Returns the number removed.
+    pub fn remove_pending_for_project(&mut self, project_id: &str) -> usize {
+        let before = self.pending_push.len();
+        self.pending_push.retain(|p| p.project_id != project_id);
+        before - self.pending_push.len()
+    }
+
+    /// Number of unpushed commits queued for a single project.
+    pub fn pending_push_count_for_project(&self, project_id: &str) -> usize {
+        self.pending_push
+            .iter()
+            .filter(|p| p.project_id == project_id)
+            .count()
     }
 
     pub fn pending_push_count(&self) -> usize {
         self.pending_push.len()
     }
-}
-
-/// Capped exponential backoff in seconds: 15s, 30s, 60s, … ceiling 3600s.
-fn backoff_seconds(attempts: u32) -> i64 {
-    const BASE: i64 = 15;
-    const CEILING: i64 = 3600;
-    let shift = attempts.saturating_sub(1).min(8); // cap shift so 15 << n can't overflow
-    (BASE.saturating_mul(1i64 << shift)).min(CEILING)
 }
 
 pub fn now_unix() -> i64 {
@@ -379,18 +359,16 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_push_dedups_per_target_and_keeps_attempts() {
+    fn enqueue_push_dedups_per_target_and_keeps_enqueue_time() {
         let mut state = State::default();
         state.enqueue_push(sample_push("p1", "refs/heads/main", "aaa", 100));
-        state.record_push_failure("p1", "refs/heads/main", "offline".into(), 100);
 
         // A newer commit for the same target replaces the row but keeps the
-        // accumulated attempt count and original enqueue time.
+        // original enqueue time (the ledger tracks the oldest unpushed work).
         state.enqueue_push(sample_push("p1", "refs/heads/main", "bbb", 200));
         assert_eq!(state.pending_push_count(), 1);
         let entry = &state.pending_push[0];
         assert_eq!(entry.commit_hash, "bbb");
-        assert_eq!(entry.attempts, 1);
         assert_eq!(entry.enqueued_at_unix, 100);
 
         // A different branch is a distinct target.
@@ -399,17 +377,23 @@ mod tests {
     }
 
     #[test]
-    fn pending_push_due_respects_backoff_and_removal() {
+    fn pending_push_count_and_removal_are_per_project() {
         let mut state = State::default();
         state.enqueue_push(sample_push("p1", "refs/heads/main", "aaa", 100));
-        assert_eq!(state.pending_push_due(100).len(), 1);
+        state.enqueue_push(sample_push("p1", "refs/heads/dev", "bbb", 110));
+        state.enqueue_push(sample_push("p2", "refs/heads/main", "ccc", 120));
 
-        // After a failure the next attempt is pushed into the future.
-        state.record_push_failure("p1", "refs/heads/main", "offline".into(), 100);
-        assert!(state.pending_push_due(100).is_empty());
-        assert_eq!(state.pending_push_due(100 + 15).len(), 1);
+        assert_eq!(state.pending_push_count(), 3);
+        assert_eq!(state.pending_push_count_for_project("p1"), 2);
+        assert_eq!(state.pending_push_count_for_project("p2"), 1);
 
-        assert!(state.remove_pending_push("p1", "refs/heads/main"));
+        // A successful user push clears everything for that project only.
+        assert_eq!(state.remove_pending_for_project("p1"), 2);
+        assert_eq!(state.pending_push_count_for_project("p1"), 0);
+        assert_eq!(state.pending_push_count(), 1);
+
+        // Single-target removal still works for completeness.
+        assert!(state.remove_pending_push("p2", "refs/heads/main"));
         assert_eq!(state.pending_push_count(), 0);
     }
 

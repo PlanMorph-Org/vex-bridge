@@ -1410,7 +1410,9 @@ async fn handle_repo_push(
     let cfg = state.config.read().await.clone();
     let branch = req.branch.unwrap_or_else(|| "main".to_string());
 
-    match pipeline::run_manual_push(&cfg, &req.project_id, &branch).await {
+    match pipeline::run_manual_push(&cfg, &state.state, &state.paths, &req.project_id, &branch)
+        .await
+    {
         Ok(commit_hash) => Ok(Json(serde_json::json!({
             "commit_hash": commit_hash,
             "project_id": req.project_id,
@@ -2170,6 +2172,7 @@ fn watch_status_from(
                 ifc_project_guid: watch.ifc_project_guid.clone(),
                 seen_import_count,
                 last_imported_at_unix,
+                pending_push_count: state.pending_push_count_for_project(&watch.project_id),
             }
         })
         .collect();

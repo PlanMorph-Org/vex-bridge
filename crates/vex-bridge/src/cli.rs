@@ -194,8 +194,10 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
         crate::daemon_lock::write(&app.paths, port);
         let lock_paths = app.paths.clone();
 
-        // Start configured watch → add+commit+push pipelines. The handles
-        // must outlive `serve`, so bind them in this scope.
+        // Start configured watch → add+commit pipelines. Pushing is
+        // user-determined (the dashboard "Push" button), so the pipeline only
+        // imports and commits locally; nothing is pushed automatically. The
+        // handles must outlive `serve`, so bind them in this scope.
         let watchers = crate::pipeline::spawn_all(
             &cfg,
             tokio::runtime::Handle::current(),
@@ -203,14 +205,6 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
             app.paths.clone(),
         );
         *app.watchers.write().await = watchers;
-        // Drain the durable push outbox in the background: any commit that
-        // landed locally but failed to push is retried here with backoff so a
-        // transient network failure never silently loses a sync.
-        tokio::spawn(crate::pipeline::run_outbox(
-            app.state.clone(),
-            app.paths.clone(),
-            cfg.vex_bin.clone(),
-        ));
         if let Err(e) = server::serve(app, listener).await {
             tracing::error!(error = ?e, "server exited");
         }

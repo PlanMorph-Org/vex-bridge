@@ -104,13 +104,16 @@ or from the native `vex-tray` menu.
 | GET    | `/v1/projects/:id/history` | yes | Commit list for one project       |
 | GET    | `/v1/projects/:id/changes?from=&to=` | yes | Selected visual diff for 2D/3D views |
 | POST   | `/v1/repo/register` | yes  | Map an Architur project to a local inbox |
-| POST   | `/v1/repo/push`     | yes  | Manually import/commit/push latest IFC   |
+| POST   | `/v1/repo/push`     | yes  | Push the project's committed changes to the cloud |
 
-The filesystem watcher uses the same import/commit/push path automatically when
-an IFC export settles in a configured inbox. `vex-bridge` handles the desktop
-agent work; the `vex` binary owns IFC metadata extraction, import, semantic
-diffing, and history. New inbox registrations are activated immediately in the
-running daemon, so the first-run UI does not need to ask users to restart.
+The filesystem watcher imports and commits each IFC export locally as soon as it
+settles in a configured inbox, but **pushing to the cloud is user-determined**
+(like `git`): commits accumulate in a local "ready to push" ledger and are sent
+only when the user presses **Push** in the desktop app (or calls
+`POST /v1/repo/push`). `vex-bridge` handles the desktop agent work; the `vex`
+binary owns IFC metadata extraction, import, semantic diffing, and history. New
+inbox registrations are activated immediately in the running daemon, so the
+first-run UI does not need to ask users to restart.
 
 ## Build & run
 

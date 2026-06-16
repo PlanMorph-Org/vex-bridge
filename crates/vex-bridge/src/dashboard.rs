@@ -452,7 +452,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     <div class="toolbar-spacer"></div>
     <button id="pairButton">Pair Device</button>
     <button id="setupButton">Add Inbox</button>
-    <button id="syncButton">Sync</button>
+    <button id="syncButton" title="Push committed changes to the cloud">Push</button>
     <button class="primary" id="refreshButton">Refresh</button>
   </div>
   <div class="update-banner" id="updateBanner" style="display:none"></div>
@@ -650,7 +650,7 @@ document.getElementById('setupButton').addEventListener('click', () => {
   els.setupPanel.classList.add('open');
 });
 els.pairButton.addEventListener('click', startOrPollPairing);
-els.syncButton.addEventListener('click', syncSelectedProject);
+els.syncButton.addEventListener('click', pushSelectedProject);
 els.addIfcButton.addEventListener('click', () => { if (selectedProject) els.addIfcInput.click(); });
 if (els.sbDiag) els.sbDiag.addEventListener('click', copyDiagnostics);
 if (els.sbRepair) els.sbRepair.addEventListener('click', repairDaemon);els.addIfcInput.addEventListener('change', onAddIfcInput);
@@ -786,7 +786,7 @@ async function refresh(options = {}) {
     els.statusDot.className = `status-dot ${paired && setup.watch.active_watchers > 0 ? 'ok' : 'warn'}`;
     els.topStatus.textContent = `${pairText(setup.pair_status)} / ${setup.watch.active_watchers}/${setup.watch.configured_projects} watching`;
     updatePairButton(setup.pair_status);
-    els.syncButton.disabled = !selectedProject;
+    updatePushButton(setup, paired);
     els.addIfcButton.disabled = !selectedProject;
     if (!pickedFolderPath) {
       els.inboxHint.textContent = `Folders are created inside ${setup.inbox_root_path || setup.suggested_inbox_path || 'VexInbox'}.`;
@@ -982,7 +982,13 @@ function renderStatusBar(setup) {
   }
   if (selectedProject) {
     const project = (setup.watch && setup.watch.projects || []).find(p => p.project_id === selectedProject);
-    els.sbActivity.textContent = project ? `${escapeHtml(project.project_name || project.project_id)} · ${project.seen_import_count} imports` : '';
+    if (project) {
+      const pending = project.pending_push_count || 0;
+      const pushText = pending > 0 ? ` · ${pending} ready to push` : '';
+      els.sbActivity.textContent = `${escapeHtml(project.project_name || project.project_id)} · ${project.seen_import_count} imports${pushText}`;
+    } else {
+      els.sbActivity.textContent = '';
+    }
   } else {
     els.sbActivity.textContent = '';
   }
@@ -1072,19 +1078,40 @@ async function pollPairing() {
   }
 }
 
-async function syncSelectedProject() {
+async function pushSelectedProject() {
   if (!selectedProject) return;
   els.syncButton.disabled = true;
+  const previousLabel = els.syncButton.textContent;
+  els.syncButton.textContent = 'Pushing…';
   try {
     const result = await api('/v1/repo/push', {
       method: 'POST', headers: jsonHeaders, body: JSON.stringify({project_id: selectedProject, branch: 'main'})
     });
-    els.topStatus.textContent = `Synced ${short(result.commit_hash)}`;
+    els.topStatus.textContent = `Pushed ${short(result.commit_hash)}`;
+    // The push cleared the pending ledger; refresh so the badge/count update.
+    await refresh();
   } catch (error) {
-    els.topStatus.textContent = error.message;
-  } finally {
+    els.topStatus.textContent = `Push failed: ${error.message}`;
+    els.syncButton.textContent = previousLabel;
     els.syncButton.disabled = false;
   }
+}
+
+// Enable the Push button only when the device is paired AND the selected
+// project has locally-committed work that has not been pushed. Pushing is
+// user-determined, so the button surfaces "Push (N)" with the pending count
+// and falls back to a disabled "Push" / "All changes pushed" at zero.
+function updatePushButton(setup, paired) {
+  const projects = (setup.watch && setup.watch.projects) || [];
+  const project = projects.find(p => p.project_id === selectedProject);
+  const pending = project ? (project.pending_push_count || 0) : 0;
+  els.syncButton.textContent = pending > 0 ? `Push (${pending})` : 'Push';
+  els.syncButton.disabled = !selectedProject || !paired || pending === 0;
+  els.syncButton.title = !paired
+    ? 'Pair this device before pushing to the cloud'
+    : (pending > 0
+        ? `${pending} ${pending === 1 ? 'commit' : 'commits'} ready to push`
+        : 'All changes pushed');
 }
 
 async function onAddIfcInput(event) {
@@ -1142,9 +1169,13 @@ function renderProjects(projects) {
     wrapper.className = 'project-row';
     const button = document.createElement('button');
     button.className = `row ${project.project_id === selectedProject ? 'active' : ''}`;
+    const pending = project.pending_push_count || 0;
+    const pushLine = pending > 0
+      ? `<div class="row-meta">${pending} ready to push</div>`
+      : '';
     button.innerHTML = `<div class="row-title">${escapeHtml(project.project_name || project.project_id)}</div>
       <div class="row-meta">${project.active ? 'Watching' : 'Inactive'} / ${escapeHtml(project.local_path)}</div>
-      <div class="row-meta">${project.seen_import_count} imports</div>`;
+      <div class="row-meta">${project.seen_import_count} imports</div>${pushLine}`;
     button.addEventListener('click', () => selectProject(project.project_id));
     const remove = document.createElement('button');
     remove.className = 'icon-button danger';

@@ -347,7 +347,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
 
     ensure_repo_initialized(bin, dir, api_base, &entry.project_id).await?;
 
-    info!(file = %changed.display(), hash = %content_hash, "vex import+commit+push");
+    info!(file = %changed.display(), hash = %content_hash, "vex import+commit");
     let _tree = vex_cli::import_file(bin, dir, changed).await?;
 
     let msg = commit_message(entry, &intake, changed);
@@ -388,26 +388,6 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
 
     const REMOTE: &str = "origin";
     const REFSPEC: &str = "refs/heads/main";
-    let push_succeeded = match vex_cli::push(bin, dir, REMOTE, REFSPEC).await {
-        Ok(()) => {
-            info!(project = %entry.project_id, commit = %hash, "pushed");
-            true
-        }
-        Err(error) => {
-            warn!(
-                project = %entry.project_id,
-                commit = %hash,
-                error = %error,
-                "committed locally but push failed; queued in durable outbox for retry"
-            );
-            false
-        }
-    };
-    let push_detail = if push_succeeded {
-        format!("pushed {hash}")
-    } else {
-        "committed locally; push queued for retry".to_string()
-    };
 
     let snapshot_path = match archive_processed_file_async(dir, changed, &content_hash).await {
         Ok(path) => path,
@@ -431,35 +411,32 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
             snapshot_path.to_string_lossy().to_string(),
             intake.project_guid.clone(),
         );
-        let activity_kind = if push_succeeded {
-            proto::ActivityKind::CommitCreated
-        } else {
-            // The commit is durably recorded; queue the push so the outbox
-            // retries it with backoff instead of losing the sync.
-            let now = crate::state::now_unix();
-            state.enqueue_push(crate::state::PendingPush {
-                project_id: entry.project_id.clone(),
-                dir: dir.to_string_lossy().to_string(),
-                remote: REMOTE.to_string(),
-                refspec: REFSPEC.to_string(),
-                commit_hash: hash.clone(),
-                enqueued_at_unix: now,
-                attempts: 0,
-                next_attempt_unix: now,
-                last_error: None,
-            });
-            proto::ActivityKind::PushQueued
-        };
+        // Push is user-determined (like `git push`). Record the commit in the
+        // durable "ready to push" ledger instead of pushing automatically; the
+        // user pushes from the dashboard when ready. No network call happens
+        // here, so the pipeline never blocks on an unreachable remote.
+        let now = crate::state::now_unix();
+        state.enqueue_push(crate::state::PendingPush {
+            project_id: entry.project_id.clone(),
+            dir: dir.to_string_lossy().to_string(),
+            remote: REMOTE.to_string(),
+            refspec: REFSPEC.to_string(),
+            commit_hash: hash.clone(),
+            enqueued_at_unix: now,
+            attempts: 0,
+            next_attempt_unix: now,
+            last_error: None,
+        });
         state.push_activity(activity_event(
             entry,
             dir,
             changed,
             ActivityDetails {
-                kind: activity_kind,
+                kind: proto::ActivityKind::CommitCreated,
                 commit_hash: Some(hash.clone()),
                 content_hash: Some(content_hash.clone()),
                 message: msg.clone(),
-                detail: Some(push_detail),
+                detail: Some(format!("committed {}; ready to push", short_hash(&hash))),
             },
         ));
         state.save(&paths)?;
@@ -805,7 +782,18 @@ fn derive_remote_url(api_base: &str, project_id: &str) -> Option<String> {
 /// Returns the resulting commit hash on success. If there were no
 /// changes to commit we still attempt the push (the remote may be
 /// behind on prior commits) and return the head hash.
-pub async fn run_manual_push(cfg: &Config, project_id: &str, branch: &str) -> BridgeResult<String> {
+///
+/// This is the **only** path that pushes to the cloud — pushing is
+/// user-determined (the dashboard "Push" button / `POST /v1/repo/push`),
+/// never automatic. On a successful push the project's "ready to push"
+/// ledger is cleared and a `PushSynced` activity is recorded.
+pub async fn run_manual_push(
+    cfg: &Config,
+    state: &Arc<RwLock<State>>,
+    paths: &Paths,
+    project_id: &str,
+    branch: &str,
+) -> BridgeResult<String> {
     let entry = cfg
         .watch
         .iter()
@@ -867,6 +855,24 @@ pub async fn run_manual_push(cfg: &Config, project_id: &str, branch: &str) -> Br
     let refspec = format!("refs/heads/{branch}");
     vex_cli::push(&cfg.vex_bin, &dir, "origin", &refspec).await?;
     info!(project = %project_id, commit = %commit_hash, branch, "manual push complete");
+
+    // Push succeeded: clear the project's "ready to push" ledger and record a
+    // PushSynced activity so the dashboard shows "All changes pushed".
+    {
+        let mut guard = state.write().await;
+        guard.remove_pending_for_project(project_id);
+        guard.push_activity(push_synced_activity(
+            project_id,
+            &dir.to_string_lossy(),
+            &commit_hash,
+            format!("Pushed {}", short_hash(&commit_hash)),
+            Some(format!("pushed {commit_hash} to {branch}")),
+        ));
+        if let Err(error) = guard.save(paths) {
+            warn!(error = %error, "could not persist state after manual push");
+        }
+    }
+
     Ok(commit_hash)
 }
 
@@ -903,101 +909,31 @@ fn latest_ifc_file(dir: &Path) -> BridgeResult<Option<PathBuf>> {
     Ok(best.map(|(path, _)| path))
 }
 
-/// How often the durable outbox wakes up to retry queued pushes. Individual
-/// entries still honour their own exponential backoff via `next_attempt_unix`;
-/// this is just the polling cadence.
-const OUTBOX_TICK: Duration = Duration::from_secs(20);
-
-/// Background task that drains the durable push outbox.
-///
-/// When [`run_pipeline`] commits locally but the push fails (network blip,
-/// remote restart, transient SSH error), the commit is enqueued in
-/// [`State::pending_push`]. This loop periodically retries any entry whose
-/// backoff window has elapsed: on success it removes the entry and records a
-/// `PushSynced` activity; on failure it bumps the attempt count and reschedules
-/// with exponential backoff. The loop runs for the lifetime of the daemon.
-pub async fn run_outbox(state: Arc<RwLock<State>>, paths: Arc<Paths>, vex_bin: String) {
-    loop {
-        tokio::time::sleep(OUTBOX_TICK).await;
-
-        let due = {
-            let guard = state.read().await;
-            guard.pending_push_due(crate::state::now_unix())
-        };
-        if due.is_empty() {
-            continue;
-        }
-
-        for pending in due {
-            let dir = PathBuf::from(&pending.dir);
-            let result = vex_cli::push(&vex_bin, &dir, &pending.remote, &pending.refspec).await;
-
-            let mut guard = state.write().await;
-            match result {
-                Ok(()) => {
-                    info!(
-                        project = %pending.project_id,
-                        commit = %pending.commit_hash,
-                        "outbox: queued push synced"
-                    );
-                    guard.remove_pending_push(&pending.project_id, &pending.refspec);
-                    guard.push_activity(outbox_activity(
-                        &pending,
-                        proto::ActivityKind::PushSynced,
-                        format!("Synced {}", short_hash(&pending.commit_hash)),
-                        Some(format!("pushed {}", pending.commit_hash)),
-                    ));
-                }
-                Err(error) => {
-                    let now = crate::state::now_unix();
-                    guard.record_push_failure(
-                        &pending.project_id,
-                        &pending.refspec,
-                        error.to_string(),
-                        now,
-                    );
-                    warn!(
-                        project = %pending.project_id,
-                        commit = %pending.commit_hash,
-                        error = %error,
-                        "outbox: push retry failed; will back off"
-                    );
-                }
-            }
-            if let Err(error) = guard.save(&paths) {
-                warn!(error = %error, "outbox: could not persist push queue state");
-            }
-        }
-    }
-}
-
 fn short_hash(hash: &str) -> &str {
     &hash[..12.min(hash.len())]
 }
 
-/// Build an activity event for an outbox push. Unlike [`activity_event`] this
-/// has no originating `WatchEntry`/source file, so it is constructed directly
-/// from the queued push record.
-fn outbox_activity(
-    pending: &crate::state::PendingPush,
-    kind: proto::ActivityKind,
+/// Build a `PushSynced` activity event for a successful user-initiated push.
+/// Unlike [`activity_event`] this has no originating `WatchEntry`/source file,
+/// so it is constructed directly from the project + commit.
+fn push_synced_activity(
+    project_id: &str,
+    dir: &str,
+    commit_hash: &str,
     message: String,
     detail: Option<String>,
 ) -> proto::ActivityEvent {
     let caught_at_unix = crate::state::now_unix();
-    let id_material = format!(
-        "{caught_at_unix}:{}:{kind:?}:{}",
-        pending.project_id, pending.commit_hash
-    );
+    let id_material = format!("{caught_at_unix}:{project_id}:PushSynced:{commit_hash}");
     let digest = blake3::hash(id_material.as_bytes()).to_hex().to_string();
     proto::ActivityEvent {
         id: format!("{caught_at_unix}-{}", &digest[..12]),
-        kind,
-        project_id: pending.project_id.clone(),
+        kind: proto::ActivityKind::PushSynced,
+        project_id: project_id.to_string(),
         project_name: None,
-        local_path: Some(pending.dir.clone()),
+        local_path: Some(dir.to_string()),
         source_path: None,
-        commit_hash: Some(pending.commit_hash.clone()),
+        commit_hash: Some(commit_hash.to_string()),
         content_hash: None,
         message,
         detail,
