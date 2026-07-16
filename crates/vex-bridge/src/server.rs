@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 
 use axum::{
     body::{to_bytes, Body},
-    extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    extract::{Path as AxumPath, Query, Request, State},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -132,7 +133,36 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/update/check", get(handle_update_check))
         .route("/v1/update/apply", post(handle_update_apply))
         .route("/v1/diagnostics", get(handle_diagnostics))
+        .layer(middleware::from_fn(add_cross_origin_isolation_headers))
         .with_state(state)
+}
+
+/// Mark every response as cross-origin isolated.
+///
+/// The bundled `web-ifc` viewer ships a multi-threaded WASM build
+/// (`web-ifc-mt.wasm`) that parses/triangulates IFC geometry across a worker
+/// pool sized to `navigator.hardwareConcurrency` instead of on a single main
+/// thread. `web-ifc` only selects that build when `self.crossOriginIsolated`
+/// is `true` in the browser, which in turn requires every response from this
+/// origin to carry `Cross-Origin-Opener-Policy: same-origin` and
+/// `Cross-Origin-Embedder-Policy: require-corp`. Without these headers the
+/// browser silently falls back to the single-threaded `web-ifc.wasm` build,
+/// so large IFC models tessellate on one core and the 3D preview feels stuck
+/// even though the final draw call is already GPU-accelerated via WebGL.
+/// Everything served by this daemon is same-origin (127.0.0.1), so enabling
+/// this has no cross-origin side effects here.
+async fn add_cross_origin_isolation_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-embedder-policy"),
+        HeaderValue::from_static("require-corp"),
+    );
+    response
 }
 
 /// Bind the loopback listen socket. Split out from [`serve`] so the caller can

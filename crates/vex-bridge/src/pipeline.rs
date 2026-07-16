@@ -27,8 +27,11 @@ use crate::state::State;
 use crate::vex_cli;
 use crate::watcher::{self, WatchHandle};
 
-const FILE_STABLE_INTERVAL: Duration = Duration::from_millis(500);
-const FILE_STABLE_ATTEMPTS: usize = 10;
+// The watcher (see watcher.rs) already waited out DEBOUNCE for events to stop
+// arriving before calling us, so this only needs to confirm size/mtime are
+// unchanged across a couple of short polls — not repeat a multi-second wait.
+const FILE_STABLE_INTERVAL: Duration = Duration::from_millis(250);
+const FILE_STABLE_ATTEMPTS: usize = 4;
 
 /// One pipeline per configured watch. Held by the daemon for the lifetime
 /// of the process; dropping the inner handle stops the watcher.

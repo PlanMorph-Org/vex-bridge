@@ -18,7 +18,12 @@ use tracing::{info, warn};
 use crate::config::WatchEntry;
 use crate::errors::BridgeResult;
 
-const DEBOUNCE: Duration = Duration::from_secs(2);
+// Kept short: this only needs to absorb the burst of Create/Modify events a
+// CAD's IFC exporter fires while writing one file, not to prove the file is
+// fully settled — `wait_for_stable_file` in pipeline.rs does that check
+// afterwards. Stacking two long waits back-to-back was adding several extra
+// seconds of pure detection latency on every drop.
+const DEBOUNCE: Duration = Duration::from_millis(800);
 
 pub struct WatchHandle {
     _watcher: RecommendedWatcher,
