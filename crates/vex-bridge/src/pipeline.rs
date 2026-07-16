@@ -44,7 +44,7 @@ pub struct WatchPipeline {
 struct PipelineRun {
     bin: String,
     dir: PathBuf,
-    api_base: String,
+    vex_serve_host: String,
     entry: WatchEntry,
     changed: PathBuf,
     author_name: Option<String>,
@@ -100,7 +100,7 @@ pub fn spawn_entry(
         std::fs::create_dir_all(&dir)?;
     }
     let bin = cfg.vex_bin.clone();
-    let api_base = cfg.api_base.clone();
+    let vex_serve_host = cfg.vex_serve_host.clone();
     let author_name = cfg.default_author_name.clone();
     let author_email = cfg.default_author_email.clone();
 
@@ -113,7 +113,7 @@ pub fn spawn_entry(
     let runtime_for_cb = runtime.clone();
     let lock_for_cb = lock.clone();
     let bin_for_cb = bin.clone();
-    let api_base_for_cb = api_base.clone();
+    let vex_serve_host_for_cb = vex_serve_host.clone();
     let author_name_for_cb = author_name.clone();
     let author_email_for_cb = author_email.clone();
     let state_for_cb = state.clone();
@@ -125,7 +125,7 @@ pub fn spawn_entry(
         let runtime = runtime_for_cb.clone();
         let lock = lock_for_cb.clone();
         let bin = bin_for_cb.clone();
-        let api_base = api_base_for_cb.clone();
+        let vex_serve_host = vex_serve_host_for_cb.clone();
         let entry = entry_for_cb.clone();
         let project_id = entry.project_id.clone();
         let dir = dir_for_cb.clone();
@@ -138,7 +138,7 @@ pub fn spawn_entry(
             if let Err(e) = run_pipeline(PipelineRun {
                 bin: bin.clone(),
                 dir: dir.clone(),
-                api_base: api_base.clone(),
+                vex_serve_host: vex_serve_host.clone(),
                 entry: entry.clone(),
                 changed: changed.clone(),
                 author_name: author_name.clone(),
@@ -172,7 +172,7 @@ pub fn spawn_entry(
 
     let scan_lock = lock.clone();
     let scan_bin = cfg.vex_bin.clone();
-    let scan_api_base = cfg.api_base.clone();
+    let scan_vex_serve_host = cfg.vex_serve_host.clone();
     let scan_entry = entry.clone();
     let scan_dir = dir.clone();
     let scan_author_name = cfg.default_author_name.clone();
@@ -195,7 +195,7 @@ pub fn spawn_entry(
             if let Err(error) = run_pipeline(PipelineRun {
                 bin: scan_bin.clone(),
                 dir: scan_dir.clone(),
-                api_base: scan_api_base.clone(),
+                vex_serve_host: scan_vex_serve_host.clone(),
                 entry: scan_entry.clone(),
                 changed: changed.clone(),
                 author_name: scan_author_name.clone(),
@@ -238,7 +238,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
     let PipelineRun {
         bin,
         dir,
-        api_base,
+        vex_serve_host,
         entry,
         changed,
         author_name,
@@ -248,7 +248,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
     } = run;
     let bin = bin.as_str();
     let dir = dir.as_path();
-    let api_base = api_base.as_str();
+    let vex_serve_host = vex_serve_host.as_str();
     let changed = changed.as_path();
     let author_name = author_name.as_deref();
     let author_email = author_email.as_deref();
@@ -308,7 +308,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
             ),
         )
         .await;
-        ensure_repo_initialized(bin, dir, api_base, &entry.project_id).await?;
+        ensure_repo_initialized(bin, dir, vex_serve_host, &entry.project_id).await?;
         if let Err(e) = archive_processed_file_async(dir, changed, &content_hash).await {
             warn!(file = %changed.display(), error = %e, "could not archive duplicate IFC");
         }
@@ -348,7 +348,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
         return Ok(());
     }
 
-    ensure_repo_initialized(bin, dir, api_base, &entry.project_id).await?;
+    ensure_repo_initialized(bin, dir, vex_serve_host, &entry.project_id).await?;
 
     info!(file = %changed.display(), hash = %content_hash, "vex import+commit");
     let _tree = vex_cli::import_file(bin, dir, changed).await?;
@@ -674,7 +674,7 @@ fn entry_matches_ifc(entry: &WatchEntry, intake: &IfcIntake) -> bool {
 async fn ensure_repo_initialized(
     bin: &str,
     dir: &Path,
-    api_base: &str,
+    vex_serve_host: &str,
     project_id: &str,
 ) -> BridgeResult<()> {
     if is_vex_repo(dir) {
@@ -682,7 +682,7 @@ async fn ensure_repo_initialized(
     }
     info!(path = %dir.display(), "initialising vex repo");
     vex_cli::init_repo(bin, dir).await?;
-    if let Some(remote_url) = derive_remote_url(api_base, project_id) {
+    if let Some(remote_url) = build_remote_url(vex_serve_host, project_id) {
         let r = vex_cli::run(bin, Some(dir), ["remote", "add", "origin", &remote_url]).await?;
         if !r.ok() {
             warn!(stderr = %r.stderr.trim(), "could not register origin remote");
@@ -745,34 +745,20 @@ fn archive_processed_file(dir: &Path, file: &Path, content_hash: &str) -> Bridge
     }
 }
 
-/// Convert the configured api_base (e.g. `https://studio.planmorph.software`)
-/// into the SSH push URL on the architur droplet
-/// (`ssh://vex@vex.planmorph.software:22/proj/<uuid>`).
+/// Build the SSH push URL on the architur vex-serve host
+/// (`ssh://vex@<vex_serve_host>:22/proj/<uuid>`).
 ///
-/// We strip the leftmost subdomain label (`studio.`, `api.`, `app.`, …) so
-/// the SSH host always lands on `vex.<root-domain>`, which is the
-/// `vex-sshd` listener on the DO droplet. Returns `None` if the api_base
-/// can't be parsed; the caller treats this as a non-fatal "user must
-/// register the remote manually".
-fn derive_remote_url(api_base: &str, project_id: &str) -> Option<String> {
-    let host = api_base
-        .strip_prefix("https://")
-        .or_else(|| api_base.strip_prefix("http://"))?
-        .split('/')
-        .next()?
-        .split(':')
-        .next()?;
-    if host.is_empty() {
+/// Previously this was derived by stripping api_base's leftmost subdomain
+/// label, which only worked when the API and SSH endpoints shared a root
+/// domain (e.g. `studio.planmorph.software` -> `vex.planmorph.software`).
+/// That assumption breaks once api_base points at an unrelated host (e.g.
+/// an Azure Container Apps FQDN), so the host is now taken directly from
+/// config instead of being guessed.
+fn build_remote_url(vex_serve_host: &str, project_id: &str) -> Option<String> {
+    if vex_serve_host.is_empty() {
         return None;
     }
-    // Strip the leftmost label if there's at least one dot remaining after
-    // it (i.e. host has 3+ labels like `studio.planmorph.software`). For a
-    // bare apex like `planmorph.software` we leave it untouched.
-    let root = match host.split_once('.') {
-        Some((_, rest)) if rest.contains('.') => rest,
-        _ => host,
-    };
-    Some(format!("ssh://vex@vex.{root}:22/proj/{project_id}"))
+    Some(format!("ssh://vex@{vex_serve_host}:22/proj/{project_id}"))
 }
 
 /// Manually run the same import → commit → push pipeline that the watcher
@@ -814,7 +800,7 @@ pub async fn run_manual_push(
         std::fs::create_dir_all(&dir)?;
     }
 
-    ensure_repo_initialized(&cfg.vex_bin, &dir, &cfg.api_base, project_id).await?;
+    ensure_repo_initialized(&cfg.vex_bin, &dir, &cfg.vex_serve_host, project_id).await?;
 
     let scan_dir = dir.clone();
     let ifc_file = tokio::task::spawn_blocking(move || latest_ifc_file(&scan_dir))

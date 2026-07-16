@@ -65,8 +65,28 @@ impl Paths {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Base URL of the architur API, e.g. `https://studio.planmorph.software`.
+    ///
+    /// NOTE: `planmorph.software` expired and is currently unregistered/parked.
+    /// Until DNS is repointed, this defaults straight to the Azure Container
+    /// Apps FQDN for the prototype deployment (`ca-vexatlas-api`). Swap back
+    /// to the custom domain once it's re-registered and DNS is live.
     #[serde(default = "default_api_base")]
     pub api_base: String,
+
+    /// Base URL of the browser-facing web app that serves the `/pair` page,
+    /// e.g. `https://studio.planmorph.software`. Kept separate from
+    /// `api_base` because on the Azure prototype the API and web frontend
+    /// are two different Container Apps with different hostnames.
+    #[serde(default = "default_web_base")]
+    pub web_base: String,
+
+    /// Host (no scheme) of the `vex-sshd` remote used for `git push`-style
+    /// repo sync, e.g. `vex.planmorph.software` or a bare IP. Previously
+    /// this was derived by string-mangling `api_base`'s subdomain, which
+    /// only worked when API and SSH shared a root domain; the Azure
+    /// prototype's API/SSH hosts are unrelated, so it's now explicit.
+    #[serde(default = "default_vex_serve_host")]
+    pub vex_serve_host: String,
 
     /// Path to the bundled `vex` binary. Defaults to "vex" (resolved on PATH).
     #[serde(default = "default_vex_bin")]
@@ -105,7 +125,16 @@ pub struct WatchEntry {
 }
 
 fn default_api_base() -> String {
-    "https://studio.planmorph.software".into()
+    // planmorph.software expired and is parked; point at the Azure
+    // prototype's API Container App directly until DNS is restored.
+    "https://ca-vexatlas-api.calmtree-edee8174.northeurope.azurecontainerapps.io".into()
+}
+fn default_web_base() -> String {
+    "https://ca-vexatlas-web.calmtree-edee8174.northeurope.azurecontainerapps.io".into()
+}
+fn default_vex_serve_host() -> String {
+    // aci-vex-serve's public IP (rg-vexatlas-prod-ne, North Europe).
+    "20.223.15.197".into()
 }
 fn default_vex_bin() -> String {
     bundled_vex_bin().unwrap_or_else(|| "vex".into())
@@ -121,6 +150,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             api_base: default_api_base(),
+            web_base: default_web_base(),
+            vex_serve_host: default_vex_serve_host(),
             vex_bin: default_vex_bin(),
             port: default_port(),
             default_author_name: None,
