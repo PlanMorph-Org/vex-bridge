@@ -364,6 +364,10 @@ fn viewer_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
             include_bytes!("../assets/viewer/web-ifc-three/IFCLoader.js"),
             "text/javascript; charset=utf-8",
         )),
+        "web-ifc-three/IFCWorker.js" => Some((
+            include_bytes!("../assets/viewer/web-ifc-three/IFCWorker.js"),
+            "text/javascript; charset=utf-8",
+        )),
         "NOTICE.md" => Some((
             include_bytes!("../assets/viewer/NOTICE.md"),
             "text/markdown; charset=utf-8",

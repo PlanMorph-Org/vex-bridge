@@ -1936,9 +1936,32 @@ class RealIfcViewer {
     const buffer = await response.arrayBuffer();
     const loader = new IFCLoader();
     loader.ifcManager.setWasmPath('/assets/viewer/web-ifc/');
+    // Parsing/tessellating a large IFC file blocks whatever thread runs it for
+    // the whole load. Move that work into web-ifc-three's own dedicated Web
+    // Worker so it happens off the main thread instead of freezing the UI and
+    // competing with the render loop for CPU time; the worker gets its own
+    // multi-threaded WASM pool (see the Cross-Origin-* headers in server.rs)
+    // independent of the main thread's. If worker setup fails for any reason
+    // (e.g. an environment without Worker support) we fall back to parsing
+    // in-page rather than failing the load.
+    try {
+      await loader.ifcManager.useWebWorkers(true, '/assets/viewer/web-ifc-three/IFCWorker.js');
+    } catch (error) {
+      console.warn('IFC web worker unavailable; parsing on the main thread instead', error);
+    }
     if (loader.ifcManager.applyWebIfcConfig) {
       await loader.ifcManager.applyWebIfcConfig({COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true});
     }
+    // Real progress feedback (not just a static "Loading..." string) so a big
+    // model's load time reads as "working, N% of M elements" instead of a
+    // silent hang.
+    loader.ifcManager.setOnProgress(({loaded, total}) => {
+      if (!total) return;
+      const pct = Math.min(100, Math.round((loaded / total) * 100));
+      const label = `Loading IFC geometry... ${pct}%`;
+      this.planStatus.textContent = label;
+      this.modelStatus.textContent = label;
+    });
     // Yield once so the "Loading IFC geometry..." status paints before the
     // synchronous web-ifc parse takes over the main thread.
     await new Promise(resolve => setTimeout(resolve, 0));
