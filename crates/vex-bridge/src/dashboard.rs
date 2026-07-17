@@ -1477,6 +1477,7 @@ class RealIfcViewer {
     this.gizmo = this.makeGizmo();
     this.currentKey = '';
     this.loadToken = 0;
+    this.ifcLoader = null;
     this.model = null;
     this.highlightObjects = [];
     this.removedObjects = [];
@@ -1888,7 +1889,10 @@ class RealIfcViewer {
         this.planStatus.textContent = 'Loading IFC geometry...';
         this.modelStatus.textContent = 'Loading IFC geometry...';
         const model = await this.loadIfcModel(projectId, latestCommit);
-        if (token !== this.loadToken) return;
+        if (token !== this.loadToken) {
+          this.releaseIfcModel(model);
+          return;
+        }
         this.model = model;
         this.modelScene.add(this.model);
         this.currentKey = key;
@@ -1929,21 +1933,12 @@ class RealIfcViewer {
     return object;
   }
 
-  async loadIfcModel(projectId, commit) {
-    const url = `/v1/projects/${encodeURIComponent(projectId)}/ifc/${encodeURIComponent(commit)}`;
-    const response = await fetch(url, {headers});
-    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
-    const buffer = await response.arrayBuffer();
+  async getIfcLoader() {
+    if (this.ifcLoader) return this.ifcLoader;
     const loader = new IFCLoader();
     loader.ifcManager.setWasmPath('/assets/viewer/web-ifc/');
-    // Parsing/tessellating a large IFC file blocks whatever thread runs it for
-    // the whole load. Move that work into web-ifc-three's own dedicated Web
-    // Worker so it happens off the main thread instead of freezing the UI and
-    // competing with the render loop for CPU time; the worker gets its own
-    // multi-threaded WASM pool (see the Cross-Origin-* headers in server.rs)
-    // independent of the main thread's. If worker setup fails for any reason
-    // (e.g. an environment without Worker support) we fall back to parsing
-    // in-page rather than failing the load.
+    // Keep one worker-backed parser for the life of this desktop window. A new
+    // worker per commit leaves large IFC parser state alive until the app exits.
     try {
       await loader.ifcManager.useWebWorkers(true, '/assets/viewer/web-ifc-three/IFCWorker.js');
     } catch (error) {
@@ -1952,6 +1947,16 @@ class RealIfcViewer {
     if (loader.ifcManager.applyWebIfcConfig) {
       await loader.ifcManager.applyWebIfcConfig({COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true});
     }
+    this.ifcLoader = loader;
+    return loader;
+  }
+
+  async loadIfcModel(projectId, commit) {
+    const url = `/v1/projects/${encodeURIComponent(projectId)}/ifc/${encodeURIComponent(commit)}`;
+    const response = await fetch(url, {headers});
+    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+    const buffer = await response.arrayBuffer();
+    const loader = await this.getIfcLoader();
     // Real progress feedback (not just a static "Loading..." string) so a big
     // model's load time reads as "working, N% of M elements" instead of a
     // silent hang.
@@ -1974,13 +1979,22 @@ class RealIfcViewer {
     return model;
   }
 
+  releaseIfcModel(model) {
+    if (model && typeof model.close === 'function') model.close(this.modelScene);
+  }
+
   clearSceneModels() {
     if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
     this.selectionSubset = null;
     this.selectedId = null;
     const panel = document.getElementById('propsPanel');
     if (panel) panel.classList.remove('open');
+    const closedModels = new Set();
     for (const object of [this.model, ...this.highlightObjects, ...this.removedObjects]) {
+      if (object && typeof object.close === 'function' && !closedModels.has(object)) {
+        closedModels.add(object);
+        this.releaseIfcModel(object);
+      }
       if (object && object.parent) object.parent.remove(object);
     }
     this.model = null;

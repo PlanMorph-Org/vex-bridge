@@ -146,6 +146,40 @@ fn default_globs() -> Vec<String> {
     vec!["*.ifc".into()]
 }
 
+fn is_expired_planmorph_host(value: &str, subdomain: &str) -> bool {
+    let trimmed = value.trim().trim_end_matches('/');
+    matches!(
+        trimmed,
+        "https://planmorph.software"
+            | "http://planmorph.software"
+    ) || trimmed == format!("https://{subdomain}.planmorph.software")
+        || trimmed == format!("http://{subdomain}.planmorph.software")
+}
+
+fn migrate_expired_endpoints(cfg: &mut Config) -> bool {
+    let mut changed = false;
+    if is_expired_planmorph_host(&cfg.api_base, "studio")
+        || is_expired_planmorph_host(&cfg.api_base, "api")
+    {
+        cfg.api_base = default_api_base();
+        changed = true;
+    }
+    if is_expired_planmorph_host(&cfg.web_base, "studio")
+        || is_expired_planmorph_host(&cfg.web_base, "app")
+    {
+        cfg.web_base = default_web_base();
+        changed = true;
+    }
+    if matches!(
+        cfg.vex_serve_host.trim().trim_end_matches('/'),
+        "vex.planmorph.software" | "planmorph.software"
+    ) {
+        cfg.vex_serve_host = default_vex_serve_host();
+        changed = true;
+    }
+    changed
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -176,6 +210,12 @@ impl Config {
         // "No such file or directory (os error 2)". Self-heal by preferring a
         // user-pinned path that still exists, else the bundled engine.
         cfg.vex_bin = resolve_vex_bin(&cfg.vex_bin);
+        // Existing installs retain endpoint overrides in config.toml. Move
+        // only the known expired PlanMorph defaults to the Azure deployment;
+        // custom domains and self-hosted endpoints remain untouched.
+        if migrate_expired_endpoints(&mut cfg) {
+            cfg.save(paths)?;
+        }
         Ok(cfg)
     }
 
@@ -317,6 +357,32 @@ mod tests {
         // bundled engine sits next to the test binary.
         assert_eq!(resolve_vex_bin("vex"), "vex");
         assert_eq!(resolve_vex_bin("   "), "vex");
+    }
+
+    #[test]
+    fn migrates_only_known_expired_planmorph_endpoints() {
+        let mut cfg = Config {
+            api_base: "https://api.planmorph.software".to_string(),
+            web_base: "https://studio.planmorph.software".to_string(),
+            vex_serve_host: "vex.planmorph.software".to_string(),
+            ..Config::default()
+        };
+
+        assert!(migrate_expired_endpoints(&mut cfg));
+        assert_eq!(cfg.api_base, default_api_base());
+        assert_eq!(cfg.web_base, default_web_base());
+        assert_eq!(cfg.vex_serve_host, default_vex_serve_host());
+
+        let mut custom = Config {
+            api_base: "https://vex.example.com".to_string(),
+            web_base: "https://studio.example.com".to_string(),
+            vex_serve_host: "ssh.example.com".to_string(),
+            ..Config::default()
+        };
+        assert!(!migrate_expired_endpoints(&mut custom));
+        assert_eq!(custom.api_base, "https://vex.example.com");
+        assert_eq!(custom.web_base, "https://studio.example.com");
+        assert_eq!(custom.vex_serve_host, "ssh.example.com");
     }
 
     #[test]
