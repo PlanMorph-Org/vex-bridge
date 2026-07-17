@@ -73609,11 +73609,11 @@ self.onmessage = async (event) => {
     requestedWorker[action](data);
 };
 function checkRequestIsValid(worker, action) {
-    if (!ifcWorker[worker]) {
+    if (!Object.prototype.hasOwnProperty.call(ifcWorker, worker) || typeof ifcWorker[worker] !== 'object') {
         throw new Error(`The worker ${worker} does not exist.`);
     }
     const requestedWorker = ifcWorker[worker];
-    if (!requestedWorker[action]) {
+    if (!Object.prototype.hasOwnProperty.call(requestedWorker, action) || typeof requestedWorker[action] !== 'function') {
         throw new Error(`The action ${action} does not exist in the worker ${worker}.`);
     }
 }
