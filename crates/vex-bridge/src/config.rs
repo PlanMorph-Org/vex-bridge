@@ -136,8 +136,8 @@ fn default_web_base() -> String {
     "https://ca-vexatlas-web.calmtree-edee8174.northeurope.azurecontainerapps.io".into()
 }
 fn default_vex_serve_host() -> String {
-    // aci-vex-serve's public IP (rg-vexatlas-prod-ne, North Europe).
-    "20.223.15.197".into()
+    // Stable Azure DNS label for aci-vex-serve (rg-vexatlas-prod-ne).
+    "vexatlas-serve-ne.northeurope.azurecontainer.io".into()
 }
 fn default_vex_bin() -> String {
     bundled_vex_bin().unwrap_or_else(|| "vex".into())
@@ -174,7 +174,7 @@ fn migrate_expired_endpoints(cfg: &mut Config) -> bool {
     }
     if matches!(
         cfg.vex_serve_host.trim().trim_end_matches('/'),
-        "vex.planmorph.software" | "planmorph.software"
+        "vex.planmorph.software" | "planmorph.software" | "20.223.15.197" | "20.166.239.248"
     ) {
         cfg.vex_serve_host = default_vex_serve_host();
         changed = true;
@@ -374,6 +374,15 @@ mod tests {
         assert_eq!(cfg.api_base, default_api_base());
         assert_eq!(cfg.web_base, default_web_base());
         assert_eq!(cfg.vex_serve_host, default_vex_serve_host());
+
+        for old_ip in ["20.223.15.197", "20.166.239.248"] {
+            let mut cfg = Config {
+                vex_serve_host: old_ip.to_string(),
+                ..Config::default()
+            };
+            assert!(migrate_expired_endpoints(&mut cfg));
+            assert_eq!(cfg.vex_serve_host, default_vex_serve_host());
+        }
 
         let mut custom = Config {
             api_base: "https://vex.example.com".to_string(),
