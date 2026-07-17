@@ -55,6 +55,31 @@ pub struct AppState {
     pub update_cache: Arc<tokio::sync::Mutex<HashMap<String, (Instant, proto::UpdateInfo)>>>,
 }
 
+fn canonical_render_object_uri(project_id: &str, commit: &str, sha256: &str) -> String {
+    format!("/v1/projects/{project_id}/render/{commit}/objects/{sha256}")
+}
+
+fn validate_render_resource_uris(
+    manifest: &proto::RenderArtifactManifest,
+    project_id: &str,
+    commit: &str,
+) -> Result<(), String> {
+    for resource in manifest
+        .tiles
+        .iter()
+        .map(|tile| &tile.artifact)
+        .chain(std::iter::once(&manifest.semantic_index.artifact))
+    {
+        let expected = canonical_render_object_uri(project_id, commit, &resource.sha256);
+        if resource.uri != expected {
+            return Err(format!(
+                "render artifact resource URI does not match its canonical object endpoint: expected `{expected}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ChangeQuery {
     #[serde(default)]
@@ -84,6 +109,26 @@ impl LimitQuery {
     fn resolved(&self) -> usize {
         self.limit.unwrap_or(Self::DEFAULT).clamp(1, Self::MAX)
     }
+}
+
+async fn checkout_cache_is_complete(out: &Path, complete: &Path) -> bool {
+    let Ok(expected_bytes) = tokio::fs::read_to_string(complete).await else {
+        return false;
+    };
+    let Ok(expected_bytes) = expected_bytes.trim().parse::<u64>() else {
+        return false;
+    };
+    tokio::fs::metadata(out)
+        .await
+        .map(|metadata| metadata.len() == expected_bytes && expected_bytes > 0)
+        .unwrap_or(false)
+}
+
+async fn checkout_temp_has_expected_size(path: &Path, expected_bytes: u64) -> bool {
+    tokio::fs::metadata(path)
+        .await
+        .map(|metadata| metadata.len() == expected_bytes && expected_bytes > 0)
+        .unwrap_or(false)
 }
 
 struct PathValidationError {
@@ -122,6 +167,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/projects/:project_id/ifc/:commit",
             get(handle_project_ifc_commit),
+        )
+        .route(
+            "/v1/projects/:project_id/render/:commit/status",
+            get(handle_project_render_status),
+        )
+        .route(
+            "/v1/projects/:project_id/render/:commit/manifest",
+            get(handle_project_render_manifest),
+        )
+        .route(
+            "/v1/projects/:project_id/render/:commit/objects/:sha256",
+            get(handle_project_render_object),
         )
         .route(
             "/v1/projects/:project_id/inbox",
@@ -1394,8 +1451,9 @@ async fn handle_project_ifc_latest(
     State(state): State<AppState>,
 ) -> Result<Response, Response> {
     require_token(&headers, &state.access_token)?;
+    let immutable = query.commit.as_deref().is_some_and(is_full_commit_hash);
     let path = resolve_ifc_snapshot_path(&state, &project_id, query.commit.as_deref()).await?;
-    serve_ifc_file(path).await
+    serve_ifc_file(path, immutable).await
 }
 
 async fn handle_project_ifc_commit(
@@ -1405,7 +1463,205 @@ async fn handle_project_ifc_commit(
 ) -> Result<Response, Response> {
     require_token(&headers, &state.access_token)?;
     let path = resolve_ifc_snapshot_path(&state, &project_id, Some(&commit)).await?;
-    serve_ifc_file(path).await
+    serve_ifc_file(path, is_full_commit_hash(&commit)).await
+}
+
+/// Report whether a validated, commit-exact derived render artifact is
+/// available. Artifact generation intentionally remains independent of import
+/// success: callers can always fall back to the canonical IFC endpoint.
+async fn handle_project_render_status(
+    headers: HeaderMap,
+    AxumPath((project_id, commit)): AxumPath<(String, String)>,
+    State(state): State<AppState>,
+) -> Result<Json<proto::RenderArtifactStatusResponse>, Response> {
+    require_token(&headers, &state.access_token)?;
+    require_full_commit_hash(&commit)?;
+    let status = match read_render_manifest(&state, &project_id, &commit).await? {
+        Some(manifest) => proto::RenderArtifactStatus::Ready { manifest },
+        None => proto::RenderArtifactStatus::NotRequested,
+    };
+    Ok(Json(proto::RenderArtifactStatusResponse {
+        schema: proto::schema::RENDER_STATUS.to_string(),
+        project_id,
+        commit_hash: commit,
+        status,
+    }))
+}
+
+/// Return a validated manifest for a derived render artifact. The manifest is
+/// immutable data keyed by the complete Vex commit hash; no render artifact is
+/// ever inferred from a branch, abbreviated hash, or the mutable `HEAD`.
+async fn handle_project_render_manifest(
+    headers: HeaderMap,
+    AxumPath((project_id, commit)): AxumPath<(String, String)>,
+    State(state): State<AppState>,
+) -> Result<Json<proto::RenderArtifactManifest>, Response> {
+    require_token(&headers, &state.access_token)?;
+    require_full_commit_hash(&commit)?;
+    let manifest = read_render_manifest(&state, &project_id, &commit)
+        .await?
+        .ok_or_else(|| {
+            err_response(
+                StatusCode::NOT_FOUND,
+                BridgeError::Config(format!(
+                    "no validated render artifact is available for commit `{commit}`"
+                )),
+            )
+        })?;
+    Ok(Json(manifest))
+}
+
+/// Serve an immutable, integrity-checked object named by a validated render
+/// manifest. A client cannot read arbitrary files by inventing a hash: the
+/// requested object must be present in the manifest and match the file digest.
+async fn handle_project_render_object(
+    headers: HeaderMap,
+    AxumPath((project_id, commit, sha256)): AxumPath<(String, String, String)>,
+    State(state): State<AppState>,
+) -> Result<Response, Response> {
+    require_token(&headers, &state.access_token)?;
+    require_full_commit_hash(&commit)?;
+    let manifest = read_render_manifest(&state, &project_id, &commit)
+        .await?
+        .ok_or_else(|| {
+            err_response(
+                StatusCode::NOT_FOUND,
+                BridgeError::Config(format!(
+                    "no validated render artifact is available for commit `{commit}`"
+                )),
+            )
+        })?;
+    let resource = manifest
+        .tiles
+        .iter()
+        .map(|tile| &tile.artifact)
+        .chain(std::iter::once(&manifest.semantic_index.artifact))
+        .find(|resource| resource.sha256 == sha256)
+        .ok_or_else(|| {
+            err_response(
+                StatusCode::NOT_FOUND,
+                BridgeError::Config("render artifact object is not in the manifest".into()),
+            )
+        })?;
+
+    let root = render_artifact_dir(&state, &project_id, &commit).await?;
+    let path = root.join("objects").join(&sha256);
+    let bytes = tokio::fs::read(&path).await.map_err(|error| {
+        let status = if error.kind() == std::io::ErrorKind::NotFound {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        err_response(status, BridgeError::Io(error))
+    })?;
+    let actual = sha256_hex(&bytes);
+    if actual != resource.sha256 {
+        return Err(err_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            BridgeError::Config(format!(
+                "render artifact object integrity check failed for `{sha256}`"
+            )),
+        ));
+    }
+
+    let mut response = (
+        [(header::CONTENT_TYPE, resource.content_type.as_str())],
+        bytes,
+    )
+        .into_response();
+    let response_headers = response.headers_mut();
+    response_headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    response_headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{sha256}\"")).expect("validated SHA-256 is a valid ETag"),
+    );
+    Ok(response)
+}
+
+fn require_full_commit_hash(commit: &str) -> Result<(), Response> {
+    if is_full_commit_hash(commit) {
+        Ok(())
+    } else {
+        Err(err_response(
+            StatusCode::BAD_REQUEST,
+            BridgeError::Config(
+                "render artifacts require a complete 64-character commit hash".into(),
+            ),
+        ))
+    }
+}
+
+async fn read_render_manifest(
+    state: &AppState,
+    project_id: &str,
+    commit: &str,
+) -> Result<Option<proto::RenderArtifactManifest>, Response> {
+    let root = render_artifact_dir(state, project_id, commit).await?;
+    // Only the bridge-created validated manifest may be served. The
+    // worker-supplied input manifest stays in the artifact directory for
+    // diagnostics but is never trusted after publication.
+    let manifest_path = root.join("manifest.validated.json");
+    let contents = match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                BridgeError::Io(error),
+            ))
+        }
+    };
+    let manifest: proto::RenderArtifactManifest =
+        serde_json::from_str(&contents).map_err(|error| {
+            err_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                BridgeError::Config(format!("render artifact manifest is invalid JSON: {error}")),
+            )
+        })?;
+    manifest.validate().map_err(|error| {
+        err_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BridgeError::Config(format!(
+                "render artifact manifest failed validation: {error}"
+            )),
+        )
+    })?;
+    if manifest.project_id != project_id || manifest.commit_hash != commit {
+        return Err(err_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            BridgeError::Config(
+                "render artifact manifest identity does not match its request".into(),
+            ),
+        ));
+    }
+    validate_render_resource_uris(&manifest, project_id, commit).map_err(|error| {
+        err_response(StatusCode::UNPROCESSABLE_ENTITY, BridgeError::Config(error))
+    })?;
+    Ok(Some(manifest))
+}
+
+async fn render_artifact_dir(
+    state: &AppState,
+    project_id: &str,
+    commit: &str,
+) -> Result<PathBuf, Response> {
+    let cfg = state.config.read().await.clone();
+    let entry =
+        find_watch_entry(&cfg, project_id).ok_or_else(|| unknown_project_response(project_id))?;
+    Ok(PathBuf::from(entry.path)
+        .join(".vex")
+        .join("cache")
+        .join("render")
+        .join(commit))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+
+    format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
 async fn handle_delete_project(
@@ -1762,6 +2018,7 @@ async fn resolve_ifc_snapshot_path(
 /// re-materialized. Returns `None` on any failure so callers fall through to a
 /// 404 rather than surfacing engine errors.
 async fn materialize_commit_ifc(bin: &str, dir: &Path, reference: &str) -> Option<PathBuf> {
+    let started = Instant::now();
     let safe: String = reference
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -1776,18 +2033,74 @@ async fn materialize_commit_ifc(bin: &str, dir: &Path, reference: &str) -> Optio
         return None;
     }
     let out = cache_dir.join(format!("{safe}.ifc"));
+    let complete = cache_dir.join(format!("{safe}.ifc.complete"));
     let immutable = safe.len() == 64;
-    if immutable && out.is_file() {
+    if immutable && out.is_file() && checkout_cache_is_complete(&out, &complete).await {
+        info!(
+            reference = %reference,
+            elapsed_ms = started.elapsed().as_millis(),
+            path = %out.display(),
+            "IFC checkout cache hit"
+        );
         return Some(out);
     }
-    match vex_cli::checkout(bin, dir, reference, &out).await {
-        Ok(bytes) if bytes > 0 => Some(out),
-        Ok(_) => None,
+    // Caches created before completion markers, or left behind by a crashed
+    // checkout, must not be served as immutable historical IFC snapshots.
+    // `vex checkout` writes directly to its output path, so materialize into a
+    // sibling temporary file and publish only after it completes successfully.
+    if let Err(error) = tokio::fs::remove_file(&out).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            warn!(path = %out.display(), %error, "could not remove incomplete IFC checkout cache");
+            return None;
+        }
+    }
+    if let Err(error) = tokio::fs::remove_file(&complete).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            warn!(path = %complete.display(), %error, "could not remove IFC checkout completion marker");
+            return None;
+        }
+    }
+    let temp = cache_dir.join(format!(".{safe}-{}.ifc.partial", Uuid::now_v7()));
+    match vex_cli::checkout(bin, dir, reference, &temp).await {
+        Ok(bytes) if bytes > 0 && checkout_temp_has_expected_size(&temp, bytes).await => {
+            if let Err(error) = tokio::fs::rename(&temp, &out).await {
+                warn!(path = %temp.display(), target = %out.display(), %error, "could not publish IFC checkout cache");
+                let _ = tokio::fs::remove_file(&temp).await;
+                return None;
+            }
+            if let Err(error) = tokio::fs::write(&complete, bytes.to_string()).await {
+                warn!(path = %complete.display(), %error, "could not write IFC checkout completion marker");
+                let _ = tokio::fs::remove_file(&out).await;
+                return None;
+            }
+            info!(
+                reference = %reference,
+                bytes,
+                elapsed_ms = started.elapsed().as_millis(),
+                path = %out.display(),
+                "IFC checkout materialized"
+            );
+            Some(out)
+        }
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            None
+        }
         Err(error) => {
-            tracing::debug!(%error, "vex checkout failed");
+            let _ = tokio::fs::remove_file(&temp).await;
+            warn!(
+                reference = %reference,
+                elapsed_ms = started.elapsed().as_millis(),
+                %error,
+                "vex checkout failed"
+            );
             None
         }
     }
+}
+
+fn is_full_commit_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_project_file_path(project_dir: &Path, file: &Path) -> Result<(), PathValidationError> {
@@ -1828,7 +2141,8 @@ fn validate_project_file_path(project_dir: &Path, file: &Path) -> Result<(), Pat
     Ok(())
 }
 
-async fn serve_ifc_file(path: PathBuf) -> Result<Response, Response> {
+async fn serve_ifc_file(path: PathBuf, immutable: bool) -> Result<Response, Response> {
+    let started = Instant::now();
     let bytes = tokio::fs::read(&path).await.map_err(|error| {
         let status = if error.kind() == std::io::ErrorKind::NotFound {
             StatusCode::NOT_FOUND
@@ -1841,7 +2155,9 @@ async fn serve_ifc_file(path: PathBuf) -> Result<Response, Response> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("model.ifc");
-    Ok((
+    let len = bytes.len();
+    let etag = format!("\"{}\"", blake3::hash(&bytes).to_hex());
+    let mut response = (
         [
             (header::CONTENT_TYPE, "application/octet-stream"),
             (
@@ -1851,7 +2167,28 @@ async fn serve_ifc_file(path: PathBuf) -> Result<Response, Response> {
         ],
         bytes,
     )
-        .into_response())
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(if immutable {
+            "private, max-age=31536000, immutable"
+        } else {
+            "private, no-cache"
+        }),
+    );
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).expect("BLAKE3 ETag is a valid header"),
+    );
+    info!(
+        path = %path.display(),
+        bytes = len,
+        immutable,
+        elapsed_ms = started.elapsed().as_millis(),
+        "served IFC snapshot"
+    );
+    Ok(response)
 }
 
 async fn apply_deletion_policy(
@@ -2459,6 +2796,22 @@ mod tests {
     fn hex_lower_formats_bytes() {
         assert_eq!(hex_lower(&[0x00, 0x0f, 0xa3, 0xff]), "000fa3ff");
         assert_eq!(hex_lower(&[]), "");
+    }
+
+    #[test]
+    fn full_commit_hash_requires_exact_lower_or_upper_hex_length() {
+        assert!(is_full_commit_hash(&"a".repeat(64)));
+        assert!(is_full_commit_hash(&"A".repeat(64)));
+        assert!(!is_full_commit_hash(&"a".repeat(63)));
+        assert!(!is_full_commit_hash(&format!("{}g", "a".repeat(63))));
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_digest() {
+        assert_eq!(
+            sha256_hex(b"vex-render-artifact"),
+            "1165f3b59ba78e92ad6c69757db2bad5cf777df4eaae63aee796832ff34a58f1"
+        );
     }
 
     #[test]

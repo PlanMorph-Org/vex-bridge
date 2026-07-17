@@ -1615,6 +1615,7 @@ class RealIfcViewer {
     this.gizmo = this.makeGizmo();
     this.currentKey = '';
     this.loadToken = 0;
+    this.ifcAbortController = null;
     this.ifcLoader = null;
     this.model = null;
     this.highlightObjects = [];
@@ -2020,6 +2021,7 @@ class RealIfcViewer {
       return;
     }
     const key = `${projectId}:${latestCommit}`;
+    this.abortPendingIfcLoad();
     const token = ++this.loadToken;
     try {
       if (this.currentKey === `local:${projectId}`) this.currentKey = key;
@@ -2027,7 +2029,7 @@ class RealIfcViewer {
         this.clearSceneModels();
         this.planStatus.textContent = 'Loading IFC geometry...';
         this.modelStatus.textContent = 'Loading IFC geometry...';
-        const model = await this.loadIfcModel(projectId, latestCommit);
+        const model = await this.loadIfcModel(projectId, latestCommit, token);
         if (token !== this.loadToken) {
           this.releaseIfcModel(model);
           return;
@@ -2035,13 +2037,17 @@ class RealIfcViewer {
         this.model = model;
         this.modelScene.add(this.model);
         this.currentKey = key;
+        const firstSceneStartedAt = performance.now();
         this.fitToModel(this.model);
+        this.recordLoadMetric('ifc_first_scene', firstSceneStartedAt);
         if (!this.modelBox) {
           if (token !== this.loadToken) return;
           this.clear('No 3D geometry found in this commit.');
           return;
         }
+        const storeyStartedAt = performance.now();
         await this.extractStoreys(this.model);
+        this.recordLoadMetric('ifc_storey_index', storeyStartedAt);
         if (token !== this.loadToken) return;
         this.applyPlanCut();
         this.applyModelLevel();
@@ -2091,13 +2097,14 @@ class RealIfcViewer {
   }
 
   async loadLocalFile(file, projectId) {
+    this.abortPendingIfcLoad();
     const token = ++this.loadToken;
     this.clearSceneModels();
     this.currentKey = '';
     this.planStatus.textContent = `Preparing local preview of ${file.name}…`;
     this.modelStatus.textContent = `Preparing local preview of ${file.name}…`;
     const buffer = await file.arrayBuffer();
-    const model = await this.parseIfcBuffer(buffer, 'Preparing local preview');
+    const model = await this.parseIfcBuffer(buffer, 'Preparing local preview', token);
     if (token !== this.loadToken || selectedProject !== projectId) {
       this.releaseIfcModel(model);
       return;
@@ -2105,12 +2112,16 @@ class RealIfcViewer {
     this.model = model;
     this.modelScene.add(model);
     this.currentKey = `local:${projectId}`;
+    const firstSceneStartedAt = performance.now();
     this.fitToModel(model);
+    this.recordLoadMetric('ifc_first_scene', firstSceneStartedAt, {local_preview: true});
     if (!this.modelBox) {
       this.clear('No 3D geometry found in this IFC.');
       return;
     }
+    const storeyStartedAt = performance.now();
     await this.extractStoreys(model);
+    this.recordLoadMetric('ifc_storey_index', storeyStartedAt, {local_preview: true});
     if (token !== this.loadToken) return;
     this.applyPlanCut();
     this.applyModelLevel();
@@ -2120,15 +2131,37 @@ class RealIfcViewer {
     this.modelMeta.textContent = 'local preview · semantic import running';
   }
 
-  async loadIfcModel(projectId, commit) {
-    const url = `/v1/projects/${encodeURIComponent(projectId)}/ifc/${encodeURIComponent(commit)}`;
-    const response = await fetch(url, {headers});
-    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    return this.parseIfcBuffer(buffer, 'Loading IFC geometry');
+  abortPendingIfcLoad() {
+    if (this.ifcAbortController) this.ifcAbortController.abort();
+    this.ifcAbortController = null;
   }
 
-  async parseIfcBuffer(buffer, progressLabel) {
+  recordLoadMetric(stage, startedAt, detail = {}) {
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    console.info('[vex-performance]', {stage, elapsed_ms: elapsedMs, ...detail});
+    return elapsedMs;
+  }
+
+  async loadIfcModel(projectId, commit, token = this.loadToken) {
+    const url = `/v1/projects/${encodeURIComponent(projectId)}/ifc/${encodeURIComponent(commit)}`;
+    const controller = new AbortController();
+    this.ifcAbortController = controller;
+    const fetchStartedAt = performance.now();
+    this.planStatus.textContent = 'Downloading committed IFC...';
+    this.modelStatus.textContent = 'Downloading committed IFC...';
+    const response = await fetch(url, {headers, signal: controller.signal});
+    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+    const buffer = await response.arrayBuffer();
+    this.recordLoadMetric('ifc_download', fetchStartedAt, {
+      bytes: buffer.byteLength,
+      project_id: projectId,
+      commit
+    });
+    if (token !== this.loadToken) throw new DOMException('IFC load superseded', 'AbortError');
+    return this.parseIfcBuffer(buffer, 'Loading IFC geometry', token);
+  }
+
+  async parseIfcBuffer(buffer, progressLabel, token = this.loadToken) {
     const loader = await this.getIfcLoader();
     // Real progress feedback (not just a static "Loading..." string) so a big
     // model's load time reads as "working, N% of M elements" instead of a
@@ -2143,7 +2176,16 @@ class RealIfcViewer {
     // Yield once so the "Loading IFC geometry..." status paints before the
     // synchronous web-ifc parse takes over the main thread.
     await new Promise(resolve => setTimeout(resolve, 0));
+    if (token !== this.loadToken) throw new DOMException('IFC load superseded', 'AbortError');
+    const parseStartedAt = performance.now();
     const model = await loader.parse(buffer);
+    this.recordLoadMetric('ifc_parse_and_tessellate', parseStartedAt, {
+      bytes: buffer.byteLength
+    });
+    if (token !== this.loadToken) {
+      this.releaseIfcModel(model);
+      throw new DOMException('IFC load superseded', 'AbortError');
+    }
     // web-ifc returns geometry in IFC's Y-up frame (building height runs along
     // world Y); re-orient it onto this viewer's Z-up world so the 3D view stands
     // upright AND the top-down 2D pane reads as a real floor plan, not a side

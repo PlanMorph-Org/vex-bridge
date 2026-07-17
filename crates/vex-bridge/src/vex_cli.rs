@@ -112,6 +112,10 @@ where
 /// commit/hash/snapshot/archive bookkeeping only runs *after* push returns.
 /// Bounding it lets a stalled push fail fast and be queued for retry instead.
 const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Checkout is local but can still be expensive for a large historical model.
+/// Bound it so a corrupted object store or an unexpectedly pathological commit
+/// does not leave a dashboard request holding the repository lock forever.
+const CHECKOUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Engine-binary-missing error shared by [`run`] and [`run_bounded`].
 fn engine_not_found(bin: &str) -> BridgeError {
@@ -339,7 +343,7 @@ pub async fn checkout(bin: &str, dir: &Path, reference: &str, out: &Path) -> Bri
         "-o".into(),
         out.as_os_str().to_os_string(),
     ];
-    let r = run(bin, Some(dir), args).await?;
+    let r = run_bounded(bin, Some(dir), args, CHECKOUT_TIMEOUT).await?;
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }

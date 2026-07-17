@@ -20,6 +20,18 @@ pub mod schema {
     /// Full schema tag emitted by `vex-visual-diff` (e.g. `vex --json changes`).
     pub const VISUAL_DIFF: &str = "vex.visual-diff/1";
 
+    /// Manifest for derived, commit-exact IFC render artifacts.
+    ///
+    /// Render artifacts are a cache of the canonical IFC graph, not a source
+    /// of semantic truth.
+    pub const RENDER_MANIFEST: &str = "vex.render-manifest/1";
+
+    /// Status payload for derived IFC render-artifact generation.
+    pub const RENDER_STATUS: &str = "vex.render-status/1";
+
+    /// Semantic lookup index associated with a render-artifact manifest.
+    pub const RENDER_SEMANTIC_INDEX: &str = "vex.render-semantic-index/1";
+
     /// Split a `name/major` schema tag into `(name, major)`.
     ///
     /// `"vex.visual-diff/1"` → `Some(("vex.visual-diff", 1))`.
@@ -390,6 +402,248 @@ pub struct ProjectChangesResponse {
     pub visual_diff: serde_json::Value,
 }
 
+/// A content-addressed, immutable object served by the render-artifact layer.
+///
+/// `uri` identifies the object endpoint, while `sha256` lets clients verify
+/// that a cached or downloaded object is exactly the artifact named by its
+/// manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderArtifactResource {
+    pub uri: String,
+    pub content_type: String,
+    /// Lowercase hexadecimal SHA-256 of the response body.
+    pub sha256: String,
+    pub byte_length: u64,
+}
+
+/// Axis-aligned bounds in the render coordinate system.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RenderBounds {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+/// One immutable render tile referenced from a [`RenderArtifactManifest`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RenderTileDescriptor {
+    /// Stable manifest-local identifier used by the semantic index.
+    pub tile_id: String,
+    /// Level of detail, where larger values are more detailed.
+    pub lod: u32,
+    pub bounds: RenderBounds,
+    /// Maximum geometric approximation error for this tile, in model units.
+    pub geometric_error: f64,
+    pub artifact: RenderArtifactResource,
+}
+
+/// Immutable semantic lookup data for selection and element-to-tile mapping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderSemanticIndexDescriptor {
+    /// Schema of the index object itself.
+    pub schema: String,
+    /// Number of indexed semantic IFC entities.
+    pub entry_count: u64,
+    pub artifact: RenderArtifactResource,
+}
+
+/// Commit-exact manifest for derived IFC render artifacts.
+///
+/// The manifest only describes derived content. `commit_hash` remains the
+/// authoritative semantic model identity; each referenced object is immutable
+/// and independently integrity-checkable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RenderArtifactManifest {
+    pub schema: String,
+    pub project_id: String,
+    /// Full resolved Vex commit hash used to derive this artifact set.
+    pub commit_hash: String,
+    /// Content-addressed identifier for this manifest revision.
+    pub artifact_id: String,
+    /// RFC3339 time the artifact set was generated.
+    pub generated_at: String,
+    pub tiles: Vec<RenderTileDescriptor>,
+    pub semantic_index: RenderSemanticIndexDescriptor,
+}
+
+/// Lifecycle state of a derived IFC render-artifact build.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum RenderArtifactStatus {
+    /// No derived artifact has been requested or published for this commit.
+    NotRequested,
+    Queued,
+    Building {
+        /// Number of immutable tile objects successfully written so far.
+        completed_tiles: u32,
+        /// Total tiles expected, when the renderer can determine it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_tiles: Option<u32>,
+    },
+    Ready {
+        manifest: RenderArtifactManifest,
+    },
+    Failed {
+        message: String,
+        #[serde(default)]
+        retryable: bool,
+    },
+}
+
+/// Versioned response envelope for render-artifact status endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RenderArtifactStatusResponse {
+    pub schema: String,
+    pub project_id: String,
+    pub commit_hash: String,
+    #[serde(flatten)]
+    pub status: RenderArtifactStatus,
+}
+
+/// Validation failure for a render-artifact manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderArtifactValidationError {
+    IncompatibleSchema {
+        field: &'static str,
+        expected: &'static str,
+        actual: String,
+    },
+    MissingField(&'static str),
+    DuplicateTileId(String),
+    InvalidSha256 {
+        resource: String,
+    },
+    InvalidBounds {
+        tile_id: String,
+    },
+    InvalidGeometricError {
+        tile_id: String,
+    },
+}
+
+impl std::fmt::Display for RenderArtifactValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompatibleSchema {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{field} schema {actual:?} is not compatible with {expected:?}"
+            ),
+            Self::MissingField(field) => write!(f, "{field} must not be empty"),
+            Self::DuplicateTileId(tile_id) => write!(f, "tile_id {tile_id:?} is duplicated"),
+            Self::InvalidSha256 { resource } => {
+                write!(f, "resource {resource:?} does not have a lowercase SHA-256")
+            }
+            Self::InvalidBounds { tile_id } => write!(f, "tile {tile_id:?} has invalid bounds"),
+            Self::InvalidGeometricError { tile_id } => {
+                write!(f, "tile {tile_id:?} has an invalid geometric error")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RenderArtifactValidationError {}
+
+impl RenderArtifactManifest {
+    /// Reject malformed manifests before caching or serving their immutable
+    /// artifacts. This deliberately validates the envelope, not remote bytes.
+    pub fn validate(&self) -> Result<(), RenderArtifactValidationError> {
+        validate_schema("manifest", &self.schema, schema::RENDER_MANIFEST)?;
+        validate_non_empty("project_id", &self.project_id)?;
+        validate_non_empty("commit_hash", &self.commit_hash)?;
+        validate_non_empty("artifact_id", &self.artifact_id)?;
+        validate_non_empty("generated_at", &self.generated_at)?;
+        validate_schema(
+            "semantic_index",
+            &self.semantic_index.schema,
+            schema::RENDER_SEMANTIC_INDEX,
+        )?;
+        validate_resource("semantic_index", &self.semantic_index.artifact)?;
+
+        let mut tile_ids = std::collections::HashSet::with_capacity(self.tiles.len());
+        for tile in &self.tiles {
+            validate_non_empty("tile_id", &tile.tile_id)?;
+            if !tile_ids.insert(&tile.tile_id) {
+                return Err(RenderArtifactValidationError::DuplicateTileId(
+                    tile.tile_id.clone(),
+                ));
+            }
+            if !tile.geometric_error.is_finite() || tile.geometric_error < 0.0 {
+                return Err(RenderArtifactValidationError::InvalidGeometricError {
+                    tile_id: tile.tile_id.clone(),
+                });
+            }
+            if !tile
+                .bounds
+                .min
+                .iter()
+                .chain(tile.bounds.max.iter())
+                .all(|v| v.is_finite())
+                || tile
+                    .bounds
+                    .min
+                    .iter()
+                    .zip(tile.bounds.max.iter())
+                    .any(|(min, max)| min > max)
+            {
+                return Err(RenderArtifactValidationError::InvalidBounds {
+                    tile_id: tile.tile_id.clone(),
+                });
+            }
+            validate_resource(&format!("tile:{}", tile.tile_id), &tile.artifact)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_schema(
+    field: &'static str,
+    actual: &str,
+    expected: &'static str,
+) -> Result<(), RenderArtifactValidationError> {
+    if schema::is_compatible(actual, expected) {
+        Ok(())
+    } else {
+        Err(RenderArtifactValidationError::IncompatibleSchema {
+            field,
+            expected,
+            actual: actual.to_string(),
+        })
+    }
+}
+
+fn validate_non_empty(
+    field: &'static str,
+    value: &str,
+) -> Result<(), RenderArtifactValidationError> {
+    if value.trim().is_empty() {
+        Err(RenderArtifactValidationError::MissingField(field))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_resource(
+    label: &str,
+    resource: &RenderArtifactResource,
+) -> Result<(), RenderArtifactValidationError> {
+    validate_non_empty("resource.uri", &resource.uri)?;
+    validate_non_empty("resource.content_type", &resource.content_type)?;
+    if resource.sha256.len() != 64
+        || !resource
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RenderArtifactValidationError::InvalidSha256 {
+            resource: label.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// `DELETE /v1/projects/:project_id` — remove a watched project from Vex
 /// Desktop and stop its watcher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,4 +744,98 @@ pub struct ApiError {
     /// Per-response id to correlate UI failures with daemon logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn resource(uri: &str) -> RenderArtifactResource {
+        RenderArtifactResource {
+            uri: uri.to_string(),
+            content_type: "application/vnd.vex.render-tile".to_string(),
+            sha256: "a".repeat(64),
+            byte_length: 42,
+        }
+    }
+
+    fn manifest() -> RenderArtifactManifest {
+        RenderArtifactManifest {
+            schema: schema::RENDER_MANIFEST.to_string(),
+            project_id: "project-123".to_string(),
+            commit_hash: "e".repeat(64),
+            artifact_id: "render-abc".to_string(),
+            generated_at: "2026-07-17T13:38:07Z".to_string(),
+            tiles: vec![RenderTileDescriptor {
+                tile_id: "0/0/0".to_string(),
+                lod: 0,
+                bounds: RenderBounds {
+                    min: [0.0, 0.0, 0.0],
+                    max: [10.0, 5.0, 3.0],
+                },
+                geometric_error: 0.0,
+                artifact: resource("/v1/render-artifacts/render-abc/tiles/0-0-0"),
+            }],
+            semantic_index: RenderSemanticIndexDescriptor {
+                schema: schema::RENDER_SEMANTIC_INDEX.to_string(),
+                entry_count: 1,
+                artifact: resource("/v1/render-artifacts/render-abc/semantic-index"),
+            },
+        }
+    }
+
+    #[test]
+    fn render_status_uses_a_snake_case_status_tag() {
+        let status = RenderArtifactStatus::Building {
+            completed_tiles: 3,
+            total_tiles: Some(8),
+        };
+
+        let value = serde_json::to_value(&status).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "status": "building",
+                "completed_tiles": 3,
+                "total_tiles": 8,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<RenderArtifactStatus>(value).unwrap(),
+            status
+        );
+    }
+
+    #[test]
+    fn render_manifest_validates_immutable_tile_descriptors() {
+        let manifest = manifest();
+
+        assert!(manifest.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&manifest).unwrap()["schema"],
+            schema::RENDER_MANIFEST
+        );
+    }
+
+    #[test]
+    fn render_manifest_rejects_duplicate_tiles_and_incompatible_index_schema() {
+        let mut duplicate = manifest();
+        duplicate.tiles.push(duplicate.tiles[0].clone());
+        assert!(matches!(
+            duplicate.validate(),
+            Err(RenderArtifactValidationError::DuplicateTileId(tile_id)) if tile_id == "0/0/0"
+        ));
+
+        let mut incompatible_index = manifest();
+        incompatible_index.semantic_index.schema = "vex.render-semantic-index/2".to_string();
+        assert!(matches!(
+            incompatible_index.validate(),
+            Err(RenderArtifactValidationError::IncompatibleSchema {
+                field: "semantic_index",
+                ..
+            })
+        ));
+    }
 }

@@ -78,7 +78,14 @@ plugins/
 docs/
   adding-a-cad.md        ← how to add a new CAD adapter
   early-access-distribution.md ← direct GitHub Release distribution plan
+  ifc-geometry-pipeline.md ← IFC semantic import, rendering, and artifact design
 ```
+
+## IFC rendering performance
+
+See [the IFC geometry pipeline](docs/ifc-geometry-pipeline.md) for the
+semantic import/render split, performance instrumentation, and the validated
+derived render-artifact contract used by future progressive tile workers.
 
 ## Local API (v1)
 

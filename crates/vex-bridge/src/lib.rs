@@ -20,6 +20,7 @@ pub mod ifc;
 pub mod keychain;
 pub mod pairing;
 pub mod pipeline;
+pub mod render_artifact;
 pub mod server;
 pub mod state;
 #[cfg(feature = "tray")]
