@@ -202,6 +202,16 @@ pub async fn import_file(bin: &str, dir: &Path, file: &Path) -> BridgeResult<Str
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }
     let value: serde_json::Value = serde_json::from_str(&r.stdout)?;
+    if let Some(timings) = value.get("timings_ms") {
+        tracing::info!(
+            nodes = value.get("nodes").and_then(serde_json::Value::as_u64),
+            edges = value.get("edges").and_then(serde_json::Value::as_u64),
+            parse_ms = timings.get("parse").and_then(serde_json::Value::as_u64),
+            persist_ms = timings.get("persist").and_then(serde_json::Value::as_u64),
+            total_ms = timings.get("total").and_then(serde_json::Value::as_u64),
+            "vex IFC import timings"
+        );
+    }
     value
         .get("tree")
         .and_then(|v| v.as_str())

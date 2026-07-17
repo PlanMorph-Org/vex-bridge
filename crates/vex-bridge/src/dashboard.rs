@@ -1222,16 +1222,21 @@ async function onAddIfcInput(event) {
     return;
   }
   const project = selectedProject;
+  const importStartedAt = Math.floor(Date.now() / 1000);
   els.addIfcButton.disabled = true;
   const previousLabel = els.addIfcButton.textContent;
   els.addIfcButton.textContent = 'Adding…';
-  els.topStatus.textContent = `Adding ${file.name}…`;
+  els.topStatus.textContent = `Preparing ${file.name} preview…`;
   try {
-    const response = await fetch(`/v1/projects/${encodeURIComponent(project)}/inbox`, {
+    const previewPromise = ifcViewer
+      ? ifcViewer.loadLocalFile(file, project).then(() => null, error => error)
+      : Promise.resolve(null);
+    const uploadPromise = fetch(`/v1/projects/${encodeURIComponent(project)}/inbox`, {
       method: 'POST',
       headers: {'X-Vex-Bridge-Token': TOKEN, 'X-Vex-Filename': file.name, 'Content-Type': 'application/octet-stream'},
       body: file
     });
+    const response = await uploadPromise;
     if (!response.ok) {
       let detail = `HTTP ${response.status}`;
       try { const body = await response.json(); if (body && (body.message || body.error)) detail = body.message || body.error; } catch (_) {}
@@ -1246,16 +1251,51 @@ async function onAddIfcInput(event) {
       throw new Error(detail);
     }
     const result = await response.json();
-    els.topStatus.textContent = `Added ${result.file_name} — importing…`;
-    // The watcher debounces ~2s before importing; refresh shortly after so the
-    // new commit shows up in the history without the user clicking Refresh.
-    setTimeout(() => { if (selectedProject === project) reloadSelectedProject(); }, 3500);
+    const previewError = await previewPromise;
+    els.topStatus.textContent = previewError
+      ? `Uploaded ${result.file_name}; semantic import is running. Preview failed: ${previewError.message}`
+      : `Preview ready — importing ${result.file_name} in the background…`;
+    trackImportCompletion(project, result.file_name, importStartedAt).catch(error => {
+      if (selectedProject === project) els.topStatus.textContent = `Import tracking failed: ${error.message}`;
+    });
   } catch (error) {
     els.topStatus.textContent = `Add IFC failed: ${error.message}`;
   } finally {
     input.value = '';
     els.addIfcButton.textContent = previousLabel;
     els.addIfcButton.disabled = !selectedProject;
+  }
+}
+
+async function trackImportCompletion(projectId, fileName, startedAt) {
+  const terminalKinds = new Set(['commit_created', 'duplicate_skipped', 'route_skipped', 'no_changes', 'error']);
+  const deadline = Date.now() + (2 * 60 * 60 * 1000);
+  while (Date.now() < deadline) {
+    const activity = await api('/v1/activity/recent?limit=50', {headers});
+    const event = (activity.events || []).find(item =>
+      item.project_id === projectId
+      && item.caught_at_unix >= startedAt
+      && (!item.source_path || item.source_path.toLowerCase().endsWith(fileName.toLowerCase()))
+      && terminalKinds.has(item.kind));
+    if (event) {
+      if (selectedProject === projectId) {
+        if (event.kind === 'commit_created') {
+          els.topStatus.textContent = `Imported ${fileName} — loading semantic changes…`;
+          await reloadSelectedProject();
+          await refresh({reloadSelected: false});
+          els.topStatus.textContent = `Ready — ${fileName} committed`;
+        } else if (event.kind === 'error') {
+          els.topStatus.textContent = `Import failed: ${event.detail || event.message}`;
+        } else {
+          els.topStatus.textContent = event.message || `Import finished: ${event.kind}`;
+        }
+      }
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  if (selectedProject === projectId) {
+    els.topStatus.textContent = `Import is still running. The local preview remains available.`;
   }
 }
 
@@ -1982,6 +2022,7 @@ class RealIfcViewer {
     const key = `${projectId}:${latestCommit}`;
     const token = ++this.loadToken;
     try {
+      if (this.currentKey === `local:${projectId}`) this.currentKey = key;
       if (this.currentKey !== key) {
         this.clearSceneModels();
         this.planStatus.textContent = 'Loading IFC geometry...';
@@ -2049,11 +2090,45 @@ class RealIfcViewer {
     return loader;
   }
 
+  async loadLocalFile(file, projectId) {
+    const token = ++this.loadToken;
+    this.clearSceneModels();
+    this.currentKey = '';
+    this.planStatus.textContent = `Preparing local preview of ${file.name}…`;
+    this.modelStatus.textContent = `Preparing local preview of ${file.name}…`;
+    const buffer = await file.arrayBuffer();
+    const model = await this.parseIfcBuffer(buffer, 'Preparing local preview');
+    if (token !== this.loadToken || selectedProject !== projectId) {
+      this.releaseIfcModel(model);
+      return;
+    }
+    this.model = model;
+    this.modelScene.add(model);
+    this.currentKey = `local:${projectId}`;
+    this.fitToModel(model);
+    if (!this.modelBox) {
+      this.clear('No 3D geometry found in this IFC.');
+      return;
+    }
+    await this.extractStoreys(model);
+    if (token !== this.loadToken) return;
+    this.applyPlanCut();
+    this.applyModelLevel();
+    this.planStatus.textContent = '';
+    this.modelStatus.textContent = '';
+    this.planMeta.textContent = 'local preview · semantic import running';
+    this.modelMeta.textContent = 'local preview · semantic import running';
+  }
+
   async loadIfcModel(projectId, commit) {
     const url = `/v1/projects/${encodeURIComponent(projectId)}/ifc/${encodeURIComponent(commit)}`;
     const response = await fetch(url, {headers});
     if (!response.ok) throw new Error(`${url} -> ${response.status}`);
     const buffer = await response.arrayBuffer();
+    return this.parseIfcBuffer(buffer, 'Loading IFC geometry');
+  }
+
+  async parseIfcBuffer(buffer, progressLabel) {
     const loader = await this.getIfcLoader();
     // Real progress feedback (not just a static "Loading..." string) so a big
     // model's load time reads as "working, N% of M elements" instead of a
@@ -2061,7 +2136,7 @@ class RealIfcViewer {
     loader.ifcManager.setOnProgress(({loaded, total}) => {
       if (!total) return;
       const pct = Math.min(100, Math.round((loaded / total) * 100));
-      const label = `Loading IFC geometry... ${pct}%`;
+      const label = `${progressLabel}... ${pct}%`;
       this.planStatus.textContent = label;
       this.modelStatus.textContent = label;
     });

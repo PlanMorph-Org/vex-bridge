@@ -71922,15 +71922,11 @@ Log.logLevel = 1;
 
 // dist/web-ifc-api.ts
 var WebIFCWasm;
-if (typeof self !== "undefined" && self.crossOriginIsolated) {
-  try {
-    WebIFCWasm = require_web_ifc_mt();
-  } catch (ex) {
-    WebIFCWasm = require_web_ifc();
-  }
-} else {
-  WebIFCWasm = require_web_ifc();
-}
+// web-ifc 0.0.77's published package does not include the Emscripten pthread
+// helper (`web-ifc-mt.worker.js`). Parsing still runs off the UI thread in
+// this outer IFCWorker; use the complete single-thread WASM build here rather
+// than selecting the incomplete pthread bundle and failing asset requests.
+WebIFCWasm = require_web_ifc();
 var STRING = 1;
 var IfcAPI2 = class {
   constructor() {
@@ -72370,7 +72366,7 @@ class WebIfcWorker {
         this.worker.post(data);
     }
     SetWasmPath(data) {
-        this.webIFC.SetWasmPath(data.args.path);
+		this.webIFC.SetWasmPath(data.args.path, data.args.path.startsWith("/"));
         this.worker.post(data);
     }
     StreamAllMeshes(data) {

@@ -2444,6 +2444,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn viewer_worker_assets_are_embedded() {
+        for path in [
+            "web-ifc-three/IFCWorker.js",
+            "web-ifc/web-ifc.wasm",
+            "web-ifc/web-ifc-mt.wasm",
+        ] {
+            let (bytes, _) = viewer_asset(path).unwrap_or_else(|| panic!("missing {path}"));
+            assert!(!bytes.is_empty(), "empty {path}");
+        }
+    }
+
+    #[test]
     fn hex_lower_formats_bytes() {
         assert_eq!(hex_lower(&[0x00, 0x0f, 0xa3, 0xff]), "000fa3ff");
         assert_eq!(hex_lower(&[]), "");
