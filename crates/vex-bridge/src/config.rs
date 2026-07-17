@@ -150,8 +150,7 @@ fn is_expired_planmorph_host(value: &str, subdomain: &str) -> bool {
     let trimmed = value.trim().trim_end_matches('/');
     matches!(
         trimmed,
-        "https://planmorph.software"
-            | "http://planmorph.software"
+        "https://planmorph.software" | "http://planmorph.software"
     ) || trimmed == format!("https://{subdomain}.planmorph.software")
         || trimmed == format!("http://{subdomain}.planmorph.software")
 }
