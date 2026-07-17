@@ -112,6 +112,9 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchEntry {
     pub project_id: String,
+    /// Architur repository GUID selected as this local folder's push target.
+    #[serde(default)]
+    pub cloud_project_id: Option<String>,
     pub path: String,
     /// File globs to commit. Defaults to "*.ifc".
     #[serde(default = "default_globs")]
@@ -390,6 +393,7 @@ mod tests {
             watch: vec![
                 WatchEntry {
                     project_id: "a".to_string(),
+                    cloud_project_id: None,
                     path: "/tmp/a".to_string(),
                     include: vec!["*.ifc".to_string()],
                     ifc_project_guid: None,
@@ -397,6 +401,7 @@ mod tests {
                 },
                 WatchEntry {
                     project_id: "b".to_string(),
+                    cloud_project_id: None,
                     path: "/tmp/b".to_string(),
                     include: vec!["*.ifc".to_string()],
                     ifc_project_guid: Some("guid".to_string()),

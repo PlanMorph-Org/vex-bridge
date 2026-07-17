@@ -781,6 +781,7 @@ pub async fn run_manual_push(
     state: &Arc<RwLock<State>>,
     paths: &Paths,
     project_id: &str,
+    cloud_project_id: &str,
     branch: &str,
 ) -> BridgeResult<String> {
     let entry = cfg
@@ -800,46 +801,21 @@ pub async fn run_manual_push(
         std::fs::create_dir_all(&dir)?;
     }
 
-    ensure_repo_initialized(&cfg.vex_bin, &dir, &cfg.vex_serve_host, project_id).await?;
+    ensure_repo_initialized(&cfg.vex_bin, &dir, &cfg.vex_serve_host, cloud_project_id).await?;
+    set_origin_remote(&cfg.vex_bin, &dir, &cfg.vex_serve_host, cloud_project_id).await?;
 
-    let scan_dir = dir.clone();
-    let ifc_file = tokio::task::spawn_blocking(move || latest_ifc_file(&scan_dir))
+    let commit_hash = state
+        .read()
         .await
-        .map_err(join_error)??
+        .pending_push
+        .iter()
+        .find(|pending| pending.project_id == project_id)
+        .map(|pending| pending.commit_hash.clone())
         .ok_or_else(|| {
-            crate::errors::BridgeError::Config(format!(
-                "no IFC file found under configured project directory `{}`",
-                dir.display()
-            ))
+            crate::errors::BridgeError::Config(
+                "this project has no commits ready to push".to_string(),
+            )
         })?;
-    let _tree = vex_cli::import_file(&cfg.vex_bin, &dir, &ifc_file).await?;
-
-    let msg = format!(
-        "manual push via vex-bridge ({})",
-        ifc_file
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(project_id)
-    );
-    let author = match (
-        cfg.default_author_name.as_deref(),
-        cfg.default_author_email.as_deref(),
-    ) {
-        (Some(n), Some(e)) => Some((n, e)),
-        _ => None,
-    };
-    let commit_hash = match vex_cli::commit(&cfg.vex_bin, &dir, &msg, author).await {
-        Ok(h) => h,
-        Err(e) => {
-            let s = e.to_string();
-            // "nothing to commit" is OK — push whatever HEAD is.
-            if !(s.contains("nothing to commit") || s.contains("no changes")) {
-                return Err(e);
-            }
-            // Best-effort head hash; if we can't get it just use a marker.
-            "HEAD".to_string()
-        }
-    };
 
     let refspec = format!("refs/heads/{branch}");
     vex_cli::push(&cfg.vex_bin, &dir, "origin", &refspec).await?;
@@ -865,37 +841,33 @@ pub async fn run_manual_push(
     Ok(commit_hash)
 }
 
-fn latest_ifc_file(dir: &Path) -> BridgeResult<Option<PathBuf>> {
-    fn visit(dir: &Path, best: &mut Option<(PathBuf, std::time::SystemTime)>) -> BridgeResult<()> {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path
-                .components()
-                .any(|component| matches!(component, Component::Normal(name) if name == ".vex"))
-            {
-                continue;
-            }
-            let meta = entry.metadata()?;
-            if meta.is_dir() {
-                visit(&path, best)?;
-                continue;
-            }
-            if !is_ifc_candidate(&path) {
-                continue;
-            }
-            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            match best {
-                Some((_, current)) if *current >= modified => {}
-                _ => *best = Some((path, modified)),
-            }
-        }
-        Ok(())
+async fn set_origin_remote(
+    bin: &str,
+    dir: &Path,
+    vex_serve_host: &str,
+    cloud_project_id: &str,
+) -> BridgeResult<()> {
+    let remote_url = build_remote_url(vex_serve_host, cloud_project_id).ok_or_else(|| {
+        crate::errors::BridgeError::Config("vex_serve_host is not configured".to_string())
+    })?;
+    let removed = vex_cli::run(bin, Some(dir), ["remote", "remove", "origin"]).await?;
+    if !removed.ok() && !removed.stderr.contains("no such remote") {
+        return Err(crate::errors::BridgeError::VexCli(
+            removed.stderr.trim().to_string(),
+        ));
     }
-
-    let mut best = None;
-    visit(dir, &mut best)?;
-    Ok(best.map(|(path, _)| path))
+    let added = vex_cli::run(
+        bin,
+        Some(dir),
+        ["remote", "add", "origin", remote_url.as_str()],
+    )
+    .await?;
+    if !added.ok() {
+        return Err(crate::errors::BridgeError::VexCli(
+            added.stderr.trim().to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn short_hash(hash: &str) -> &str {

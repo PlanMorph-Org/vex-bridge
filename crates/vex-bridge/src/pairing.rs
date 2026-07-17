@@ -2,7 +2,7 @@
 //! generated SSH key into a registered `UserSshKey` for the logged-in user.
 
 use base64::Engine;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -54,6 +54,64 @@ pub struct PairingOutcome {
     pub pair_url: String,
     pub expires_at: String,
     pub key_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudProjectResponse {
+    id: String,
+    owner_slug: String,
+    owner_name: String,
+    slug: String,
+    full_name: String,
+    default_branch: String,
+    has_commits: bool,
+}
+
+pub async fn projects(
+    cfg: &Config,
+    key_id: &str,
+) -> BridgeResult<Vec<vex_bridge_protocol::CloudProject>> {
+    let signing = keychain::load()?.ok_or(BridgeError::NotPaired)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let message = format!("GET\n/api/device-pairing/projects\n{timestamp}");
+    let signature = base64::engine::general_purpose::STANDARD
+        .encode(signing.sign(message.as_bytes()).to_bytes());
+    let url = format!(
+        "{}/api/device-pairing/projects",
+        cfg.api_base.trim_end_matches('/')
+    );
+    let response = reqwest::Client::new()
+        .get(url)
+        .header("X-Vex-Key-Id", key_id)
+        .header("X-Vex-Timestamp", timestamp)
+        .header("X-Vex-Signature", signature)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(BridgeError::UpstreamApi(format!(
+            "{}: {}",
+            response.status(),
+            response.text().await.unwrap_or_default().trim()
+        )));
+    }
+    Ok(response
+        .json::<Vec<CloudProjectResponse>>()
+        .await?
+        .into_iter()
+        .map(|project| vex_bridge_protocol::CloudProject {
+            id: project.id,
+            owner_slug: project.owner_slug,
+            owner_name: project.owner_name,
+            slug: project.slug,
+            full_name: project.full_name,
+            default_branch: project.default_branch,
+            has_commits: project.has_commits,
+        })
+        .collect())
 }
 
 /// Generate a new key (or reuse the existing one), POST to

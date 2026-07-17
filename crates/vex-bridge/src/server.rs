@@ -105,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/setup/inbox", post(handle_setup_inbox))
         .route("/v1/watch/status", get(handle_watch_status))
         .route("/v1/activity/recent", get(handle_recent_activity))
+        .route("/v1/cloud/projects", get(handle_cloud_projects))
         .route("/v1/projects", get(handle_projects))
         .route(
             "/v1/projects/:project_id/history",
@@ -865,6 +866,30 @@ async fn handle_pair_status(
     Ok(Json(pair_status_from_state(&daemon_state)))
 }
 
+async fn handle_cloud_projects(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<proto::CloudProject>>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let cfg = state.config.read().await.clone();
+    let key_id = {
+        let daemon_state = state.state.read().await;
+        match &daemon_state.pairing {
+            PairingState::Paired { key_id, .. } => key_id.clone(),
+            _ => {
+                return Err(err_response(
+                    StatusCode::UNAUTHORIZED,
+                    BridgeError::NotPaired,
+                ))
+            }
+        }
+    };
+    pairing::projects(&cfg, &key_id)
+        .await
+        .map(Json)
+        .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))
+}
+
 fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
     match &state.pairing {
         PairingState::Unpaired => proto::PairStatus::Unpaired,
@@ -1441,15 +1466,52 @@ async fn handle_repo_push(
     Json(req): Json<proto::PushRequest>,
 ) -> Result<Json<serde_json::Value>, Response> {
     require_token(&headers, &state.access_token)?;
-    let cfg = state.config.read().await.clone();
+    let cloud_project_id = req
+        .cloud_project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            err_response(
+                StatusCode::BAD_REQUEST,
+                BridgeError::Config("select a cloud project before pushing".to_string()),
+            )
+        })?;
+    uuid::Uuid::parse_str(cloud_project_id).map_err(|_| {
+        err_response(
+            StatusCode::BAD_REQUEST,
+            BridgeError::Config("cloud_project_id must be an Architur repository GUID".to_string()),
+        )
+    })?;
+
+    let cfg = {
+        let mut cfg = state.config.write().await;
+        let entry = cfg
+            .watch
+            .iter_mut()
+            .find(|entry| entry.project_id == req.project_id)
+            .ok_or_else(|| unknown_project_response(&req.project_id))?;
+        entry.cloud_project_id = Some(cloud_project_id.to_string());
+        cfg.save(&state.paths)
+            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        cfg.clone()
+    };
     let branch = req.branch.unwrap_or_else(|| "main".to_string());
 
-    match pipeline::run_manual_push(&cfg, &state.state, &state.paths, &req.project_id, &branch)
-        .await
+    match pipeline::run_manual_push(
+        &cfg,
+        &state.state,
+        &state.paths,
+        &req.project_id,
+        cloud_project_id,
+        &branch,
+    )
+    .await
     {
         Ok(commit_hash) => Ok(Json(serde_json::json!({
             "commit_hash": commit_hash,
             "project_id": req.project_id,
+            "cloud_project_id": cloud_project_id,
             "branch": branch,
         }))),
         Err(error) => {
@@ -1516,6 +1578,7 @@ async fn register_watch(
 
     let entry = crate::config::WatchEntry {
         project_id: project_id.clone(),
+        cloud_project_id: None,
         path: local_path.to_string_lossy().to_string(),
         include: include.clone(),
         ifc_project_guid: ifc_project_guid.clone(),
@@ -1543,7 +1606,9 @@ async fn register_watch(
                         existing_path: existing.path.clone(),
                     }
                 } else {
-                    cfg.watch[index] = entry.clone();
+                    let mut updated = entry.clone();
+                    updated.cloud_project_id = existing.cloud_project_id.clone();
+                    cfg.watch[index] = updated;
                     RegisterUpdate::Updated
                 }
             }
@@ -2199,6 +2264,7 @@ fn watch_status_from(
             proto::ProjectSummary {
                 project_id: watch.project_id.clone(),
                 project_name: watch.project_name.clone(),
+                cloud_project_id: watch.cloud_project_id.clone(),
                 local_path: watch.path.clone(),
                 path_exists: Path::new(&watch.path).is_dir(),
                 active: active.contains(&watch.project_id),

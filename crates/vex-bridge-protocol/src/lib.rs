@@ -212,6 +212,21 @@ pub struct CommitResponse {
 pub struct PushRequest {
     pub project_id: String,
     pub branch: Option<String>, // default: current branch
+    /// Architur repository GUID selected as this local project's destination.
+    #[serde(default)]
+    pub cloud_project_id: Option<String>,
+}
+
+/// Cloud repository available to the paired account for desktop pushes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudProject {
+    pub id: String,
+    pub owner_slug: String,
+    pub owner_name: String,
+    pub slug: String,
+    pub full_name: String,
+    pub default_branch: String,
+    pub has_commits: bool,
 }
 
 /// `POST /v1/repo/register` — tell the daemon which local directory backs
@@ -333,6 +348,9 @@ pub struct ProjectSummary {
     /// show "N ready to push" per project.
     #[serde(default)]
     pub pending_push_count: usize,
+    /// Architur repository GUID chosen independently from the local project id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_project_id: Option<String>,
 }
 
 /// `GET /v1/projects/:project_id/history` — commit list for dashboard history.

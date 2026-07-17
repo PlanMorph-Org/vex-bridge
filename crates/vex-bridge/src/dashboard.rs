@@ -33,7 +33,7 @@ body {
   color: var(--text);
   font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
-button, input {
+button, input, select {
   font: inherit;
 }
 button {
@@ -338,6 +338,19 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
   border-radius: 6px;
   padding: 8px 9px;
 }
+.field select {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #121414;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 9px;
+}
+.push-preview { display: grid; gap: 10px; padding: 0 14px 14px; }
+.preview-grid { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 7px 12px; }
+.preview-grid .label { color: var(--muted); }
+.preview-grid .value { min-width: 0; overflow-wrap: anywhere; }
+.preview-warning { padding: 8px 10px; border: 1px solid rgba(217,154,43,.45); color: #f0c06a; background: rgba(217,154,43,.08); border-radius: 6px; }
 .viewer-toolbar {
   position: absolute;
   top: 44px;
@@ -570,6 +583,14 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     <div class="modal-actions"><button type="button" id="cancelDelete">Cancel</button><button class="primary" type="submit">Delete</button></div>
   </form>
 </div>
+<div class="setup" id="pushPanel">
+  <div class="panel-head"><div class="panel-title">Review Push</div><button id="closePush" type="button">Close</button></div>
+  <form id="pushForm">
+    <div class="field"><label for="cloudProject">Cloud Project</label><select id="cloudProject" required><option value="">Loading projects…</option></select></div>
+    <div class="push-preview" id="pushPreview"><div class="row-meta">Loading preview…</div></div>
+    <div class="modal-actions"><button type="button" id="cancelPush">Cancel</button><button class="primary" id="confirmPush" type="submit">Push</button></div>
+  </form>
+</div>
 <script type="importmap">
 {
   "imports": {
@@ -596,6 +617,7 @@ let lastSetup = null;
 let currentViewMode = 'full';
 let pairPollTimer = null;
 let pendingDeleteProject = null;
+let cloudProjects = [];
 const urlParams = new URLSearchParams(window.location.search);
 const requestedProject = urlParams.get('project');
 const requestedCommit = urlParams.get('commit');
@@ -614,6 +636,9 @@ const els = {
   pairButton: document.getElementById('pairButton'), syncButton: document.getElementById('syncButton'),
   setupPanel: document.getElementById('setupPanel'), setupForm: document.getElementById('setupForm'),
   deletePanel: document.getElementById('deletePanel'), deleteForm: document.getElementById('deleteForm'),
+  pushPanel: document.getElementById('pushPanel'), pushForm: document.getElementById('pushForm'),
+  cloudProject: document.getElementById('cloudProject'), pushPreview: document.getElementById('pushPreview'),
+  confirmPush: document.getElementById('confirmPush'),
   deleteProjectText: document.getElementById('deleteProjectText'),
   inboxHint: document.getElementById('inboxHint'), viewToggle: document.getElementById('viewToggle'),
   dimToggle: document.getElementById('dimToggle'), viewGrid: document.getElementById('viewGrid'),
@@ -650,15 +675,19 @@ document.getElementById('setupButton').addEventListener('click', () => {
   els.setupPanel.classList.add('open');
 });
 els.pairButton.addEventListener('click', startOrPollPairing);
-els.syncButton.addEventListener('click', pushSelectedProject);
+els.syncButton.addEventListener('click', openPushPanel);
 els.addIfcButton.addEventListener('click', () => { if (selectedProject) els.addIfcInput.click(); });
 if (els.sbDiag) els.sbDiag.addEventListener('click', copyDiagnostics);
 if (els.sbRepair) els.sbRepair.addEventListener('click', repairDaemon);els.addIfcInput.addEventListener('change', onAddIfcInput);
 document.getElementById('closeSetup').addEventListener('click', () => els.setupPanel.classList.remove('open'));
 document.getElementById('closeDelete').addEventListener('click', closeDeletePanel);
 document.getElementById('cancelDelete').addEventListener('click', closeDeletePanel);
+document.getElementById('closePush').addEventListener('click', closePushPanel);
+document.getElementById('cancelPush').addEventListener('click', closePushPanel);
 els.setupForm.addEventListener('submit', saveInbox);
 els.deleteForm.addEventListener('submit', deleteProject);
+els.pushForm.addEventListener('submit', pushSelectedProject);
+els.cloudProject.addEventListener('change', renderPushPreview);
 els.viewToggle.addEventListener('click', event => {
   const button = event.target.closest('button[data-mode]');
   if (!button) return;
@@ -1078,22 +1107,91 @@ async function pollPairing() {
   }
 }
 
-async function pushSelectedProject() {
+async function openPushPanel() {
   if (!selectedProject) return;
+  els.pushPanel.classList.add('open');
+  els.confirmPush.disabled = true;
+  els.cloudProject.innerHTML = '<option value="">Loading projects…</option>';
+  els.pushPreview.innerHTML = '<div class="row-meta">Loading preview…</div>';
+  try {
+    const [projects, changes] = await Promise.all([
+      api('/v1/cloud/projects', {headers}),
+      api(`/v1/projects/${encodeURIComponent(selectedProject)}/changes`, {headers})
+    ]);
+    cloudProjects = projects || [];
+    const local = currentLocalProject();
+    els.cloudProject.innerHTML = '<option value="">Select a cloud project…</option>';
+    for (const project of cloudProjects) {
+      const option = document.createElement('option');
+      option.value = project.id;
+      option.textContent = `${project.full_name}${project.has_commits ? ' (contains commits)' : ''}`;
+      els.cloudProject.appendChild(option);
+    }
+    els.cloudProject.value = local && local.cloud_project_id || '';
+    els.pushPanel.dataset.changes = JSON.stringify(changes || {});
+    renderPushPreview();
+  } catch (error) {
+    els.pushPreview.innerHTML = `<div class="preview-warning">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function closePushPanel() {
+  els.pushPanel.classList.remove('open');
+  delete els.pushPanel.dataset.changes;
+}
+
+function currentLocalProject() {
+  return lastSetup && lastSetup.watch && lastSetup.watch.projects.find(project => project.project_id === selectedProject);
+}
+
+function renderPushPreview() {
+  const local = currentLocalProject();
+  const destination = cloudProjects.find(project => project.id === els.cloudProject.value);
+  let changes = {};
+  try { changes = JSON.parse(els.pushPanel.dataset.changes || '{}'); } catch (_) {}
+  const latest = projectCommits[0];
+  const counts = changes.visual_diff && changes.visual_diff.counts || {};
+  const changedCount = ['added', 'removed', 'modified', 'moved', 'renamed']
+    .reduce((total, kind) => total + (Number(counts[kind]) || 0), 0);
+  els.confirmPush.disabled = !destination;
+  els.pushPreview.innerHTML = `<div class="preview-grid">
+    <div class="label">Destination</div><div class="value">${escapeHtml(destination ? destination.full_name : 'Select a project above')}</div>
+    <div class="label">Local folder</div><div class="value">${escapeHtml(local ? local.local_path : '')}</div>
+    <div class="label">Commits</div><div class="value">${local ? local.pending_push_count || 0 : 0} ready to push</div>
+    <div class="label">Latest message</div><div class="value">${escapeHtml(latest ? latest.message : 'No commit found')}</div>
+    <div class="label">Latest commit</div><div class="value">${escapeHtml(latest ? short(latest.commit) : '')}</div>
+    <div class="label">Model changes</div><div class="value">${changedCount} elements (${counts.added || 0} added, ${counts.removed || 0} removed, ${counts.modified || 0} modified, ${counts.moved || 0} moved)</div>
+  </div>${destination && destination.has_commits
+    ? '<div class="preview-warning">This cloud project already contains commits. The push must be compatible with its existing history.</div>'
+    : ''}`;
+}
+
+async function pushSelectedProject(event) {
+  event.preventDefault();
+  if (!selectedProject || !els.cloudProject.value) return;
   els.syncButton.disabled = true;
+  els.confirmPush.disabled = true;
   const previousLabel = els.syncButton.textContent;
   els.syncButton.textContent = 'Pushing…';
   try {
+    const destination = cloudProjects.find(project => project.id === els.cloudProject.value);
     const result = await api('/v1/repo/push', {
-      method: 'POST', headers: jsonHeaders, body: JSON.stringify({project_id: selectedProject, branch: 'main'})
+      method: 'POST', headers: jsonHeaders, body: JSON.stringify({
+        project_id: selectedProject,
+        cloud_project_id: els.cloudProject.value,
+        branch: destination && destination.default_branch || 'main'
+      })
     });
     els.topStatus.textContent = `Pushed ${short(result.commit_hash)}`;
+    closePushPanel();
     // The push cleared the pending ledger; refresh so the badge/count update.
     await refresh();
   } catch (error) {
     els.topStatus.textContent = `Push failed: ${error.message}`;
+    els.pushPreview.insertAdjacentHTML('beforeend', `<div class="preview-warning">${escapeHtml(error.message)}</div>`);
     els.syncButton.textContent = previousLabel;
     els.syncButton.disabled = false;
+    els.confirmPush.disabled = false;
   }
 }
 
