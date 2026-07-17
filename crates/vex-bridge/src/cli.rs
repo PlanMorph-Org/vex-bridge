@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{Config, Paths};
 use crate::device::resolve_device_label;
@@ -193,6 +193,34 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
         // port is the real singleton; this is metadata only.
         crate::daemon_lock::write(&app.paths, port);
         let lock_paths = app.paths.clone();
+
+        // In-memory workers die with the previous daemon. Their durable jobs
+        // were marked retryable before startup; enqueue them only after this
+        // instance has successfully bound its port and is ready to report
+        // progress to the dashboard.
+        let interrupted_render_jobs = {
+            let mut state = app.state.write().await;
+            let jobs = state.interrupt_active_render_artifacts();
+            if !jobs.is_empty() {
+                state.save(app.paths.as_ref())?;
+            }
+            jobs
+        };
+        for (project_id, commit_hash) in interrupted_render_jobs {
+            let Some(watch) = cfg.watch.iter().find(|watch| watch.project_id == project_id) else {
+                warn!(project_id, commit = %commit_hash, "cannot resume render artifact: watched project is no longer configured");
+                continue;
+            };
+            crate::render_worker::queue_after_commit(
+                cfg.node_bin.clone(),
+                cfg.vex_bin.clone(),
+                std::path::PathBuf::from(&watch.path),
+                project_id,
+                commit_hash,
+                app.state.clone(),
+                app.paths.clone(),
+            );
+        }
 
         // Start configured watch → add+commit pipelines. Pushing is
         // user-determined (the dashboard "Push" button), so the pipeline only

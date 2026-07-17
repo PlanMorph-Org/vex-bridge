@@ -26,6 +26,11 @@ pub struct State {
     /// loses a push.
     #[serde(default)]
     pub pending_push: Vec<PendingPush>,
+    /// Derived render jobs are deliberately separate from semantic commits.
+    /// Their state survives daemon restarts so the dashboard can explain why
+    /// it is using the IFC fallback while an artifact is unavailable.
+    #[serde(default)]
+    pub render_artifacts: Vec<RenderArtifactJob>,
 }
 
 /// One queued push awaiting a successful sync. A `vex push` advances the
@@ -72,6 +77,23 @@ pub struct IfcSnapshot {
     #[serde(default)]
     pub ifc_project_guid: Option<String>,
     pub imported_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderArtifactJob {
+    pub project_id: String,
+    pub commit_hash: String,
+    pub status: RenderArtifactJobStatus,
+    pub updated_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum RenderArtifactJobStatus {
+    Queued,
+    Building,
+    Ready,
+    Failed { message: String, retryable: bool },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -282,6 +304,76 @@ impl State {
     pub fn pending_push_count(&self) -> usize {
         self.pending_push.len()
     }
+
+    pub fn set_render_artifact_status(
+        &mut self,
+        project_id: String,
+        commit_hash: String,
+        status: RenderArtifactJobStatus,
+    ) {
+        self.render_artifacts
+            .retain(|job| !(job.project_id == project_id && job.commit_hash == commit_hash));
+        self.render_artifacts.push(RenderArtifactJob {
+            project_id,
+            commit_hash,
+            status,
+            updated_at_unix: now_unix(),
+        });
+        const MAX_RENDER_ARTIFACT_JOBS: usize = 1024;
+        if self.render_artifacts.len() > MAX_RENDER_ARTIFACT_JOBS {
+            let excess = self.render_artifacts.len() - MAX_RENDER_ARTIFACT_JOBS;
+            self.render_artifacts.drain(0..excess);
+        }
+    }
+
+    /// Record a newly requested render job unless equivalent work already has
+    /// a terminal artifact or is currently owned by a worker.
+    pub fn enqueue_render_artifact(&mut self, project_id: String, commit_hash: String) -> bool {
+        if matches!(
+            self.render_artifact_status(&project_id, &commit_hash),
+            Some(
+                RenderArtifactJobStatus::Queued
+                    | RenderArtifactJobStatus::Building
+                    | RenderArtifactJobStatus::Ready
+            )
+        ) {
+            return false;
+        }
+        self.set_render_artifact_status(project_id, commit_hash, RenderArtifactJobStatus::Queued);
+        true
+    }
+
+    /// A process restart terminates in-memory renderer tasks. Record their
+    /// interruption before startup so the daemon can safely enqueue them again.
+    pub fn interrupt_active_render_artifacts(&mut self) -> Vec<(String, String)> {
+        let mut interrupted = Vec::new();
+        for job in &mut self.render_artifacts {
+            if matches!(
+                job.status,
+                RenderArtifactJobStatus::Queued | RenderArtifactJobStatus::Building
+            ) {
+                interrupted.push((job.project_id.clone(), job.commit_hash.clone()));
+                job.status = RenderArtifactJobStatus::Failed {
+                    message: "render worker was interrupted by daemon restart".into(),
+                    retryable: true,
+                };
+                job.updated_at_unix = now_unix();
+            }
+        }
+        interrupted
+    }
+
+    pub fn render_artifact_status(
+        &self,
+        project_id: &str,
+        commit_hash: &str,
+    ) -> Option<RenderArtifactJobStatus> {
+        self.render_artifacts
+            .iter()
+            .rev()
+            .find(|job| job.project_id == project_id && job.commit_hash == commit_hash)
+            .map(|job| job.status.clone())
+    }
 }
 
 pub fn now_unix() -> i64 {
@@ -303,6 +395,64 @@ mod tests {
         .unwrap();
 
         assert!(state.ifc_snapshots.is_empty());
+    }
+
+    #[test]
+    fn render_artifact_enqueue_deduplicates_active_and_ready_jobs() {
+        let mut state = State::default();
+        assert!(state.enqueue_render_artifact("project".into(), "commit".into()));
+        assert!(!state.enqueue_render_artifact("project".into(), "commit".into()));
+
+        state.set_render_artifact_status(
+            "project".into(),
+            "commit".into(),
+            RenderArtifactJobStatus::Ready,
+        );
+        assert!(!state.enqueue_render_artifact("project".into(), "commit".into()));
+
+        state.set_render_artifact_status(
+            "project".into(),
+            "commit".into(),
+            RenderArtifactJobStatus::Failed {
+                message: "temporary".into(),
+                retryable: true,
+            },
+        );
+        assert!(state.enqueue_render_artifact("project".into(), "commit".into()));
+    }
+
+    #[test]
+    fn active_render_jobs_are_recoverable_after_restart() {
+        let mut state = State::default();
+        state.set_render_artifact_status(
+            "project".into(),
+            "queued".into(),
+            RenderArtifactJobStatus::Queued,
+        );
+        state.set_render_artifact_status(
+            "project".into(),
+            "building".into(),
+            RenderArtifactJobStatus::Building,
+        );
+        state.set_render_artifact_status(
+            "project".into(),
+            "ready".into(),
+            RenderArtifactJobStatus::Ready,
+        );
+
+        let interrupted = state.interrupt_active_render_artifacts();
+        assert_eq!(interrupted.len(), 2);
+        assert!(matches!(
+            state.render_artifact_status("project", "queued"),
+            Some(RenderArtifactJobStatus::Failed {
+                retryable: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            state.render_artifact_status("project", "ready"),
+            Some(RenderArtifactJobStatus::Ready)
+        ));
     }
 
     #[test]

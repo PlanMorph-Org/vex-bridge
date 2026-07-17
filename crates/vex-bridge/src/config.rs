@@ -92,6 +92,11 @@ pub struct Config {
     #[serde(default = "default_vex_bin")]
     pub vex_bin: String,
 
+    /// Node.js runtime used by the isolated web-ifc render worker. The worker
+    /// is optional: imports and commits continue normally if it is unavailable.
+    #[serde(default = "default_node_bin")]
+    pub node_bin: String,
+
     /// HTTP listen port for the local daemon. Default 7878 (avoids common dev ports).
     #[serde(default = "default_port")]
     pub port: u16,
@@ -142,6 +147,9 @@ fn default_vex_serve_host() -> String {
 fn default_vex_bin() -> String {
     bundled_vex_bin().unwrap_or_else(|| "vex".into())
 }
+fn default_node_bin() -> String {
+    "node".into()
+}
 fn default_port() -> u16 {
     7878
 }
@@ -189,6 +197,7 @@ impl Default for Config {
             web_base: default_web_base(),
             vex_serve_host: default_vex_serve_host(),
             vex_bin: default_vex_bin(),
+            node_bin: default_node_bin(),
             port: default_port(),
             default_author_name: None,
             default_author_email: None,

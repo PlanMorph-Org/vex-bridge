@@ -261,15 +261,27 @@ expected processing target.
   triangle order or browser-generated buffers.
 - A historical commit can be rendered after the original inbox file has been
   archived because it is reconstructed from committed Vex objects.
-- The current viewer reparses and tessellates each selected model. If loading
-  large historical models becomes a bottleneck, a future optimization could
-  cache derived render artifacts; such artifacts must remain derived data and
-  must not replace the canonical IFC graph as the source of truth.
+- A selected commit uses a validated derived render artifact when available;
+  the raw IFC/web-ifc path remains the fallback while an artifact is queued,
+  failed, or needed for visual-diff overlays.
+- Render artifacts remain derived data and never replace the canonical IFC
+  graph as the source of truth.
 
 ## Derived Render Artifact Foundation
 
-Vex Bridge now has the validated handoff required for a separate tessellation
-worker to publish derived artifacts without affecting a semantic commit.
+Vex Bridge generates a derived artifact asynchronously after a semantic commit
+without affecting that commit. The worker checks out the exact canonical IFC,
+uses the bundled Node-target `web-ifc` 0.0.77 runtime to tessellate it, then
+publishes a validated GLB and semantic index. Node.js must be available as
+`node` or configured through `node_bin`; a missing runtime safely leaves the
+raw IFC fallback available.
+
+The initial worker emits one full-model GLB tile at LOD 0. It preserves
+placement transforms, normals, placement colors, triangle ranges, Express IDs,
+and GlobalIds. The dashboard loads this artifact before it downloads or
+tessellates the raw IFC, and resolves artifact clicks through the semantic
+triangle ranges. Storey-first tiling, LOD generation, and property hydration
+remain follow-up optimizations rather than hidden behavior changes.
 
 ### Current API
 
@@ -277,7 +289,7 @@ For a complete 64-character commit hash, Bridge exposes:
 
 | Endpoint | Meaning |
 | --- | --- |
-| `GET /v1/projects/:id/render/:commit/status` | Returns `not_requested` or a validated `ready` manifest. |
+| `GET /v1/projects/:id/render/:commit/status` | Returns `queued`, `building`, `failed`, `not_requested`, or a validated `ready` manifest. |
 | `GET /v1/projects/:id/render/:commit/manifest` | Returns the validated manifest when an artifact is ready. |
 | `GET /v1/projects/:id/render/:commit/objects/:sha256` | Returns one manifest-declared, SHA-256-verified binary object. |
 
@@ -313,7 +325,7 @@ immutable commit cache. A malformed or interrupted worker cannot publish a
 partial artifact, and no render-generation failure changes the IFC import or
 commit outcome.
 
-The production tessellation worker remains deliberately isolated from this
-contract. It may use web-ifc or a native engine once benchmarked against
-representative models; its output must satisfy this contract and retain the
-GlobalId/Vex identity mapping required for selection and diffs.
+The production worker is deliberately isolated behind this contract. Its
+Node-target web-ifc implementation can be replaced by a native engine after
+profiling representative models, provided replacement output preserves the
+same artifact identity and GlobalId/Vex mappings.

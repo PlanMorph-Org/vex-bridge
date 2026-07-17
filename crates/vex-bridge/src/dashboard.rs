@@ -597,6 +597,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     "three": "/assets/viewer/three/three.module.js",
     "three/examples/jsm/utils/BufferGeometryUtils": "/assets/viewer/three/examples/jsm/utils/BufferGeometryUtils.js",
     "three/examples/jsm/controls/OrbitControls": "/assets/viewer/three/examples/jsm/controls/OrbitControls.js",
+    "three/examples/jsm/loaders/GLTFLoader": "/assets/viewer/three/examples/jsm/loaders/GLTFLoader.js",
     "web-ifc": "/assets/viewer/web-ifc/web-ifc-api.js"
   }
 }
@@ -604,6 +605,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 import { IFCLoader } from '/assets/viewer/web-ifc-three/IFCLoader.js';
 
 const TOKEN = __VEX_TOKEN__;
@@ -1616,8 +1618,14 @@ class RealIfcViewer {
     this.currentKey = '';
     this.loadToken = 0;
     this.ifcAbortController = null;
+    this.artifactAbortController = null;
     this.ifcLoader = null;
+    this.gltfLoader = new GLTFLoader();
     this.model = null;
+    this.modelKind = null;
+    this.artifactManifest = null;
+    this.artifactSemanticIndex = null;
+    this.artifactTilesLoaded = 0;
     this.highlightObjects = [];
     this.removedObjects = [];
     this.planPan = new THREE.Vector2(0, 0);
@@ -1688,7 +1696,7 @@ class RealIfcViewer {
   }
 
   handlePointerUp(event) {
-    if (!this.downAt || !this.model) { this.downAt = null; return; }
+    if (!this.downAt || !this.model || !['ifc', 'artifact'].includes(this.modelKind)) { this.downAt = null; return; }
     const moved = Math.hypot(event.clientX - this.downAt.x, event.clientY - this.downAt.y);
     this.downAt = null;
     if (moved > 5) return;
@@ -1701,14 +1709,70 @@ class RealIfcViewer {
     const hits = this.raycaster.intersectObject(this.model, true);
     const hit = hits.find(item => item.object && item.object.geometry && Number.isFinite(item.faceIndex));
     if (!hit) { this.clearSelection(); return; }
+    if (this.modelKind === 'artifact') {
+      this.selectArtifactElement(hit);
+      return;
+    }
     try {
       const expressId = this.model.getExpressId(hit.object.geometry, hit.faceIndex);
       if (Number.isFinite(expressId)) this.selectElement(expressId);
     } catch (_) { /* ignore picking errors */ }
   }
 
+  selectArtifactElement(hit) {
+    const index = this.artifactSemanticIndex;
+    if (!index || !Array.isArray(index.entries)) return;
+    const entry = index.entries.find(candidate => (candidate.triangle_ranges || []).some(range =>
+      Number.isFinite(range.first_triangle) && Number.isFinite(range.triangle_count)
+      && hit.faceIndex >= range.first_triangle
+      && hit.faceIndex < range.first_triangle + range.triangle_count
+    ));
+    if (!entry) return;
+
+    this.clearSelection();
+    this.selectedId = Number.isFinite(entry.express_id) ? entry.express_id : null;
+    const range = (entry.triangle_ranges || []).find(candidate =>
+      hit.faceIndex >= candidate.first_triangle
+      && hit.faceIndex < candidate.first_triangle + candidate.triangle_count
+    );
+    const source = hit.object.geometry;
+    const sourceIndex = source && source.getIndex && source.getIndex();
+    if (range && sourceIndex) {
+      const start = range.first_triangle * 3;
+      const count = range.triangle_count * 3;
+      const selectionGeometry = new THREE.BufferGeometry();
+      const sourcePositions = source.getAttribute('position');
+      const positions = new Float32Array(count * 3);
+      // Build a compact standalone overlay so disposing a selection never
+      // disposes the GPU buffers shared by its source tile.
+      for (let index = 0; index < count; index += 1) {
+        const vertex = sourceIndex.array[start + index];
+        positions[index * 3] = sourcePositions.getX(vertex);
+        positions[index * 3 + 1] = sourcePositions.getY(vertex);
+        positions[index * 3 + 2] = sourcePositions.getZ(vertex);
+      }
+      selectionGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x4b8fe3,
+        transparent: true,
+        opacity: 0.7,
+        depthTest: false,
+        side: THREE.DoubleSide,
+      });
+      this.selectionSubset = new THREE.Mesh(selectionGeometry, material);
+      this.selectionSubset.userData.vexArtifactSelection = true;
+      this.selectionSubset.renderOrder = 1;
+      this.modelScene.add(this.selectionSubset);
+      this.orientModel(this.selectionSubset);
+    }
+    this.showProperties(
+      entry.global_id ? {GlobalId: {value: entry.global_id}} : null,
+      Number.isFinite(entry.express_id) ? entry.express_id : 'artifact',
+    );
+  }
+
   async selectElement(expressId) {
-    if (!this.model) return;
+    if (!this.model || this.modelKind !== 'ifc') return;
     this.selectedId = expressId;
     if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
     const material = new THREE.MeshLambertMaterial({color: 0x4b8fe3, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide});
@@ -1745,6 +1809,10 @@ class RealIfcViewer {
   clearSelection() {
     this.selectedId = null;
     if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
+    if (this.selectionSubset && this.selectionSubset.userData.vexArtifactSelection) {
+      this.selectionSubset.geometry.dispose();
+      this.selectionSubset.material.dispose();
+    }
     this.selectionSubset = null;
     const panel = document.getElementById('propsPanel');
     if (panel) panel.classList.remove('open');
@@ -2005,6 +2073,8 @@ class RealIfcViewer {
   }
 
   clear(message = '') {
+    this.abortPendingLoads();
+    ++this.loadToken;
     this.clearSceneModels();
     this.currentKey = '';
     this.planStatus.textContent = message;
@@ -2021,48 +2091,286 @@ class RealIfcViewer {
       return;
     }
     const key = `${projectId}:${latestCommit}`;
-    this.abortPendingIfcLoad();
-    const token = ++this.loadToken;
-    try {
-      if (this.currentKey === `local:${projectId}`) this.currentKey = key;
-      if (this.currentKey !== key) {
-        this.clearSceneModels();
-        this.planStatus.textContent = 'Loading IFC geometry...';
-        this.modelStatus.textContent = 'Loading IFC geometry...';
-        const model = await this.loadIfcModel(projectId, latestCommit, token);
-        if (token !== this.loadToken) {
-          this.releaseIfcModel(model);
-          return;
-        }
-        this.model = model;
-        this.modelScene.add(this.model);
-        this.currentKey = key;
-        const firstSceneStartedAt = performance.now();
-        this.fitToModel(this.model);
-        this.recordLoadMetric('ifc_first_scene', firstSceneStartedAt);
-        if (!this.modelBox) {
-          if (token !== this.loadToken) return;
-          this.clear('No 3D geometry found in this commit.');
-          return;
-        }
-        const storeyStartedAt = performance.now();
-        await this.extractStoreys(this.model);
-        this.recordLoadMetric('ifc_storey_index', storeyStartedAt);
-        if (token !== this.loadToken) return;
-        this.applyPlanCut();
-        this.applyModelLevel();
-        this.showOrbitHint();
-      }
+    const requiresIfcDiff = mode === 'changes' && this.hasVisualChanges(changes);
+    if (this.currentKey === key && !(requiresIfcDiff && this.modelKind === 'artifact')) {
+      const token = this.loadToken;
       await this.applyDiff(changes, mode, token);
       if (token !== this.loadToken) return;
-      this.planStatus.textContent = '';
-      this.modelStatus.textContent = '';
-      this.planMeta.textContent = mode === 'changes' ? 'changes only' : 'full model';
-      this.modelMeta.textContent = mode === 'changes' ? 'changes only' : 'full model';
+      this.setModelSourceMeta(mode);
+      return;
+    }
+    this.abortPendingLoads();
+    const token = ++this.loadToken;
+    try {
+      this.clearSceneModels();
+      this.currentKey = '';
+      let artifactUnavailable = '';
+      if (this.isFullCommitHash(latestCommit)) {
+        const artifact = await this.loadRenderArtifact(projectId, latestCommit, token);
+        if (token !== this.loadToken) {
+          if (artifact && artifact.model) this.disposeArtifactObject(artifact.model);
+          return;
+        }
+        if (artifact && artifact.model) {
+          this.model = artifact.model;
+          this.modelKind = 'artifact';
+          this.artifactManifest = artifact.manifest;
+          this.artifactTilesLoaded = 1;
+          this.modelScene.add(this.model);
+          this.orientModel(this.model);
+          this.currentKey = key;
+          this.fitArtifactToManifest(artifact.manifest, this.model);
+          this.applyPlanCut();
+          this.applyModelLevel();
+          this.showOrbitHint();
+          if (!requiresIfcDiff) {
+            this.loadRemainingArtifactTiles(artifact.tiles.slice(1), artifact.model, token);
+            artifact.semanticIndex.then(index => {
+              if (token !== this.loadToken || this.model !== artifact.model) return;
+              this.artifactSemanticIndex = index;
+              this.setModelSourceMeta(mode);
+            }).catch(error => {
+              if (token === this.loadToken && this.model === artifact.model) {
+                this.modelMeta.textContent = `render artifact · semantic index unavailable`;
+                console.warn('Render artifact semantic index unavailable:', error);
+              }
+            });
+            await this.applyDiff(changes, mode, token);
+            if (token !== this.loadToken) return;
+            this.setModelSourceMeta(mode);
+            return;
+          }
+          artifactUnavailable = 'Render artifact loaded; raw IFC fallback is needed for change overlays.';
+          artifact.semanticIndex.catch(() => {});
+          this.abortPendingLoads();
+          this.clearSceneModels();
+        } else {
+          artifactUnavailable = artifact && artifact.reason
+            ? artifact.reason
+            : 'Render artifact unavailable; using raw IFC fallback.';
+        }
+      } else {
+        artifactUnavailable = 'Render artifact skipped because this commit ID is abbreviated; using raw IFC fallback.';
+      }
+      await this.loadIfcFallback(projectId, latestCommit, key, token, artifactUnavailable);
+      await this.applyDiff(changes, mode, token);
+      if (token !== this.loadToken) return;
+      this.setModelSourceMeta(mode);
     } catch (error) {
       if (token !== this.loadToken) return;
-      this.clear(`IFC render failed: ${error.message}`);
+      if (error && error.name === 'AbortError') return;
+      this.clear(`Raw IFC fallback failed: ${error.message}`);
     }
+  }
+
+  isFullCommitHash(value) {
+    return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value);
+  }
+
+  hasVisualChanges(changes) {
+    return ((changes && changes.visual_diff && changes.visual_diff.elements) || [])
+      .some(element => element.kind && element.kind !== 'unchanged');
+  }
+
+  setLoadStatus(message) {
+    this.planStatus.textContent = message;
+    this.modelStatus.textContent = message;
+  }
+
+  setModelSourceMeta(mode) {
+    const suffix = mode === 'changes' ? 'changes only' : 'full model';
+    if (this.modelKind === 'artifact') {
+      const progress = this.artifactManifest && this.artifactManifest.tiles
+        ? `${this.artifactTilesLoaded}/${this.artifactManifest.tiles.length} tiles`
+        : 'coarse tile';
+      this.planStatus.textContent = '';
+      this.modelStatus.textContent = '';
+      this.planMeta.textContent = `render artifact · ${progress}`;
+      this.modelMeta.textContent = `render artifact · ${progress} · ${suffix}`;
+      return;
+    }
+    this.planStatus.textContent = '';
+    this.modelStatus.textContent = '';
+    this.planMeta.textContent = `raw IFC fallback · ${suffix}`;
+    this.modelMeta.textContent = `raw IFC fallback · ${suffix}`;
+  }
+
+  async loadIfcFallback(projectId, commit, key, token, reason) {
+    this.setLoadStatus(reason || 'Loading raw IFC fallback...');
+    const model = await this.loadIfcModel(projectId, commit, token);
+    if (token !== this.loadToken) {
+      this.releaseIfcModel(model);
+      return;
+    }
+    this.model = model;
+    this.modelKind = 'ifc';
+    this.modelScene.add(this.model);
+    this.currentKey = key;
+    const firstSceneStartedAt = performance.now();
+    this.fitToModel(this.model);
+    this.recordLoadMetric('ifc_first_scene', firstSceneStartedAt, {fallback: true});
+    if (!this.modelBox) {
+      if (token !== this.loadToken) return;
+      this.clear('No 3D geometry found in this raw IFC fallback.');
+      return;
+    }
+    const storeyStartedAt = performance.now();
+    await this.extractStoreys(this.model);
+    this.recordLoadMetric('ifc_storey_index', storeyStartedAt, {fallback: true});
+    if (token !== this.loadToken) return;
+    this.applyPlanCut();
+    this.applyModelLevel();
+    this.showOrbitHint();
+  }
+
+  async loadRenderArtifact(projectId, commit, token) {
+    const controller = new AbortController();
+    this.artifactAbortController = controller;
+    const statusUrl = `/v1/projects/${encodeURIComponent(projectId)}/render/${encodeURIComponent(commit)}/status`;
+    this.setLoadStatus('Checking render artifact...');
+    try {
+      const response = await fetch(statusUrl, {headers, signal: controller.signal});
+      if (!response.ok) {
+        return {reason: `Render artifact status unavailable (${response.status}); using raw IFC fallback.`};
+      }
+      const status = await response.json();
+      if (token !== this.loadToken) throw new DOMException('Render artifact load superseded', 'AbortError');
+      if (!status || status.status !== 'ready' || !status.manifest) {
+        return {reason: 'Render artifact unavailable; using raw IFC fallback.'};
+      }
+      const manifest = status.manifest;
+      if (status.commit_hash !== commit || manifest.commit_hash !== commit || manifest.project_id !== projectId) {
+        return {reason: 'Render artifact identity did not match this commit; using raw IFC fallback.'};
+      }
+      const tiles = (manifest.tiles || []).filter(tile =>
+        tile && tile.artifact && /gltf-binary/i.test(tile.artifact.content_type || ''));
+      if (!tiles.length || !manifest.semantic_index || !manifest.semantic_index.artifact) {
+        return {reason: 'Render artifact is incomplete; using raw IFC fallback.'};
+      }
+      tiles.sort((a, b) => (a.lod - b.lod) || (b.geometric_error - a.geometric_error));
+      this.setLoadStatus('Downloading render artifact coarse tile...');
+      const first = await this.loadArtifactTile(tiles[0], controller.signal, token);
+      if (token !== this.loadToken) {
+        this.disposeArtifactObject(first);
+        throw new DOMException('Render artifact load superseded', 'AbortError');
+      }
+      const model = new THREE.Group();
+      model.name = 'Vex render artifact';
+      model.userData.vexArtifact = true;
+      model.add(first);
+      const semanticIndex = this.fetchArtifactSemanticIndex(manifest.semantic_index.artifact, controller.signal);
+      return {model, manifest, tiles, semanticIndex};
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      console.warn('Render artifact load failed; falling back to raw IFC:', error);
+      return {reason: `Render artifact failed; using raw IFC fallback (${error.message || 'load error'}).`};
+    }
+  }
+
+  artifactResourceUrl(resource) {
+    if (!resource || typeof resource.uri !== 'string') throw new Error('missing artifact resource URI');
+    const url = new URL(resource.uri, window.location.origin);
+    if (url.origin !== window.location.origin) throw new Error('artifact resource must use this bridge');
+    return url.href;
+  }
+
+  async fetchArtifactResource(resource, signal) {
+    const url = this.artifactResourceUrl(resource);
+    const response = await fetch(url, {headers, signal});
+    if (!response.ok) throw new Error(`${url} -> ${response.status}`);
+    return response.arrayBuffer();
+  }
+
+  async loadArtifactTile(tile, signal, token) {
+    const startedAt = performance.now();
+    const buffer = await this.fetchArtifactResource(tile.artifact, signal);
+    if (token !== this.loadToken) throw new DOMException('Render artifact load superseded', 'AbortError');
+    const scene = await new Promise((resolve, reject) => {
+      this.gltfLoader.parse(buffer, '', gltf => resolve(gltf.scene || new THREE.Group()), reject);
+    });
+    if (token !== this.loadToken) {
+      this.disposeArtifactObject(scene);
+      throw new DOMException('Render artifact load superseded', 'AbortError');
+    }
+    scene.name = `Artifact tile ${tile.tile_id || tile.lod}`;
+    scene.userData.vexTileId = tile.tile_id;
+    this.recordLoadMetric('artifact_tile_decode', startedAt, {
+      bytes: buffer.byteLength,
+      tile_id: tile.tile_id,
+      lod: tile.lod
+    });
+    return scene;
+  }
+
+  async fetchArtifactSemanticIndex(resource, signal) {
+    const buffer = await this.fetchArtifactResource(resource, signal);
+    const text = new TextDecoder().decode(buffer);
+    return JSON.parse(text);
+  }
+
+  async loadRemainingArtifactTiles(tiles, model, token) {
+    for (const tile of tiles) {
+      try {
+        if (token !== this.loadToken || this.model !== model || !this.artifactAbortController) return;
+        this.setLoadStatus(`Render artifact: loading tile ${this.artifactTilesLoaded + 1}/${this.artifactManifest.tiles.length}...`);
+        const scene = await this.loadArtifactTile(tile, this.artifactAbortController.signal, token);
+        if (token !== this.loadToken || this.model !== model) {
+          this.disposeArtifactObject(scene);
+          return;
+        }
+        model.add(scene);
+        ++this.artifactTilesLoaded;
+        this.setModelSourceMeta(currentViewMode);
+      } catch (error) {
+        if (error && error.name === 'AbortError') return;
+        console.warn('Render artifact tile failed to load:', error);
+        if (token === this.loadToken && this.model === model) {
+          this.modelMeta.textContent = `render artifact · ${this.artifactTilesLoaded} tiles (some unavailable)`;
+        }
+      }
+    }
+    if (token === this.loadToken && this.model === model) {
+      this.setModelSourceMeta(currentViewMode);
+    }
+  }
+
+  fitArtifactToManifest(manifest, model) {
+    const bounds = (manifest && manifest.tiles || []).map(tile => tile.bounds).filter(bounds =>
+      bounds && Array.isArray(bounds.min) && Array.isArray(bounds.max)
+      && bounds.min.length === 3 && bounds.max.length === 3
+      && bounds.min.concat(bounds.max).every(Number.isFinite)
+    );
+    if (bounds.length) {
+      this.modelBox = new THREE.Box3();
+      for (const tile of bounds) {
+        for (const x of [tile.min[0], tile.max[0]]) {
+          for (const y of [tile.min[1], tile.max[1]]) {
+            for (const z of [tile.min[2], tile.max[2]]) {
+              const point = new THREE.Vector3(x, y, z);
+              if (this.upAxisFix) point.applyAxisAngle(new THREE.Vector3(1, 0, 0), this.upAxisFix);
+              this.modelBox.expandByPoint(point);
+            }
+          }
+        }
+      }
+      this.fitToModel(model, this.modelBox);
+      return;
+    }
+    this.fitToModel(model);
+  }
+
+  disposeArtifactObject(object) {
+    if (!object) return;
+    object.traverse(item => {
+      if (item.geometry) item.geometry.dispose();
+      const materials = Array.isArray(item.material) ? item.material : item.material ? [item.material] : [];
+      for (const material of materials) {
+        for (const value of Object.values(material)) {
+          if (value && value.isTexture) value.dispose();
+        }
+        material.dispose();
+      }
+    });
   }
 
   // Re-orient an IFC object from web-ifc's Y-up output onto this viewer's Z-up
@@ -2097,7 +2405,7 @@ class RealIfcViewer {
   }
 
   async loadLocalFile(file, projectId) {
-    this.abortPendingIfcLoad();
+    this.abortPendingLoads();
     const token = ++this.loadToken;
     this.clearSceneModels();
     this.currentKey = '';
@@ -2110,6 +2418,7 @@ class RealIfcViewer {
       return;
     }
     this.model = model;
+    this.modelKind = 'ifc';
     this.modelScene.add(model);
     this.currentKey = `local:${projectId}`;
     const firstSceneStartedAt = performance.now();
@@ -2134,6 +2443,12 @@ class RealIfcViewer {
   abortPendingIfcLoad() {
     if (this.ifcAbortController) this.ifcAbortController.abort();
     this.ifcAbortController = null;
+  }
+
+  abortPendingLoads() {
+    this.abortPendingIfcLoad();
+    if (this.artifactAbortController) this.artifactAbortController.abort();
+    this.artifactAbortController = null;
   }
 
   recordLoadMetric(stage, startedAt, detail = {}) {
@@ -2210,10 +2525,15 @@ class RealIfcViewer {
         closedModels.add(object);
         this.releaseIfcModel(object);
       }
+      if (object && object.userData && object.userData.vexArtifact) this.disposeArtifactObject(object);
       if (object && object.parent) object.parent.remove(object);
     }
     this.model = null;
+    this.modelKind = null;
     this.modelBox = null;
+    this.artifactManifest = null;
+    this.artifactSemanticIndex = null;
+    this.artifactTilesLoaded = 0;
     this.highlightObjects = [];
     this.removedObjects = [];
     this.storeys = [];
@@ -2232,6 +2552,13 @@ class RealIfcViewer {
     }
     this.highlightObjects = [];
     this.removedObjects = [];
+    if (this.modelKind !== 'ifc') {
+      // GLB tiles deliberately render without web-ifc subsets. Switching to
+      // "Changes Only" reloads this commit through the raw IFC fallback.
+      this.setObjectOpacity(this.model, 1);
+      this.model.visible = true;
+      return;
+    }
     const grouped = groupedGlobalIds(changes);
     const hasChanges = Object.values(grouped).some(set => set.size > 0);
     this.setObjectOpacity(this.model, mode === 'changes' ? 0.08 : 1);
@@ -2299,8 +2626,8 @@ class RealIfcViewer {
     });
   }
 
-  fitToModel(model) {
-    const box = new THREE.Box3().setFromObject(model);
+  fitToModel(model, bounds = null) {
+    const box = bounds ? bounds.clone() : new THREE.Box3().setFromObject(model);
     if (box.isEmpty()) return;
     this.modelBox = box;
     const center = box.getCenter(new THREE.Vector3());

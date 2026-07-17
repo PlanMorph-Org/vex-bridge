@@ -43,6 +43,7 @@ pub struct WatchPipeline {
 
 struct PipelineRun {
     bin: String,
+    node_bin: String,
     dir: PathBuf,
     vex_serve_host: String,
     entry: WatchEntry,
@@ -100,6 +101,7 @@ pub fn spawn_entry(
         std::fs::create_dir_all(&dir)?;
     }
     let bin = cfg.vex_bin.clone();
+    let node_bin = cfg.node_bin.clone();
     let vex_serve_host = cfg.vex_serve_host.clone();
     let author_name = cfg.default_author_name.clone();
     let author_email = cfg.default_author_email.clone();
@@ -113,6 +115,7 @@ pub fn spawn_entry(
     let runtime_for_cb = runtime.clone();
     let lock_for_cb = lock.clone();
     let bin_for_cb = bin.clone();
+    let node_bin_for_cb = node_bin.clone();
     let vex_serve_host_for_cb = vex_serve_host.clone();
     let author_name_for_cb = author_name.clone();
     let author_email_for_cb = author_email.clone();
@@ -125,6 +128,7 @@ pub fn spawn_entry(
         let runtime = runtime_for_cb.clone();
         let lock = lock_for_cb.clone();
         let bin = bin_for_cb.clone();
+        let node_bin = node_bin_for_cb.clone();
         let vex_serve_host = vex_serve_host_for_cb.clone();
         let entry = entry_for_cb.clone();
         let project_id = entry.project_id.clone();
@@ -137,6 +141,7 @@ pub fn spawn_entry(
             let _g = lock.lock().await;
             if let Err(e) = run_pipeline(PipelineRun {
                 bin: bin.clone(),
+                node_bin: node_bin.clone(),
                 dir: dir.clone(),
                 vex_serve_host: vex_serve_host.clone(),
                 entry: entry.clone(),
@@ -172,6 +177,7 @@ pub fn spawn_entry(
 
     let scan_lock = lock.clone();
     let scan_bin = cfg.vex_bin.clone();
+    let scan_node_bin = cfg.node_bin.clone();
     let scan_vex_serve_host = cfg.vex_serve_host.clone();
     let scan_entry = entry.clone();
     let scan_dir = dir.clone();
@@ -194,6 +200,7 @@ pub fn spawn_entry(
             }
             if let Err(error) = run_pipeline(PipelineRun {
                 bin: scan_bin.clone(),
+                node_bin: scan_node_bin.clone(),
                 dir: scan_dir.clone(),
                 vex_serve_host: scan_vex_serve_host.clone(),
                 entry: scan_entry.clone(),
@@ -237,6 +244,7 @@ pub fn spawn_entry(
 async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
     let PipelineRun {
         bin,
+        node_bin,
         dir,
         vex_serve_host,
         entry,
@@ -247,6 +255,7 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
         paths,
     } = run;
     let bin = bin.as_str();
+    let node_bin = node_bin.as_str();
     let dir = dir.as_path();
     let vex_serve_host = vex_serve_host.as_str();
     let changed = changed.as_path();
@@ -444,6 +453,18 @@ async fn run_pipeline(run: PipelineRun) -> BridgeResult<()> {
         ));
         state.save(&paths)?;
     }
+    // Geometry artifacts are derived data: build them asynchronously only
+    // after the semantic commit and durable bookkeeping have succeeded. A
+    // renderer failure must never hold up import, commit, archive, or push.
+    crate::render_worker::queue_after_commit(
+        node_bin.to_string(),
+        bin.to_string(),
+        dir.to_path_buf(),
+        entry.project_id.clone(),
+        hash,
+        state.clone(),
+        paths.clone(),
+    );
     Ok(())
 }
 

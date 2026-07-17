@@ -9,10 +9,10 @@
  *   node tools/ifc-render-spike.mjs path\to\model.ifc
  */
 
-import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
 const [input] = process.argv.slice(2);
@@ -22,20 +22,21 @@ if (!input || input === '--help' || input === '-h') {
 }
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const webIfcDir = join(repoRoot, 'crates', 'vex-bridge', 'assets', 'viewer', 'web-ifc');
-const apiSource = join(webIfcDir, 'web-ifc-api.js');
+const webIfcDir = join(repoRoot, 'crates', 'vex-bridge', 'assets', 'render-worker', 'web-ifc');
+const apiSource = join(webIfcDir, 'web-ifc-api-node.js');
 const wasmDir = `${webIfcDir}${process.platform === 'win32' ? '\\' : '/'}`;
-const tempDir = await mkdtemp(join(tmpdir(), 'vex-web-ifc-spike-'));
-const tempModule = join(tempDir, 'web-ifc-api.mjs');
+const require = createRequire(import.meta.url);
+
+function deleteWebIfcObject(value) {
+  if (typeof value?.delete === 'function') value.delete();
+}
 
 let api;
 let modelId;
 try {
-  // The bundled API is browser-oriented `.js`. Copying it to a temporary
-  // `.mjs` file keeps the production bundle unchanged while allowing Node to
-  // import exactly the code shipped by Bridge.
-  await copyFile(apiSource, tempModule);
-  const { IfcAPI } = await import(pathToFileURL(tempModule).href);
+  // The browser API cannot initialize in Node. Use the matching Node-target
+  // web-ifc pair shipped specifically for the isolated artifact worker.
+  const { IfcAPI } = require(apiSource);
   const bytes = new Uint8Array(await readFile(resolve(input)));
   const startedAt = performance.now();
   api = new IfcAPI();
@@ -62,12 +63,12 @@ try {
       vertexCount += vertices.length / 6;
       triangleCount += indices.length / 3;
       placedGeometryCount += 1;
-      geometry.delete();
+      deleteWebIfcObject(geometry);
     }
-    placed.delete();
-    mesh.delete();
+    deleteWebIfcObject(placed);
+    deleteWebIfcObject(mesh);
   }
-  flatMeshes.delete();
+  deleteWebIfcObject(flatMeshes);
   const geometryLoadedAt = performance.now();
 
   let globalIdCount = 0;
@@ -100,7 +101,6 @@ try {
     }
   }));
 } finally {
-  if (api && Number.isInteger(modelId)) api.CloseModel(modelId);
-  if (api?.Dispose) api.Dispose();
-  await rm(tempDir, { recursive: true, force: true });
+  if (api?.wasmModule && Number.isInteger(modelId)) api.CloseModel(modelId);
+  if (api?.wasmModule && api.Dispose) api.Dispose();
 }

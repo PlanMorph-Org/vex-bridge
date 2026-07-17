@@ -398,6 +398,10 @@ fn viewer_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
             include_bytes!("../assets/viewer/three/examples/jsm/controls/OrbitControls.js"),
             "text/javascript; charset=utf-8",
         )),
+        "three/examples/jsm/loaders/GLTFLoader.js" => Some((
+            include_bytes!("../assets/viewer/three/examples/jsm/loaders/GLTFLoader.js"),
+            "text/javascript; charset=utf-8",
+        )),
         "three/LICENSE" => Some((
             include_bytes!("../assets/viewer/three/LICENSE"),
             "text/plain; charset=utf-8",
@@ -1478,7 +1482,31 @@ async fn handle_project_render_status(
     require_full_commit_hash(&commit)?;
     let status = match read_render_manifest(&state, &project_id, &commit).await? {
         Some(manifest) => proto::RenderArtifactStatus::Ready { manifest },
-        None => proto::RenderArtifactStatus::NotRequested,
+        None => match state
+            .state
+            .read()
+            .await
+            .render_artifact_status(&project_id, &commit)
+        {
+            Some(crate::state::RenderArtifactJobStatus::Queued) => {
+                proto::RenderArtifactStatus::Queued
+            }
+            Some(crate::state::RenderArtifactJobStatus::Building) => {
+                proto::RenderArtifactStatus::Building {
+                    completed_tiles: 0,
+                    total_tiles: None,
+                }
+            }
+            Some(crate::state::RenderArtifactJobStatus::Failed { message, retryable }) => {
+                proto::RenderArtifactStatus::Failed { message, retryable }
+            }
+            Some(crate::state::RenderArtifactJobStatus::Ready) => {
+                // A ready state without a validated manifest is never served as
+                // ready. It indicates a cache eviction or interrupted publish.
+                proto::RenderArtifactStatus::NotRequested
+            }
+            None => proto::RenderArtifactStatus::NotRequested,
+        },
     };
     Ok(Json(proto::RenderArtifactStatusResponse {
         schema: proto::schema::RENDER_STATUS.to_string(),
