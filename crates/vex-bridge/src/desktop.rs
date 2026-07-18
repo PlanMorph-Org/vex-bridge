@@ -6,17 +6,14 @@
 //! no extra authentication. All of the existing Three.js / web-ifc viewer code
 //! runs unchanged inside the webview.
 //!
-//! A tiny JS->Rust IPC bridge exposes native capabilities the browser can't
+//! A tiny JS->Rust IPC bridge exposes native capabilities the webview can't
 //! provide — currently a native folder picker (used by the "Add project" flow)
-//! and opening links in the user's real browser (used by account pairing).
-
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+//! and opening account-pairing links in the user's real browser.
 
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tao::window::WindowBuilder;
+use tao::window::{Icon, WindowBuilder};
 use wry::WebViewBuilder;
 
 use crate::config::{Config, Paths};
@@ -37,36 +34,31 @@ pub fn run() -> BridgeResult<()> {
     let paths = Paths::discover()?;
     paths.ensure_dirs()?;
     let cfg = Config::load_or_default(&paths)?;
-    crate::daemon_supervisor::ensure_daemon(&paths, cfg.port);
-    let url = std::env::args()
-        .nth(1)
-        .filter(|value| value.starts_with("http://127.0.0.1:"))
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}/ui", cfg.port));
+    crate::daemon_supervisor::ensure_daemon_ready(&paths, cfg.port)?;
+    let url = dashboard_url(cfg.port, std::env::args().nth(1).as_deref());
     open_desktop_window(&url)
 }
 
 fn open_desktop_window(url: &str) -> BridgeResult<()> {
-    match run_native_window(url) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            tracing::warn!(error = %error, "native webview unavailable; falling back to browser");
-            open_in_browser(url)
-        }
-    }
+    run_native_window(url)
 }
 
 /// Build the native window + webview and run the event loop. On success this
 /// never returns (the event loop drives the app until the window closes and the
 /// process exits). It returns `Err` only when the window/webview cannot be
-/// created, so the caller can fall back to a browser window.
+/// created; desktop startup deliberately never falls back to an external
+/// browser.
 fn run_native_window(url: &str) -> BridgeResult<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    let window_icon = app_icon()?;
 
     let window = WindowBuilder::new()
         .with_title("Vex Atlas")
         .with_inner_size(LogicalSize::new(1280.0, 820.0))
         .with_min_inner_size(LogicalSize::new(960.0, 640.0))
+        .with_resizable(true)
+        .with_window_icon(Some(window_icon))
         .build(&event_loop)
         .map_err(|error| BridgeError::Config(format!("could not create window: {error}")))?;
 
@@ -140,6 +132,37 @@ fn run_native_window(url: &str) -> BridgeResult<()> {
     });
 }
 
+/// Show startup failures even when Windows suppresses the console for the
+/// desktop executable.
+pub fn show_startup_error(message: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Vex Atlas could not start")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+fn app_icon() -> BridgeResult<Icon> {
+    let (rgba, width, height) = crate::desktop_assets::vex_tray_icon_rgba()?;
+    Icon::from_rgba(rgba, width, height)
+        .map_err(|error| BridgeError::Config(format!("could not create application icon: {error}")))
+}
+
+fn dashboard_url(port: u16, requested_url: Option<&str>) -> String {
+    let dashboard = format!("http://127.0.0.1:{port}/ui");
+    requested_url
+        .filter(|url| is_dashboard_url(url, &dashboard))
+        .map(str::to_owned)
+        .unwrap_or(dashboard)
+}
+
+fn is_dashboard_url(url: &str, dashboard: &str) -> bool {
+    url.strip_prefix(dashboard).is_some_and(|suffix| {
+        suffix.is_empty() || suffix.starts_with('?') || suffix.starts_with('#')
+    })
+}
+
 /// Parse a JSON IPC message from the webview and forward it onto the event loop.
 fn handle_ipc(body: &str, proxy: &EventLoopProxy<UserEvent>) {
     let Ok(message) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -165,67 +188,35 @@ fn handle_ipc(body: &str, proxy: &EventLoopProxy<UserEvent>) {
     }
 }
 
-/// Last-resort fallback when no native webview is available: open the UI in the
-/// system browser (app-mode if a Chromium browser is installed).
-fn open_in_browser(url: &str) -> BridgeResult<()> {
-    if try_app_window(url) {
-        return Ok(());
-    }
-    open::that(url).map_err(|error| BridgeError::Config(format!("could not open Vex UI: {error}")))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn try_app_window(url: &str) -> bool {
-    for browser in browser_candidates() {
-        if !browser.is_file() {
-            continue;
+    #[test]
+    fn uses_local_dashboard_by_default() {
+        assert_eq!(dashboard_url(7878, None), "http://127.0.0.1:7878/ui");
+    }
+
+    #[test]
+    fn preserves_local_dashboard_deep_links() {
+        assert_eq!(
+            dashboard_url(
+                7878,
+                Some("http://127.0.0.1:7878/ui?project=example&commit=abc")
+            ),
+            "http://127.0.0.1:7878/ui?project=example&commit=abc"
+        );
+    }
+
+    #[test]
+    fn rejects_non_dashboard_startup_urls() {
+        for url in [
+            "https://example.com",
+            "http://127.0.0.1:7879/ui",
+            "http://127.0.0.1:7878/v1/health",
+            "http://127.0.0.1:7878/ui-not-dashboard",
+        ] {
+            assert_eq!(dashboard_url(7878, Some(url)), "http://127.0.0.1:7878/ui");
         }
-        if Command::new(browser)
-            .arg(format!("--app={url}"))
-            .arg("--new-window")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-        {
-            return true;
-        }
     }
-    false
-}
-
-#[cfg(target_os = "windows")]
-fn browser_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    for root in [
-        std::env::var_os("ProgramFiles"),
-        std::env::var_os("ProgramFiles(x86)"),
-        std::env::var_os("LocalAppData"),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let root = PathBuf::from(root);
-        candidates.push(root.join("Microsoft/Edge/Application/msedge.exe"));
-        candidates.push(root.join("Google/Chrome/Application/chrome.exe"));
-    }
-    candidates
-}
-
-#[cfg(target_os = "macos")]
-fn browser_candidates() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-        PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-    ]
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn browser_candidates() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from("/usr/bin/microsoft-edge"),
-        PathBuf::from("/usr/bin/google-chrome"),
-        PathBuf::from("/usr/bin/chromium"),
-        PathBuf::from("/usr/bin/chromium-browser"),
-    ]
 }

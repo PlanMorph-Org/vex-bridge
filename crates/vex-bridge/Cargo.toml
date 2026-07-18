@@ -28,7 +28,7 @@ default = []
 tray = ["tray-icon-asset", "dep:tao", "dep:tray-icon"]
 tray-icon-asset = ["dep:png"]
 # Native standalone desktop window (system webview via wry + tao event loop).
-desktop = ["dep:wry", "dep:tao", "dep:rfd"]
+desktop = ["tray-icon-asset", "dep:wry", "dep:tao", "dep:rfd"]
 
 [dependencies]
 vex-bridge-protocol = { path = "../vex-bridge-protocol" }

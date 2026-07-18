@@ -131,12 +131,18 @@ cargo build --release
 ./target/release/vex-bridge dashboard        # opens http://127.0.0.1:7878/ui
 cargo build --release -p vex-bridge --features tray
 ./target/release/vex-tray                    # native tray/menu bar entry point
+cargo build --release -p vex-bridge --features tray,desktop
+./target/release/vex-desktop                 # standalone native Vex Atlas window
 ```
 
 Release bundles are self-contained: `vex-bridge`, `vex-tray`, and the matching
 `vex` engine binary live in the same extracted folder. Unless `vex_bin` is set
 explicitly in `config.toml`, the bridge prefers that co-located `vex` binary
 before falling back to `vex` on `PATH`.
+
+`vex-desktop` starts and verifies the local daemon, then hosts Vex Atlas in a
+native window. Normal operation does not open a browser; only account pairing
+is intentionally handed to the system browser.
 
 For production the daemon should be supervised by `launchd` (macOS),
 `systemd --user` (Linux), or `nssm` (Windows). Sample units land here in a

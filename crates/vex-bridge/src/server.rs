@@ -314,7 +314,7 @@ fn classify_error(
     status: StatusCode,
     error: &BridgeError,
 ) -> (&'static str, Option<&'static str>, bool) {
-    if status == StatusCode::CONFLICT {
+    if status == StatusCode::CONFLICT && matches!(error, BridgeError::Config(_)) {
         return (
             "project_id_conflict",
             Some("Choose a different project id or retry with allow_replace=true."),
@@ -325,6 +325,30 @@ fn classify_error(
         BridgeError::NotPaired => (
             "not_paired",
             Some("Pair this device before syncing projects."),
+            false,
+        ),
+        BridgeError::PairingKeyUnavailable => (
+            "pairing_key_unavailable",
+            Some(
+                "This device's pairing record is incomplete or its private key is unavailable. Pair this device again.",
+            ),
+            false,
+        ),
+        BridgeError::PairingCredentialsRejected => (
+            "pairing_credentials_rejected",
+            Some(
+                "The cloud service rejected this device key. Pair this device again; this is not a browser sign-in problem.",
+            ),
+            false,
+        ),
+        BridgeError::CloudProjectsUnavailable(_) => (
+            "cloud_projects_unavailable",
+            Some("The cloud projects service did not respond after retrying. Check your connection and retry."),
+            true,
+        ),
+        BridgeError::CloudProjectsInvalidResponse(_) => (
+            "cloud_projects_invalid_response",
+            Some("The cloud projects response was incompatible. Update Vex Atlas or contact support."),
             false,
         ),
         BridgeError::UpstreamApi(_) => (
@@ -461,7 +485,7 @@ async fn handle_health(State(state): State<AppState>) -> Json<proto::Health> {
         .and_then(|version| version_at_least(version, 0, 1, 3));
     Json(proto::Health {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        paired: matches!(daemon_state.pairing, PairingState::Paired { .. }),
+        paired: daemon_state.has_usable_pairing_record(),
         vex_bin: cfg.vex_bin,
         vex_version,
         expected_visual_diff_schema: Some(proto::schema::VISUAL_DIFF.to_string()),
@@ -521,7 +545,7 @@ async fn handle_diagnostics(
         "pid": std::process::id(),
         "uptime_seconds": state.started_at.elapsed().as_secs(),
         "port": cfg.port,
-        "paired": matches!(daemon_state.pairing, PairingState::Paired { .. }),
+        "paired": daemon_state.has_usable_pairing_record(),
         "active_watchers": active_watchers,
         "vex_version": vex_version,
         "vex_bin": cfg.vex_bin,
@@ -936,7 +960,13 @@ async fn handle_cloud_projects(
     let key_id = {
         let daemon_state = state.state.read().await;
         match &daemon_state.pairing {
-            PairingState::Paired { key_id, .. } => key_id.clone(),
+            PairingState::Paired { key_id, .. } if !key_id.trim().is_empty() => key_id.clone(),
+            PairingState::Paired { .. } => {
+                return Err(err_response(
+                    StatusCode::CONFLICT,
+                    BridgeError::PairingKeyUnavailable,
+                ))
+            }
             _ => {
                 return Err(err_response(
                     StatusCode::UNAUTHORIZED,
@@ -948,7 +978,14 @@ async fn handle_cloud_projects(
     pairing::projects(&cfg, &key_id)
         .await
         .map(Json)
-        .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))
+        .map_err(|error| {
+            let status = match &error {
+                BridgeError::PairingCredentialsRejected => StatusCode::UNAUTHORIZED,
+                BridgeError::PairingKeyUnavailable => StatusCode::CONFLICT,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            err_response(status, error)
+        })
 }
 
 fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
@@ -971,8 +1008,8 @@ fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
             account_id,
             account_email,
             account_name,
-            ..
-        } => proto::PairStatus::Paired {
+            key_id,
+        } if !key_id.trim().is_empty() => proto::PairStatus::Paired {
             device_label: device_label.clone(),
             key_fingerprint: key_fingerprint.clone(),
             paired_at: rfc3339_from_unix(*paired_at_unix),
@@ -980,6 +1017,7 @@ fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
             account_email: account_email.clone(),
             account_name: account_name.clone(),
         },
+        PairingState::Paired { .. } => proto::PairStatus::Unpaired,
     }
 }
 
@@ -1114,7 +1152,7 @@ async fn handle_setup_status(
         )
     })?;
     Ok(Json(proto::SetupStatus {
-        paired: matches!(daemon_state.pairing, PairingState::Paired { .. }),
+        paired: daemon_state.has_usable_pairing_record(),
         pair_status: pair_status_from_state(&daemon_state),
         default_device_label: default_device_label(),
         inbox_root_path: inbox_root.to_string_lossy().to_string(),
@@ -1774,15 +1812,11 @@ async fn handle_repo_push(
     })?;
 
     let cfg = {
-        let mut cfg = state.config.write().await;
-        let entry = cfg
-            .watch
-            .iter_mut()
+        let cfg = state.config.read().await;
+        cfg.watch
+            .iter()
             .find(|entry| entry.project_id == req.project_id)
             .ok_or_else(|| unknown_project_response(&req.project_id))?;
-        entry.cloud_project_id = Some(cloud_project_id.to_string());
-        cfg.save(&state.paths)
-            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
         cfg.clone()
     };
     let branch = req.branch.unwrap_or_else(|| "main".to_string());
@@ -1797,12 +1831,33 @@ async fn handle_repo_push(
     )
     .await
     {
-        Ok(commit_hash) => Ok(Json(serde_json::json!({
-            "commit_hash": commit_hash,
-            "project_id": req.project_id,
-            "cloud_project_id": cloud_project_id,
-            "branch": branch,
-        }))),
+        Ok(commit_hash) => {
+            let mut cfg = state.config.write().await;
+            let previous = {
+                let entry = cfg
+                    .watch
+                    .iter_mut()
+                    .find(|entry| entry.project_id == req.project_id)
+                    .ok_or_else(|| unknown_project_response(&req.project_id))?;
+                entry.cloud_project_id.replace(cloud_project_id.to_string())
+            };
+            if let Err(error) = cfg.save(&state.paths) {
+                if let Some(entry) = cfg
+                    .watch
+                    .iter_mut()
+                    .find(|entry| entry.project_id == req.project_id)
+                {
+                    entry.cloud_project_id = previous;
+                }
+                return Err(err_response(StatusCode::INTERNAL_SERVER_ERROR, error));
+            }
+            Ok(Json(serde_json::json!({
+                "commit_hash": commit_hash,
+                "project_id": req.project_id,
+                "cloud_project_id": cloud_project_id,
+                "branch": branch,
+            })))
+        }
         Err(error) => {
             let status = match &error {
                 BridgeError::Config(_) => StatusCode::NOT_FOUND,
@@ -2957,6 +3012,35 @@ mod tests {
         let err = BridgeError::VexCli("vex import failed: bad ifc".into());
         let (code, _hint, _retryable) = classify_error(StatusCode::INTERNAL_SERVER_ERROR, &err);
         assert_eq!(code, "vex_cli_error");
+    }
+
+    #[test]
+    fn rejected_pairing_credentials_are_not_reported_as_a_network_failure() {
+        let (code, hint, retryable) = classify_error(
+            StatusCode::UNAUTHORIZED,
+            &BridgeError::PairingCredentialsRejected,
+        );
+        assert_eq!(code, "pairing_credentials_rejected");
+        assert!(!retryable);
+        assert!(hint.unwrap().contains("not a browser sign-in"));
+    }
+
+    #[test]
+    fn incomplete_pairing_record_is_not_reported_as_a_project_conflict() {
+        let (code, _hint, retryable) =
+            classify_error(StatusCode::CONFLICT, &BridgeError::PairingKeyUnavailable);
+        assert_eq!(code, "pairing_key_unavailable");
+        assert!(!retryable);
+    }
+
+    #[test]
+    fn unavailable_cloud_projects_are_reported_as_retryable() {
+        let (code, _hint, retryable) = classify_error(
+            StatusCode::BAD_GATEWAY,
+            &BridgeError::CloudProjectsUnavailable("HTTP 503".into()),
+        );
+        assert_eq!(code, "cloud_projects_unavailable");
+        assert!(retryable);
     }
 
     #[test]

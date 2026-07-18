@@ -112,6 +112,10 @@ pub enum PairingState {
     Paired {
         device_label: String,
         key_fingerprint: String,
+        /// Introduced after the first pairing-state format. Keep this
+        /// optional-on-read so old state files can be recovered through a
+        /// fresh pairing instead of preventing the daemon from starting.
+        #[serde(default)]
         key_id: String, // architur-side UserSshKey.Id
         paired_at_unix: i64,
         #[serde(default)]
@@ -124,6 +128,15 @@ pub enum PairingState {
 }
 
 impl State {
+    /// A pairing record can only authenticate cloud requests when it includes
+    /// the server-issued id for the locally stored signing key.
+    pub fn has_usable_pairing_record(&self) -> bool {
+        matches!(
+            &self.pairing,
+            PairingState::Paired { key_id, .. } if !key_id.trim().is_empty()
+        )
+    }
+
     pub fn load(paths: &Paths) -> BridgeResult<Self> {
         if !paths.state_file.exists() {
             return Ok(Self::default());
@@ -395,6 +408,23 @@ mod tests {
         .unwrap();
 
         assert!(state.ifc_snapshots.is_empty());
+    }
+
+    #[test]
+    fn legacy_paired_state_without_key_id_loads_but_is_not_usable() {
+        let state: State = serde_json::from_str(
+            r#"{
+                "pairing":{
+                    "status":"paired",
+                    "device_label":"Revit",
+                    "key_fingerprint":"SHA256:test",
+                    "paired_at_unix":1
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!state.has_usable_pairing_record());
     }
 
     #[test]

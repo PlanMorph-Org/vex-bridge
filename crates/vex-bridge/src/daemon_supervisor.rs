@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Paths;
 use crate::daemon_lock;
+use crate::errors::{BridgeError, BridgeResult};
 
 /// What the launcher should do given the observed daemon state. Pure/testable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +60,17 @@ pub(crate) fn decide(
 /// caller attaches its UI. Best-effort: on failure we still let the UI come up
 /// (it will simply show "daemon not reachable") rather than blocking the app.
 pub fn ensure_daemon(paths: &Paths, port: u16) {
+    if let Err(error) = ensure_daemon_ready(paths, port) {
+        tracing::error!(error = %error, "failed to start a ready vex-bridge daemon");
+    }
+}
+
+/// Ensure a single, version-matched, responsive daemon is running and report
+/// a startup failure to callers that cannot operate without it.
+pub fn ensure_daemon_ready(paths: &Paths, port: u16) -> BridgeResult<()> {
     let want = env!("CARGO_PKG_VERSION");
     match decide(daemon_version(port).as_deref(), port_in_use(port), want) {
-        StartupDecision::Healthy => return,
+        StartupDecision::Healthy => return Ok(()),
         StartupDecision::RestartStale => {
             tracing::warn!(expected = %want, "daemon version mismatch; retiring stale daemon");
             retire(paths, port);
@@ -73,11 +82,16 @@ pub fn ensure_daemon(paths: &Paths, port: u16) {
         StartupDecision::StartFresh => {}
     }
 
-    if let Err(error) = start_daemon() {
-        tracing::error!(error = ?error, "failed to spawn vex-bridge daemon");
-        return;
+    start_daemon().map_err(|error| {
+        BridgeError::Config(format!("could not start the local Vex daemon: {error}"))
+    })?;
+    if wait_for_version(port, want, Duration::from_secs(8)) {
+        Ok(())
+    } else {
+        Err(BridgeError::Config(format!(
+            "the local Vex daemon did not become ready on port {port}"
+        )))
     }
-    wait_for_version(port, want, Duration::from_secs(8));
 }
 
 /// Force a clean restart on demand (the Repair action): retire whatever is
@@ -118,14 +132,15 @@ fn retire(paths: &Paths, port: u16) {
 }
 
 /// Poll until a daemon reports the wanted version, or the deadline passes.
-fn wait_for_version(port: u16, want: &str, timeout: Duration) {
+fn wait_for_version(port: u16, want: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if daemon_version(port).as_deref() == Some(want) {
-            return;
+            return true;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+    false
 }
 
 /// Probe `/v1/health` and return the daemon's reported version, or `None`.

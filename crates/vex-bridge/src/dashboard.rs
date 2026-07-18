@@ -12,18 +12,51 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
 <style>
 :root {
   color-scheme: dark;
-  --bg: #101112;
-  --panel: #181a1b;
-  --panel-2: #202325;
-  --line: #34383b;
-  --text: #f2f1ec;
-  --muted: #a8aaa7;
-  --subtle: #747873;
-  --green: #43c26b;
-  --red: #e05a47;
-  --amber: #d99a2b;
-  --blue: #4b8fe3;
-  --violet: #9b6bd3;
+  --bg: #11171b;
+  --panel: #172126;
+  --panel-2: #202d34;
+  --panel-raised: #26353d;
+  --line: #32434c;
+  --line-soft: rgba(209, 226, 232, .09);
+  --text: #f1f6f7;
+  --muted: #a8bbc2;
+  --subtle: #71858d;
+  --green: #53d48b;
+  --red: #f17466;
+  --amber: #efb654;
+  --blue: #69b5ee;
+  --violet: #b695ea;
+  --accent: #4ca9e7;
+  --accent-strong: #1c85c5;
+  --accent-ink: #07151e;
+  --viewport-bg: #202c32;
+  --viewport-grid-major: #6b8a94;
+  --viewport-grid-minor: #3e535b;
+  --viewport-surface: #dbe6e8;
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #edf2f3;
+  --panel: #f7fafb;
+  --panel-2: #eaf0f2;
+  --panel-raised: #ffffff;
+  --line: #c8d4d8;
+  --line-soft: rgba(27, 56, 66, .1);
+  --text: #18272d;
+  --muted: #587078;
+  --subtle: #7d9299;
+  --green: #177e50;
+  --red: #bd4034;
+  --amber: #9b6110;
+  --blue: #1679b8;
+  --violet: #7350ab;
+  --accent: #197ebc;
+  --accent-strong: #08639d;
+  --accent-ink: #ffffff;
+  --viewport-bg: #d9e5e8;
+  --viewport-grid-major: #77939b;
+  --viewport-grid-minor: #acc0c5;
+  --viewport-surface: #38545e;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -333,7 +366,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 .field input {
   width: 100%;
   border: 1px solid var(--line);
-  background: #121414;
+  background: var(--panel-raised);
   color: var(--text);
   border-radius: 6px;
   padding: 8px 9px;
@@ -341,7 +374,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
 .field select {
   width: 100%;
   border: 1px solid var(--line);
-  background: #121414;
+  background: var(--panel-raised);
   color: var(--text);
   border-radius: 6px;
   padding: 8px 9px;
@@ -454,6 +487,295 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
   .sidebar, .history { border-right: 0; border-bottom: 1px solid var(--line); }
   .view-grid { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
 }
+
+/* Workspace shell: viewport-first, with dense controls and panels that can be
+   resized or collapsed without affecting the canvas height. */
+html, body { overflow: hidden; }
+body { background: var(--bg); }
+button, select, input { accent-color: var(--accent); }
+button { border-color: var(--line); background: var(--panel-2); }
+button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel-raised); }
+button:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
+.app {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-rows: 42px auto minmax(0, 1fr) 26px;
+  overflow: hidden;
+}
+.topbar {
+  min-width: 0;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--panel);
+  border-bottom-color: var(--line);
+}
+.brand { white-space: nowrap; letter-spacing: .015em; }
+.topbar .row-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar button { min-height: 28px; padding: 4px 9px; font-size: 12px; }
+.topbar .workspace-button { color: var(--muted); background: transparent; }
+.topbar .workspace-button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
+.topbar .settings-button { width: 30px; padding: 0; font-size: 16px; line-height: 1; }
+.update-banner { min-height: 0; padding: 6px 12px; }
+.main {
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  --projects-width: 218px;
+  --history-width: 266px;
+  --projects-gutter: 5px;
+  --history-gutter: 5px;
+  grid-template-columns: minmax(0, var(--projects-width)) var(--projects-gutter) minmax(0, var(--history-width)) var(--history-gutter) minmax(360px, 1fr);
+}
+.main.projects-collapsed { --projects-width: 0px; --projects-gutter: 0px; }
+.main.history-collapsed { --history-width: 0px; --history-gutter: 0px; }
+.sidebar, .history, .viewer {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--panel);
+  border-right: 0;
+}
+.sidebar, .history { transition: opacity .16s ease, transform .16s ease; }
+.main.projects-collapsed .sidebar, .main.history-collapsed .history {
+  opacity: 0;
+  pointer-events: none;
+}
+.panel-resizer {
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  background: var(--line);
+  transition: background .14s ease;
+}
+.panel-resizer:hover, .panel-resizer.dragging { background: var(--accent); }
+.panel-head {
+  height: 38px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--panel-raised));
+}
+.panel-title { font-size: 12px; letter-spacing: .035em; text-transform: uppercase; }
+.panel-collapse {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+  font-size: 16px;
+}
+.list { height: calc(100% - 38px); }
+.row { padding: 9px 10px; border-bottom-color: var(--line-soft); }
+.row:hover, .row.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+.row.active .row-title { color: var(--text); }
+.row-meta { color: var(--muted); }
+.project-row { border-bottom-color: var(--line-soft); }
+.viewer {
+  grid-template-rows: auto minmax(0, 1fr) minmax(88px, 170px);
+  background: var(--panel);
+}
+.viewer-head {
+  min-height: 62px;
+  align-items: center;
+  padding: 7px 12px;
+  background: var(--panel);
+}
+.viewer-head > div:last-child {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.viewer-head .badges { flex-basis: 100%; justify-content: flex-end; }
+.commit-line { font-size: 14px; }
+.time-line { font-size: 11px; }
+.view-toggle { border-color: var(--line); }
+.view-toggle button { padding: 4px 7px; font-size: 11px; }
+.view-toggle button.active { background: var(--accent); color: var(--accent-ink); }
+.view-grid {
+  grid-template-columns: minmax(260px, .9fr) minmax(320px, 1.1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 1px;
+  background: var(--line);
+}
+.view-grid.dim-3d, .view-grid.dim-2d { grid-template-columns: minmax(0, 1fr); }
+.view-grid.dim-3d #planPane, .view-grid.dim-2d #modelPane { display: none; }
+.view-pane { background: var(--viewport-bg); grid-template-rows: 34px minmax(0, 1fr); }
+.view-pane header {
+  min-width: 0;
+  padding: 0 10px;
+  color: var(--muted);
+  background: var(--panel);
+  border-bottom-color: var(--line-soft);
+  font-size: 12px;
+}
+.view-pane header > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-tools { min-width: 0; }
+.plan-tools select, .tool-select { color: var(--text); background: var(--panel-raised); border-color: var(--line); }
+.viewer-toolbar { top: 42px; left: 8px; gap: 3px; }
+.tool-btn {
+  padding: 4px 7px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  border-color: color-mix(in srgb, var(--line) 80%, transparent);
+}
+.tool-btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.gizmo { opacity: .94; }
+.view-status {
+  inset: 34px 0 0 0;
+  z-index: 2;
+  align-content: center;
+  justify-content: center;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--viewport-bg) 30%, transparent);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.view-status:not(:empty) {
+  display: grid;
+  padding: 24px;
+}
+.view-status:not(:empty)::before {
+  content: "";
+  width: 22px;
+  height: 22px;
+  margin: auto;
+  border: 2px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: vex-spin .9s linear infinite;
+}
+.view-status[data-state="empty"]::before { display: none; }
+@keyframes vex-spin { to { transform: rotate(360deg); } }
+.orbit-hint, .props-panel, .section-row {
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border-color: var(--line);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .16);
+}
+.props-panel { top: 42px; right: 8px; }
+.change-table {
+  max-height: none;
+  min-height: 0;
+  border-top-color: var(--line);
+  background: var(--panel);
+}
+.change-table table { table-layout: fixed; }
+.change-table th, .change-table td { padding: 6px 9px; border-bottom-color: var(--line-soft); }
+.change-table th { background: var(--panel); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+.change-table th:first-child, .change-table td:first-child { width: 27%; }
+.change-table th:nth-child(2), .change-table td:nth-child(2) { width: 28%; }
+.change-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.change-detail > td { white-space: normal; }
+.badge { min-height: 20px; padding: 1px 6px; background: var(--panel-2); }
+.statusbar { padding: 0 10px; background: var(--panel); border-top-color: var(--line); font-size: 11px; }
+.statusbar .sb-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statusbar .sb-action { padding: 1px 6px; color: var(--muted); border-color: var(--line); }
+.settings-panel {
+  position: fixed;
+  top: 48px;
+  right: 10px;
+  z-index: 12;
+  width: min(300px, calc(100vw - 20px));
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, .28);
+}
+.settings-panel[hidden] { display: none; }
+.settings-panel h2 { margin: 0 0 8px; font-size: 13px; }
+.settings-panel p { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
+.settings-panel .field { margin-top: 10px; }
+.settings-panel .field select {
+  background: var(--panel-raised);
+  color: var(--text);
+  border-color: var(--line);
+}
+.settings-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+  color: var(--text);
+}
+.settings-check input { width: 16px; height: 16px; }
+.compact-actions {
+  display: none;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 10px 0 2px;
+}
+
+@media (max-width: 1080px) {
+  .topbar #topStatus { display: none; }
+  .view-grid { grid-template-columns: minmax(220px, .85fr) minmax(280px, 1.15fr); }
+  .main { --projects-width: 196px; --history-width: 228px; }
+  .viewer-head .badges { display: none; }
+}
+@media (min-width: 821px) and (max-width: 1040px) {
+  .view-grid { grid-template-columns: minmax(0, 1fr); }
+  .view-grid:not(.dim-2d):not(.dim-3d) #planPane { display: none; }
+}
+@media (max-width: 820px) {
+  .topbar { gap: 5px; }
+  .topbar #pairButton, .topbar #setupButton, .topbar #syncButton { display: none; }
+  .compact-actions { display: grid; }
+  .main {
+    display: block;
+    overflow: hidden;
+  }
+  .viewer { position: absolute; inset: 0; }
+  .sidebar, .history {
+    position: absolute;
+    z-index: 10;
+    top: 0;
+    bottom: 0;
+    width: min(310px, calc(100vw - 52px));
+    border-right: 1px solid var(--line);
+    box-shadow: 18px 0 36px rgba(0, 0, 0, .22);
+    transform: translateX(-105%);
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .sidebar.mobile-open, .history.mobile-open { transform: translateX(0); }
+  .panel-resizer { display: none; }
+  .main.projects-collapsed .sidebar, .main.history-collapsed .history {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .view-grid { grid-template-columns: minmax(0, 1fr); }
+  .view-grid:not(.dim-2d):not(.dim-3d) #planPane { display: none; }
+  .viewer { grid-template-rows: auto minmax(0, 1fr) minmax(84px, 145px); }
+  .viewer-head { min-height: 54px; }
+  .viewer-head .badges, .time-line { display: none; }
+  .view-toggle button { padding: 3px 5px; }
+  .statusbar #sbWatch, .statusbar #sbVersions, .statusbar #sbAccountItem { display: none; }
+}
+@media (max-width: 540px) {
+  .brand { font-size: 12px; }
+  .topbar .workspace-button { width: 28px; padding: 0; font-size: 0; }
+  .topbar .workspace-button::before { font-size: 14px; }
+  #projectsPanelButton::before { content: "☰"; }
+  #historyPanelButton::before { content: "◷"; }
+  .topbar #refreshButton { font-size: 0; width: 29px; padding: 0; }
+  .topbar #refreshButton::before { content: "↻"; font-size: 16px; }
+  .viewer-head { display: block; }
+  .viewer-head > div:last-child { justify-content: flex-start; margin-top: 5px; }
+  #addIfcButton { display: none; }
+  .viewer { grid-template-rows: 82px minmax(0, 1fr) minmax(76px, 130px); }
+  .change-table th:nth-child(2), .change-table td:nth-child(2) { display: none; }
+  .change-table th:first-child, .change-table td:first-child { width: 36%; }
+  .statusbar { gap: 8px; }
+  .statusbar #sbActivity { display: none; }
+}
 </style>
 </head>
 <body>
@@ -462,22 +784,27 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     <div class="status-dot" id="statusDot"></div>
     <div class="brand">Vex Atlas</div>
     <div id="topStatus" class="row-meta">Loading</div>
+    <button class="workspace-button" id="projectsPanelButton" type="button" aria-controls="projectsPanel" aria-pressed="true" title="Show or hide projects">Projects</button>
+    <button class="workspace-button" id="historyPanelButton" type="button" aria-controls="historyPanel" aria-pressed="true" title="Show or hide commit history">History</button>
     <div class="toolbar-spacer"></div>
     <button id="pairButton">Pair Device</button>
     <button id="setupButton">Add Inbox</button>
     <button id="syncButton" title="Push committed changes to the cloud">Push</button>
     <button class="primary" id="refreshButton">Refresh</button>
+    <button class="settings-button" id="settingsButton" type="button" aria-controls="settingsPanel" aria-expanded="false" title="Workspace display settings">⚙</button>
   </div>
   <div class="update-banner" id="updateBanner" style="display:none"></div>
   <main class="main">
-    <section class="sidebar">
-      <div class="panel-head"><div class="panel-title">Projects</div><div id="projectCount" class="row-meta"></div></div>
+    <section class="sidebar" id="projectsPanel">
+      <div class="panel-head"><div class="panel-title">Projects</div><div id="projectCount" class="row-meta"></div><button class="panel-collapse" type="button" data-panel="projects" aria-label="Collapse projects panel" title="Collapse projects">‹</button></div>
       <div id="projects" class="list"></div>
     </section>
-    <section class="history">
-      <div class="panel-head"><div class="panel-title">Commit History</div><div id="historyMeta" class="row-meta"></div></div>
+    <div class="panel-resizer" id="projectsResizer" aria-hidden="true"></div>
+    <section class="history" id="historyPanel">
+      <div class="panel-head"><div class="panel-title">Commit History</div><div id="historyMeta" class="row-meta"></div><button class="panel-collapse" type="button" data-panel="history" aria-label="Collapse commit history panel" title="Collapse history">‹</button></div>
       <div id="history" class="list"></div>
     </section>
+    <div class="panel-resizer" id="historyResizer" aria-hidden="true"></div>
     <section class="viewer">
       <div class="viewer-head">
         <div>
@@ -486,8 +813,9 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
         </div>
         <div>
           <div class="view-toggle" id="dimToggle">
+            <button type="button" data-dim="split" class="active" title="Show plan and model">Split</button>
             <button type="button" data-dim="3d">3D</button>
-            <button type="button" data-dim="2d" class="active">2D</button>
+            <button type="button" data-dim="2d">2D</button>
           </div>
           <div class="view-toggle" id="viewToggle">
             <button type="button" data-mode="full" class="active">Full Model</button>
@@ -498,7 +826,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
           <div class="badges" id="countBadges"></div>
         </div>
       </div>
-      <div class="view-grid dim-2d" id="viewGrid">
+      <div class="view-grid" id="viewGrid">
         <div class="view-pane" id="planPane">
           <header>
             <span>2D Plan</span>
@@ -509,7 +837,7 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
             </span>
           </header>
           <canvas id="planCanvas"></canvas>
-          <div class="view-status" id="planStatus"></div>
+          <div class="view-status" id="planStatus" role="status" aria-live="polite"></div>
         </div>
         <div class="view-pane" id="modelPane">
           <header><span>3D Model</span><span id="modelMeta"></span></header>
@@ -539,12 +867,12 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
             <div id="propsBody"></div>
           </div>
           <canvas class="gizmo" id="gizmoCanvas" width="172" height="172"></canvas>
-          <div class="view-status" id="modelStatus"></div>
+          <div class="view-status" id="modelStatus" role="status" aria-live="polite"></div>
         </div>
       </div>
       <div class="change-table">
-        <table>
-          <thead><tr><th>Kind</th><th>Element</th><th>Change</th></tr></thead>
+        <table aria-label="Element changes">
+          <thead><tr><th scope="col">Kind</th><th scope="col">Element</th><th scope="col">Change</th></tr></thead>
           <tbody id="changeRows"></tbody>
         </table>
       </div>
@@ -561,6 +889,19 @@ th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background
     <button class="sb-action" id="sbRepair" type="button" title="Restart the Vex background daemon">Repair</button>
   </footer>
 </div>
+<section class="settings-panel" id="settingsPanel" aria-labelledby="settingsTitle" hidden>
+  <h2 id="settingsTitle">Workspace display</h2>
+  <p>Saved on this device. Rendering changes apply immediately.</p>
+  <div class="compact-actions" aria-label="Project actions">
+    <button id="compactPairButton" type="button">Pair</button>
+    <button id="compactSetupButton" type="button">Inbox</button>
+    <button id="compactSyncButton" type="button">Push</button>
+  </div>
+  <div class="field"><label for="themePreference">Theme</label><select id="themePreference" data-preference="theme" aria-describedby="themeHelp"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select><span class="row-meta" id="themeHelp">Matches your system unless overridden.</span></div>
+  <label class="settings-check" for="gridPreference"><span>Reference grid</span><input id="gridPreference" data-preference="showGrid" type="checkbox"></label>
+  <label class="settings-check" for="axesPreference"><span>Origin axes</span><input id="axesPreference" data-preference="showAxes" type="checkbox"></label>
+  <div class="field"><label for="shadowPreference">Shadows</label><select id="shadowPreference" data-preference="shadows"><option value="auto">Auto (safe models only)</option><option value="off">Off</option><option value="on">On</option></select></div>
+</section>
 <div class="setup" id="setupPanel">
   <div class="panel-head"><div class="panel-title">Add Inbox</div><button id="closeSetup" type="button">Close</button></div>
   <form id="setupForm">
@@ -623,6 +964,18 @@ let cloudProjects = [];
 const urlParams = new URLSearchParams(window.location.search);
 const requestedProject = urlParams.get('project');
 const requestedCommit = urlParams.get('commit');
+const WORKSPACE_PREFERENCES_KEY = 'vexWorkspacePreferences';
+const DEFAULT_WORKSPACE_PREFERENCES = {
+  theme: 'system',
+  showGrid: true,
+  showAxes: false,
+  shadows: 'auto',
+  projectsWidth: 218,
+  historyWidth: 266,
+  projectsCollapsed: false,
+  historyCollapsed: false
+};
+const workspacePreferences = loadWorkspacePreferences();
 
 const els = {
   statusDot: document.getElementById('statusDot'), topStatus: document.getElementById('topStatus'),
@@ -658,7 +1011,15 @@ const els = {
   sbDiag: document.getElementById('sbDiag'), sbRepair: document.getElementById('sbRepair'),
   browseField: document.getElementById('browseField'), browseFolder: document.getElementById('browseFolder'),
   addIfcButton: document.getElementById('addIfcButton'), addIfcInput: document.getElementById('addIfcInput'),
-  updateBanner: document.getElementById('updateBanner')
+  updateBanner: document.getElementById('updateBanner'),
+  workspace: document.querySelector('.main'),
+  projectsPanel: document.getElementById('projectsPanel'), historyPanel: document.getElementById('historyPanel'),
+  projectsPanelButton: document.getElementById('projectsPanelButton'), historyPanelButton: document.getElementById('historyPanelButton'),
+  projectsResizer: document.getElementById('projectsResizer'), historyResizer: document.getElementById('historyResizer'),
+  settingsButton: document.getElementById('settingsButton'), settingsPanel: document.getElementById('settingsPanel'),
+  themePreference: document.getElementById('themePreference'), gridPreference: document.getElementById('gridPreference'),
+  axesPreference: document.getElementById('axesPreference'), shadowPreference: document.getElementById('shadowPreference'),
+  compactSyncButton: document.getElementById('compactSyncButton')
 };
 
 // Native desktop bridge (present only inside the vex-desktop window). Falls back
@@ -671,13 +1032,188 @@ let updateInfo = null;
 
 let ifcViewer = null;
 
+function loadWorkspacePreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(WORKSPACE_PREFERENCES_KEY) || '{}');
+    const merged = {...DEFAULT_WORKSPACE_PREFERENCES, ...(saved && typeof saved === 'object' ? saved : {})};
+    merged.theme = ['system', 'light', 'dark'].includes(merged.theme) ? merged.theme : 'system';
+    merged.shadows = ['auto', 'on', 'off'].includes(merged.shadows) ? merged.shadows : 'auto';
+    merged.showGrid = merged.showGrid !== false;
+    merged.showAxes = merged.showAxes === true;
+    merged.projectsWidth = Math.max(168, Math.min(420, Number(merged.projectsWidth) || DEFAULT_WORKSPACE_PREFERENCES.projectsWidth));
+    merged.historyWidth = Math.max(190, Math.min(460, Number(merged.historyWidth) || DEFAULT_WORKSPACE_PREFERENCES.historyWidth));
+    merged.projectsCollapsed = merged.projectsCollapsed === true;
+    merged.historyCollapsed = merged.historyCollapsed === true;
+    return merged;
+  } catch (_) {
+    return {...DEFAULT_WORKSPACE_PREFERENCES};
+  }
+}
+
+function saveWorkspacePreferences() {
+  try { localStorage.setItem(WORKSPACE_PREFERENCES_KEY, JSON.stringify(workspacePreferences)); } catch (_) {}
+}
+
+function isCompactWorkspace() {
+  return window.matchMedia && window.matchMedia('(max-width: 820px)').matches;
+}
+
+function resolvedTheme() {
+  if (workspacePreferences.theme !== 'system') return workspacePreferences.theme;
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function updateWorkspaceControls() {
+  const compact = isCompactWorkspace();
+  if (els.themePreference) els.themePreference.value = workspacePreferences.theme;
+  if (els.gridPreference) els.gridPreference.checked = workspacePreferences.showGrid;
+  if (els.axesPreference) els.axesPreference.checked = workspacePreferences.showAxes;
+  if (els.shadowPreference) els.shadowPreference.value = workspacePreferences.shadows;
+  if (!els.workspace) return;
+  els.workspace.style.setProperty('--projects-width', `${workspacePreferences.projectsWidth}px`);
+  els.workspace.style.setProperty('--history-width', `${workspacePreferences.historyWidth}px`);
+  els.workspace.classList.toggle('projects-collapsed', !compact && workspacePreferences.projectsCollapsed);
+  els.workspace.classList.toggle('history-collapsed', !compact && workspacePreferences.historyCollapsed);
+  if (els.projectsPanelButton) {
+    els.projectsPanelButton.setAttribute('aria-pressed', compact
+      ? String(els.projectsPanel && els.projectsPanel.classList.contains('mobile-open'))
+      : String(!workspacePreferences.projectsCollapsed));
+  }
+  if (els.historyPanelButton) {
+    els.historyPanelButton.setAttribute('aria-pressed', compact
+      ? String(els.historyPanel && els.historyPanel.classList.contains('mobile-open'))
+      : String(!workspacePreferences.historyCollapsed));
+  }
+}
+
+function applyWorkspacePreferences() {
+  document.documentElement.dataset.theme = resolvedTheme();
+  updateWorkspaceControls();
+  if (ifcViewer) ifcViewer.refreshAppearance();
+}
+
+function setPanelCollapsed(panel, collapsed) {
+  const compact = isCompactWorkspace();
+  const element = panel === 'projects' ? els.projectsPanel : els.historyPanel;
+  if (compact) {
+    if (element) element.classList.toggle('mobile-open', !collapsed);
+  } else if (panel === 'projects') {
+    workspacePreferences.projectsCollapsed = collapsed;
+    if (els.projectsPanel) els.projectsPanel.classList.remove('mobile-open');
+    saveWorkspacePreferences();
+  } else {
+    workspacePreferences.historyCollapsed = collapsed;
+    if (els.historyPanel) els.historyPanel.classList.remove('mobile-open');
+    saveWorkspacePreferences();
+  }
+  updateWorkspaceControls();
+  if (ifcViewer) requestAnimationFrame(() => ifcViewer.resize());
+}
+
+function toggleWorkspacePanel(panel) {
+  const element = panel === 'projects' ? els.projectsPanel : els.historyPanel;
+  if (isCompactWorkspace()) {
+    const opening = !(element && element.classList.contains('mobile-open'));
+    if (els.projectsPanel && panel !== 'projects') els.projectsPanel.classList.remove('mobile-open');
+    if (els.historyPanel && panel !== 'history') els.historyPanel.classList.remove('mobile-open');
+    setPanelCollapsed(panel, !opening);
+    return;
+  }
+  const collapsed = panel === 'projects' ? workspacePreferences.projectsCollapsed : workspacePreferences.historyCollapsed;
+  setPanelCollapsed(panel, !collapsed);
+}
+
+function enablePanelResize(handle, panel) {
+  if (!handle) return;
+  handle.addEventListener('pointerdown', event => {
+    if (isCompactWorkspace()) return;
+    const collapsed = panel === 'projects' ? workspacePreferences.projectsCollapsed : workspacePreferences.historyCollapsed;
+    if (collapsed || event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panel === 'projects' ? workspacePreferences.projectsWidth : workspacePreferences.historyWidth;
+    const min = panel === 'projects' ? 168 : 190;
+    const max = panel === 'projects' ? 420 : 460;
+    handle.classList.add('dragging');
+    const move = moveEvent => {
+      const next = Math.max(min, Math.min(max, startWidth + moveEvent.clientX - startX));
+      if (panel === 'projects') workspacePreferences.projectsWidth = next;
+      else workspacePreferences.historyWidth = next;
+      updateWorkspaceControls();
+      if (ifcViewer) ifcViewer.resize();
+    };
+    const stop = () => {
+      handle.classList.remove('dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      saveWorkspacePreferences();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop, {once: true});
+  });
+}
+
+function toggleSettings(force) {
+  if (!els.settingsPanel || !els.settingsButton) return;
+  const open = typeof force === 'boolean' ? force : els.settingsPanel.hidden;
+  els.settingsPanel.hidden = !open;
+  els.settingsButton.setAttribute('aria-expanded', String(open));
+  if (open) els.themePreference.focus();
+}
+
+applyWorkspacePreferences();
+enablePanelResize(els.projectsResizer, 'projects');
+enablePanelResize(els.historyResizer, 'history');
+
 document.getElementById('refreshButton').addEventListener('click', refresh);
+els.projectsPanelButton.addEventListener('click', () => toggleWorkspacePanel('projects'));
+els.historyPanelButton.addEventListener('click', () => toggleWorkspacePanel('history'));
+document.querySelectorAll('.panel-collapse').forEach(button => button.addEventListener('click', () => {
+  const panel = button.dataset.panel;
+  if (panel) setPanelCollapsed(panel, true);
+}));
+els.settingsButton.addEventListener('click', () => toggleSettings());
+els.settingsPanel.addEventListener('change', event => {
+  const key = event.target && event.target.dataset && event.target.dataset.preference;
+  if (!key) return;
+  workspacePreferences[key] = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
+  saveWorkspacePreferences();
+  applyWorkspacePreferences();
+});
+document.addEventListener('pointerdown', event => {
+  if (!els.settingsPanel.hidden && !els.settingsPanel.contains(event.target) && event.target !== els.settingsButton) toggleSettings(false);
+});
+window.addEventListener('resize', () => {
+  if (els.projectsPanel) els.projectsPanel.classList.remove('mobile-open');
+  if (els.historyPanel) els.historyPanel.classList.remove('mobile-open');
+  updateWorkspaceControls();
+});
+if (window.matchMedia) {
+  const systemTheme = window.matchMedia('(prefers-color-scheme: light)');
+  const syncSystemTheme = () => {
+    if (workspacePreferences.theme === 'system') applyWorkspacePreferences();
+  };
+  if (systemTheme.addEventListener) systemTheme.addEventListener('change', syncSystemTheme);
+  else if (systemTheme.addListener) systemTheme.addListener(syncSystemTheme);
+}
 document.getElementById('setupButton').addEventListener('click', () => {
   if (!els.projectId.value.trim()) els.projectId.value = genProjectId();
   els.setupPanel.classList.add('open');
 });
 els.pairButton.addEventListener('click', startOrPollPairing);
 els.syncButton.addEventListener('click', openPushPanel);
+document.getElementById('compactPairButton').addEventListener('click', () => {
+  toggleSettings(false);
+  startOrPollPairing();
+});
+document.getElementById('compactSetupButton').addEventListener('click', () => {
+  toggleSettings(false);
+  document.getElementById('setupButton').click();
+});
+document.getElementById('compactSyncButton').addEventListener('click', () => {
+  toggleSettings(false);
+  if (!els.syncButton.disabled) openPushPanel();
+});
 els.addIfcButton.addEventListener('click', () => { if (selectedProject) els.addIfcInput.click(); });
 if (els.sbDiag) els.sbDiag.addEventListener('click', copyDiagnostics);
 if (els.sbRepair) els.sbRepair.addEventListener('click', repairDaemon);els.addIfcInput.addEventListener('change', onAddIfcInput);
@@ -777,7 +1313,7 @@ function genProjectId() {
 }
 
 function setViewDimension(dim) {
-  const wanted = dim === '2d' ? '2d' : '3d';
+  const wanted = ['2d', '3d', 'split'].includes(dim) ? dim : 'split';
   els.viewGrid.classList.toggle('dim-2d', wanted === '2d');
   els.viewGrid.classList.toggle('dim-3d', wanted === '3d');
   for (const item of els.dimToggle.querySelectorAll('button')) {
@@ -1110,16 +1646,14 @@ async function pollPairing() {
 }
 
 async function openPushPanel() {
-  if (!selectedProject) return;
+  if (!selectedProject || els.syncButton.disabled) return;
   els.pushPanel.classList.add('open');
   els.confirmPush.disabled = true;
+  cloudProjects = [];
   els.cloudProject.innerHTML = '<option value="">Loading projects…</option>';
   els.pushPreview.innerHTML = '<div class="row-meta">Loading preview…</div>';
   try {
-    const [projects, changes] = await Promise.all([
-      api('/v1/cloud/projects', {headers}),
-      api(`/v1/projects/${encodeURIComponent(selectedProject)}/changes`, {headers})
-    ]);
+    const projects = await api('/v1/cloud/projects', {headers});
     cloudProjects = projects || [];
     const local = currentLocalProject();
     els.cloudProject.innerHTML = '<option value="">Select a cloud project…</option>';
@@ -1130,9 +1664,20 @@ async function openPushPanel() {
       els.cloudProject.appendChild(option);
     }
     els.cloudProject.value = local && local.cloud_project_id || '';
-    els.pushPanel.dataset.changes = JSON.stringify(changes || {});
+    els.pushPanel.dataset.changes = JSON.stringify({});
     renderPushPreview();
+    try {
+      const changes = await api(`/v1/projects/${encodeURIComponent(selectedProject)}/changes`, {headers});
+      els.pushPanel.dataset.changes = JSON.stringify(changes || {});
+      renderPushPreview();
+    } catch (error) {
+      els.pushPreview.insertAdjacentHTML('beforeend',
+        `<div class="preview-warning">Could not load the optional change preview: ${escapeHtml(error.message)}. You can still push.</div>`);
+    }
   } catch (error) {
+    cloudProjects = [];
+    els.cloudProject.innerHTML = '<option value="">Cloud projects unavailable</option>';
+    els.confirmPush.disabled = true;
     els.pushPreview.innerHTML = `<div class="preview-warning">${escapeHtml(error.message)}</div>`;
   }
 }
@@ -1212,6 +1757,11 @@ function updatePushButton(setup, paired) {
     : (pending > 0
         ? `${pending} ${pending === 1 ? 'commit' : 'commits'} ready to push`
         : 'All changes pushed');
+  if (els.compactSyncButton) {
+    els.compactSyncButton.textContent = pending > 0 ? `Push (${pending})` : 'Push';
+    els.compactSyncButton.disabled = els.syncButton.disabled;
+    els.compactSyncButton.title = els.syncButton.title;
+  }
 }
 
 async function onAddIfcInput(event) {
@@ -1540,6 +2090,7 @@ class RealIfcViewer {
     this.modelStatus = modelStatus;
     this.planMeta = planMeta;
     this.modelMeta = modelMeta;
+    this.shadowsEnabled = false;
     this.modelScene = this.makeScene();
     // The 2D plan renders the SAME scene from a top-down camera. Sharing the
     // scene avoids cloning the web-ifc model (clone(true) frequently yields an
@@ -1553,7 +2104,7 @@ class RealIfcViewer {
     this.modelCamera = this.modelPersp;
     this.projection = 'perspective';
     this.planCamera.up.set(0, 1, 0);
-    this.planRenderer = this.makeRenderer(planCanvas);
+    this.planRenderer = this.makeRenderer(planCanvas, false);
     // The 2D pane renders the shared scene through a horizontal cut plane so it
     // reads as a true floor plan (everything above the cut height is removed)
     // rather than a top-down roof view. Toggle to 'top' to see the full model.
@@ -1568,7 +2119,7 @@ class RealIfcViewer {
     this.storeys = [];
     this.planLevelIndex = 0;
     this.planCutZ = null;
-    this.modelRenderer = this.makeRenderer(modelCanvas);
+    this.modelRenderer = this.makeRenderer(modelCanvas, true);
     this.modelRenderer.localClippingEnabled = true;
     this.controls = new OrbitControls(this.modelCamera, modelCanvas);
     this.controls.enableDamping = true;
@@ -1664,6 +2215,7 @@ class RealIfcViewer {
     const canvas = document.getElementById('gizmoCanvas');
     if (!canvas) return null;
     const renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: true});
+    this.configureRenderer(renderer, false);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(86, 86, false);
     renderer.setClearColor(0x000000, 0);
@@ -1676,23 +2228,79 @@ class RealIfcViewer {
     return {renderer, scene, cam};
   }
 
+  colorFromWorkspace(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    try { return new THREE.Color(value || fallback); } catch (_) { return new THREE.Color(fallback); }
+  }
+
+  gridStep(span) {
+    const ideal = Math.max(span / 7, 0.0001);
+    const exponent = Math.pow(10, Math.floor(Math.log10(ideal)));
+    const fraction = ideal / exponent;
+    const nice = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+    return nice * exponent;
+  }
+
   rebuildHelpers(box) {
     while (this.helpers.children.length) {
       const child = this.helpers.children.pop();
       if (child.geometry) child.geometry.dispose();
-      if (child.material) child.material.dispose();
+      const materials = Array.isArray(child.material) ? child.material : child.material ? [child.material] : [];
+      for (const material of materials) material.dispose();
     }
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const span = Math.max(size.x, size.y, 1);
-    const divisions = 20;
-    const grid = new THREE.GridHelper(span * 1.6, divisions, 0x3a3f43, 0x24282b);
-    grid.rotation.x = Math.PI / 2;
-    grid.position.set(center.x, center.y, box.min.z);
-    this.helpers.add(grid);
-    const axes = new THREE.AxesHelper(span * 0.35);
-    axes.position.set(box.min.x, box.min.y, box.min.z);
-    this.helpers.add(axes);
+    const lightExtent = Math.max(span, size.z, 1);
+    if (this.lighting) {
+      const {key, fill} = this.lighting;
+      key.position.copy(center).addScaledVector(new THREE.Vector3(0.9, -0.8, 1.6).normalize(), lightExtent * 2.2);
+      key.target.position.copy(center);
+      key.shadow.camera.left = -lightExtent;
+      key.shadow.camera.right = lightExtent;
+      key.shadow.camera.top = lightExtent;
+      key.shadow.camera.bottom = -lightExtent;
+      key.shadow.camera.far = lightExtent * 6;
+      key.shadow.camera.updateProjectionMatrix();
+      fill.position.copy(center).addScaledVector(new THREE.Vector3(-0.8, 0.7, 1.0).normalize(), lightExtent * 1.8);
+      fill.target.position.copy(center);
+    }
+    const step = this.gridStep(span);
+    const gridSize = step * 10;
+    const groundZ = box.min.z - Math.max(span * 0.0005, 0.002);
+    const shadowFloor = new THREE.Mesh(
+      new THREE.PlaneGeometry(gridSize, gridSize),
+      new THREE.ShadowMaterial({color: 0x000000, opacity: 0.16, transparent: true})
+    );
+    shadowFloor.position.set(center.x, center.y, groundZ);
+    shadowFloor.receiveShadow = true;
+    shadowFloor.visible = this.shadowsEnabled === true;
+    shadowFloor.userData.vexShadowFloor = true;
+    this.helpers.add(shadowFloor);
+    if (workspacePreferences.showGrid) {
+      const grid = new THREE.GridHelper(
+        gridSize,
+        10,
+        this.colorFromWorkspace('--viewport-grid-major', '#6b8a94'),
+        this.colorFromWorkspace('--viewport-grid-minor', '#3e535b')
+      );
+      grid.rotation.x = Math.PI / 2;
+      grid.position.set(center.x, center.y, box.min.z);
+      const materials = Array.isArray(grid.material) ? grid.material : [grid.material];
+      for (const material of materials) {
+        material.transparent = true;
+        material.opacity = document.documentElement.dataset.theme === 'light' ? 0.42 : 0.36;
+        material.depthWrite = false;
+      }
+      grid.userData.vexGrid = true;
+      this.helpers.add(grid);
+    }
+    if (workspacePreferences.showAxes) {
+      const axes = new THREE.AxesHelper(Math.max(step * 1.5, span * 0.15));
+      axes.position.set(box.min.x, box.min.y, box.min.z);
+      axes.userData.vexAxes = true;
+      this.helpers.add(axes);
+    }
   }
 
   handlePointerUp(event) {
@@ -1775,7 +2383,7 @@ class RealIfcViewer {
     if (!this.model || this.modelKind !== 'ifc') return;
     this.selectedId = expressId;
     if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
-    const material = new THREE.MeshLambertMaterial({color: 0x4b8fe3, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide});
+    const material = new THREE.MeshStandardMaterial({color: 0x4b8fe3, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide, roughness: 0.42, metalness: 0});
     this.selectionSubset = this.model.createSubset({ids: [expressId], material, scene: this.modelScene, removePrevious: true, customID: 'vex-selection'});
     this.orientModel(this.selectionSubset);
     try {
@@ -1826,8 +2434,10 @@ class RealIfcViewer {
     if (!this.modelBox) return;
     const center = this.modelBox.getCenter(new THREE.Vector3());
     const size = this.modelBox.getSize(new THREE.Vector3());
-    const radius = Math.max(size.x, size.y, size.z, 1);
-    const d = radius * 1.8;
+    const diameter = Math.max(size.x, size.y, size.z, 1);
+    const halfExtent = diameter * 0.5;
+    const fov = THREE.MathUtils.degToRad(this.modelPersp.fov);
+    const d = Math.max(diameter * 1.5, (halfExtent / Math.tan(fov / 2)) * 1.22);
     const dirs = {
       iso: new THREE.Vector3(1, -1, 0.8),
       top: new THREE.Vector3(0, 0, 1),
@@ -2056,20 +2666,110 @@ class RealIfcViewer {
     this.gizmo.renderer.render(this.gizmo.scene, this.gizmo.cam);
   }
 
-  makeRenderer(canvas) {
+  configureRenderer(renderer, shadows) {
+    if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) {
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+    } else if ('outputEncoding' in renderer && THREE.sRGBEncoding) {
+      renderer.outputEncoding = THREE.sRGBEncoding;
+    }
+    if (THREE.ACESFilmicToneMapping !== undefined) {
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = document.documentElement.dataset.theme === 'light' ? 0.95 : 1.08;
+    }
+    renderer.shadowMap.enabled = Boolean(shadows && this.shadowsEnabled);
+    if (renderer.shadowMap.enabled) renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  }
+
+  makeRenderer(canvas, shadows) {
     const renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: false});
+    this.configureRenderer(renderer, shadows);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setClearColor(0x111313, 1);
+    renderer.setClearColor(this.colorFromWorkspace('--viewport-bg', '#202c32'), 1);
     return renderer;
   }
 
   makeScene() {
     const scene = new THREE.Scene();
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x303437, 0.85));
-    const sun = new THREE.DirectionalLight(0xffffff, 0.8);
-    sun.position.set(40, -35, 70);
-    scene.add(sun);
+    scene.background = this.colorFromWorkspace('--viewport-bg', '#202c32');
+    const hemisphere = new THREE.HemisphereLight(0xe8f4ff, 0x52636b, 1.25);
+    const key = new THREE.DirectionalLight(0xfff5e8, 1.65);
+    key.position.set(45, -35, 72);
+    key.castShadow = false;
+    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.camera.near = 0.1;
+    key.shadow.camera.far = 5000;
+    const fill = new THREE.DirectionalLight(0xb8d8ff, 0.55);
+    fill.position.set(-38, 28, 36);
+    this.lighting = {hemisphere, key, fill};
+    scene.add(hemisphere, key, key.target, fill, fill.target);
     return scene;
+  }
+
+  refreshAppearance() {
+    const background = this.colorFromWorkspace('--viewport-bg', '#202c32');
+    this.modelScene.background = background;
+    for (const renderer of [this.modelRenderer, this.planRenderer]) {
+      if (!renderer) continue;
+      this.configureRenderer(renderer, renderer === this.modelRenderer);
+      renderer.setClearColor(background, 1);
+    }
+    if (this.lighting) {
+      const lightTheme = document.documentElement.dataset.theme === 'light';
+      this.lighting.hemisphere.intensity = lightTheme ? 1.05 : 1.25;
+      this.lighting.key.intensity = lightTheme ? 1.42 : 1.65;
+      this.lighting.fill.intensity = lightTheme ? 0.46 : 0.55;
+    }
+    this.updateShadowPolicy();
+    if (this.modelBox) this.rebuildHelpers(this.modelBox);
+  }
+
+  applyMaterialQuality(object) {
+    if (!object) return;
+    object.traverse(item => {
+      const materials = Array.isArray(item.material) ? item.material : item.material ? [item.material] : [];
+      for (const material of materials) {
+        // Keep the color supplied by IFC or GLB; only improve how that color is
+        // lit and tone-mapped in this workspace.
+        material.toneMapped = !material.isMeshBasicMaterial;
+        if ('roughness' in material && Number.isFinite(material.roughness)) material.roughness = Math.max(0.35, material.roughness);
+        if ('metalness' in material && Number.isFinite(material.metalness)) material.metalness = Math.min(0.35, material.metalness);
+        material.needsUpdate = true;
+      }
+    });
+  }
+
+  updateShadowPolicy(model = this.model) {
+    let meshCount = 0;
+    if (model) model.traverse(item => { if (item.isMesh) ++meshCount; });
+    const cores = Number(navigator.hardwareConcurrency || 4);
+    const safeForShadows = meshCount > 0 && meshCount <= 1200 && cores >= 4;
+    const enabled = workspacePreferences.shadows === 'on'
+      ? meshCount > 0 && meshCount <= 2400
+      : workspacePreferences.shadows === 'auto' && safeForShadows;
+    this.shadowsEnabled = enabled;
+    if (this.modelRenderer) {
+      this.modelRenderer.shadowMap.enabled = enabled;
+      if (enabled) {
+        this.modelRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.modelRenderer.shadowMap.needsUpdate = true;
+      }
+    }
+    if (this.lighting) this.lighting.key.castShadow = enabled;
+    if (model) {
+      model.traverse(item => {
+        if (!item.isMesh) return;
+        item.castShadow = enabled;
+        item.receiveShadow = false;
+      });
+    }
+    this.helpers && this.helpers.traverse(item => {
+      if (item.userData && item.userData.vexShadowFloor) item.visible = enabled;
+    });
+  }
+
+  prepareModelForRender(model) {
+    this.applyMaterialQuality(model);
+    this.updateShadowPolicy(model);
   }
 
   clear(message = '') {
@@ -2077,8 +2777,7 @@ class RealIfcViewer {
     ++this.loadToken;
     this.clearSceneModels();
     this.currentKey = '';
-    this.planStatus.textContent = message;
-    this.modelStatus.textContent = message;
+    this.setViewStatus(message, 'empty');
     this.planMeta.textContent = '';
     this.modelMeta.textContent = '';
   }
@@ -2118,6 +2817,7 @@ class RealIfcViewer {
           this.artifactTilesLoaded = 1;
           this.modelScene.add(this.model);
           this.orientModel(this.model);
+          this.prepareModelForRender(this.model);
           this.currentKey = key;
           this.fitArtifactToManifest(artifact.manifest, this.model);
           this.applyPlanCut();
@@ -2172,9 +2872,15 @@ class RealIfcViewer {
       .some(element => element.kind && element.kind !== 'unchanged');
   }
 
+  setViewStatus(message, state = 'loading') {
+    for (const status of [this.planStatus, this.modelStatus]) {
+      status.textContent = message;
+      status.dataset.state = message ? state : '';
+    }
+  }
+
   setLoadStatus(message) {
-    this.planStatus.textContent = message;
-    this.modelStatus.textContent = message;
+    this.setViewStatus(message, 'loading');
   }
 
   setModelSourceMeta(mode) {
@@ -2183,14 +2889,12 @@ class RealIfcViewer {
       const progress = this.artifactManifest && this.artifactManifest.tiles
         ? `${this.artifactTilesLoaded}/${this.artifactManifest.tiles.length} tiles`
         : 'coarse tile';
-      this.planStatus.textContent = '';
-      this.modelStatus.textContent = '';
+      this.setViewStatus('');
       this.planMeta.textContent = `render artifact · ${progress}`;
       this.modelMeta.textContent = `render artifact · ${progress} · ${suffix}`;
       return;
     }
-    this.planStatus.textContent = '';
-    this.modelStatus.textContent = '';
+    this.setViewStatus('');
     this.planMeta.textContent = `raw IFC fallback · ${suffix}`;
     this.modelMeta.textContent = `raw IFC fallback · ${suffix}`;
   }
@@ -2206,6 +2910,7 @@ class RealIfcViewer {
     this.modelKind = 'ifc';
     this.modelScene.add(this.model);
     this.currentKey = key;
+    this.prepareModelForRender(this.model);
     const firstSceneStartedAt = performance.now();
     this.fitToModel(this.model);
     this.recordLoadMetric('ifc_first_scene', firstSceneStartedAt, {fallback: true});
@@ -2319,6 +3024,8 @@ class RealIfcViewer {
           return;
         }
         model.add(scene);
+        this.applyMaterialQuality(scene);
+        this.updateShadowPolicy(model);
         ++this.artifactTilesLoaded;
         this.setModelSourceMeta(currentViewMode);
       } catch (error) {
@@ -2409,8 +3116,7 @@ class RealIfcViewer {
     const token = ++this.loadToken;
     this.clearSceneModels();
     this.currentKey = '';
-    this.planStatus.textContent = `Preparing local preview of ${file.name}…`;
-    this.modelStatus.textContent = `Preparing local preview of ${file.name}…`;
+    this.setLoadStatus(`Preparing local preview of ${file.name}…`);
     const buffer = await file.arrayBuffer();
     const model = await this.parseIfcBuffer(buffer, 'Preparing local preview', token);
     if (token !== this.loadToken || selectedProject !== projectId) {
@@ -2421,6 +3127,7 @@ class RealIfcViewer {
     this.modelKind = 'ifc';
     this.modelScene.add(model);
     this.currentKey = `local:${projectId}`;
+    this.prepareModelForRender(model);
     const firstSceneStartedAt = performance.now();
     this.fitToModel(model);
     this.recordLoadMetric('ifc_first_scene', firstSceneStartedAt, {local_preview: true});
@@ -2434,8 +3141,7 @@ class RealIfcViewer {
     if (token !== this.loadToken) return;
     this.applyPlanCut();
     this.applyModelLevel();
-    this.planStatus.textContent = '';
-    this.modelStatus.textContent = '';
+    this.setViewStatus('');
     this.planMeta.textContent = 'local preview · semantic import running';
     this.modelMeta.textContent = 'local preview · semantic import running';
   }
@@ -2462,8 +3168,7 @@ class RealIfcViewer {
     const controller = new AbortController();
     this.ifcAbortController = controller;
     const fetchStartedAt = performance.now();
-    this.planStatus.textContent = 'Downloading committed IFC...';
-    this.modelStatus.textContent = 'Downloading committed IFC...';
+    this.setLoadStatus('Downloading committed IFC...');
     const response = await fetch(url, {headers, signal: controller.signal});
     if (!response.ok) throw new Error(`${url} -> ${response.status}`);
     const buffer = await response.arrayBuffer();
@@ -2485,8 +3190,7 @@ class RealIfcViewer {
       if (!total) return;
       const pct = Math.min(100, Math.round((loaded / total) * 100));
       const label = `${progressLabel}... ${pct}%`;
-      this.planStatus.textContent = label;
-      this.modelStatus.textContent = label;
+      this.setLoadStatus(label);
     });
     // Yield once so the "Loading IFC geometry..." status paints before the
     // synchronous web-ifc parse takes over the main thread.
@@ -2632,18 +3336,22 @@ class RealIfcViewer {
     this.modelBox = box;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
-    const radius = Math.max(size.x, size.y, size.z, 1);
-    this.modelCamera.position.set(center.x + radius, center.y - radius, center.z + radius * 0.7);
+    const diameter = Math.max(size.x, size.y, size.z, 1);
+    const halfExtent = diameter * 0.5;
+    const fov = THREE.MathUtils.degToRad(this.modelPersp.fov);
+    const distance = Math.max(diameter * 1.5, (halfExtent / Math.tan(fov / 2)) * 1.22);
+    const direction = new THREE.Vector3(1, -1, 0.72).normalize();
+    this.modelCamera.position.copy(center).addScaledVector(direction, distance);
     if (this.modelCamera.isPerspectiveCamera) {
-      this.modelCamera.near = Math.max(radius / 1000, 0.01);
-      this.modelCamera.far = radius * 100;
+      this.modelCamera.near = Math.max(diameter / 10000, 0.001);
+      this.modelCamera.far = Math.max(diameter * 200, 1000);
     }
     this.modelCamera.lookAt(center);
     this.modelCamera.updateProjectionMatrix();
     this.controls.target.copy(center);
     // Bound the dolly so the wheel can't fly past the model or invert through it.
-    this.controls.minDistance = radius * 0.05;
-    this.controls.maxDistance = radius * 40;
+    this.controls.minDistance = Math.max(diameter * 0.025, 0.01);
+    this.controls.maxDistance = diameter * 50;
     this.controls.update();
     this.rebuildHelpers(box);
     if (this.sectionActive) {
@@ -2663,7 +3371,7 @@ class RealIfcViewer {
     const radius = Math.max(size.x, size.y, size.z, 1);
     const rect = this.planCanvas.getBoundingClientRect();
     const aspect = rect.width / Math.max(rect.height, 1);
-    const planSize = (Math.max(size.x, size.y, 1) * 0.58) / this.planZoom;
+    const planSize = (Math.max(size.x, size.y, 1) * 0.68) / this.planZoom;
     const cx = center.x + this.planPan.x;
     const cy = center.y + this.planPan.y;
     this.planCamera.left = -planSize * aspect;
@@ -2750,12 +3458,14 @@ function groupedGlobalIds(changes) {
 
 function highlightMaterial(kind) {
   const colors = {added: 0x43c26b, removed: 0xe05a47, modified: 0xd99a2b, moved: 0x4b8fe3, renamed: 0x9b6bd3};
-  return new THREE.MeshLambertMaterial({
+  return new THREE.MeshStandardMaterial({
     color: colors[kind] || 0xa8aaa7,
     transparent: true,
     opacity: 0.9,
     side: THREE.DoubleSide,
-    depthTest: true
+    depthTest: true,
+    roughness: 0.5,
+    metalness: 0
   });
 }
 
@@ -2890,8 +3600,8 @@ try {
   ifcViewer = null;
   console.error('3D viewer unavailable:', error);
   const msg = '3D preview unavailable on this machine (no WebGL).';
-  if (els.modelStatus) els.modelStatus.textContent = msg;
-  if (els.planStatus) els.planStatus.textContent = msg;
+  if (els.modelStatus) { els.modelStatus.textContent = msg; els.modelStatus.dataset.state = 'empty'; }
+  if (els.planStatus) { els.planStatus.textContent = msg; els.planStatus.dataset.state = 'empty'; }
 }
 refresh();
 loadHealth();

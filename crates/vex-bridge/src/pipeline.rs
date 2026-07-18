@@ -822,9 +822,6 @@ pub async fn run_manual_push(
         std::fs::create_dir_all(&dir)?;
     }
 
-    ensure_repo_initialized(&cfg.vex_bin, &dir, &cfg.vex_serve_host, cloud_project_id).await?;
-    set_origin_remote(&cfg.vex_bin, &dir, &cfg.vex_serve_host, cloud_project_id).await?;
-
     let commit_hash = state
         .read()
         .await
@@ -837,6 +834,9 @@ pub async fn run_manual_push(
                 "this project has no commits ready to push".to_string(),
             )
         })?;
+
+    ensure_repo_initialized(&cfg.vex_bin, &dir, &cfg.vex_serve_host, cloud_project_id).await?;
+    set_origin_remote(&cfg.vex_bin, &dir, &cfg.vex_serve_host, cloud_project_id).await?;
 
     let refspec = format!("refs/heads/{branch}");
     vex_cli::push(&cfg.vex_bin, &dir, "origin", &refspec).await?;
