@@ -121,6 +121,31 @@ pub struct Config {
     #[serde(default = "default_render_cache_max_bytes")]
     pub render_cache_max_bytes: u64,
 
+    /// Maximum number of render worker jobs allowed to build concurrently.
+    ///
+    /// Combined with [`Config::render_job_heap_mb`] this caps the render
+    /// subsystem's peak memory: the worst-case Node heap in flight is roughly
+    /// `render_max_concurrency * render_job_heap_mb`. Defaults conservatively
+    /// (see [`default_render_max_concurrency`]) and is clamped into
+    /// `[RENDER_MIN_CONCURRENCY, RENDER_MAX_CONCURRENCY]` so a `0` or an absurd
+    /// value can never disable scheduling or oversubscribe a workstation.
+    #[serde(default = "default_render_max_concurrency")]
+    pub render_max_concurrency: usize,
+
+    /// Per-job Node.js old-generation heap cap, in mebibytes, passed to the
+    /// render worker as `--max-old-space-size`. Bounds how much memory a single
+    /// large model can consume before Node aborts the build (which surfaces as
+    /// a retryable failure and leaves the raw IFC fallback intact). Clamped
+    /// into `[RENDER_MIN_JOB_HEAP_MB, RENDER_MAX_JOB_HEAP_MB]`.
+    #[serde(default = "default_render_job_heap_mb")]
+    pub render_job_heap_mb: u64,
+
+    /// Wall-clock timeout, in seconds, for a single render worker invocation.
+    /// A build that exceeds it is killed and recorded as a retryable failure.
+    /// Clamped into `[RENDER_MIN_JOB_TIMEOUT_SECS, RENDER_MAX_JOB_TIMEOUT_SECS]`.
+    #[serde(default = "default_render_job_timeout_secs")]
+    pub render_job_timeout_secs: u64,
+
     /// Folders the daemon should auto-watch in Tier 3 mode. Each entry maps a
     /// project id to a local directory; any IFC file appearing under that
     /// directory triggers a commit + push.
@@ -175,6 +200,27 @@ fn default_port() -> u16 {
 fn default_render_cache_max_bytes() -> u64 {
     2 * 1024 * 1024 * 1024
 }
+/// Conservative default render build concurrency: 2 jobs.
+///
+/// Two concurrent jobs keep a multi-core workstation busy without the
+/// thrash of unbounded parallelism, and with the default per-job heap cap
+/// bound peak render memory to roughly 4 GiB. Operators who want strict
+/// single-flight behaviour can set `render_max_concurrency = 1`.
+fn default_render_max_concurrency() -> usize {
+    2
+}
+/// Conservative default per-job Node heap cap: 2048 MiB (2 GiB), matching
+/// Node's own default old-space ceiling on 64-bit hosts while making the
+/// bound explicit and configurable.
+fn default_render_job_heap_mb() -> u64 {
+    2048
+}
+/// Conservative default per-job timeout: 15 minutes. Long enough for a large
+/// building model, short enough that a wedged worker cannot hold a slot open
+/// indefinitely.
+fn default_render_job_timeout_secs() -> u64 {
+    15 * 60
+}
 fn default_globs() -> Vec<String> {
     vec!["*.ifc".into()]
 }
@@ -224,6 +270,9 @@ impl Default for Config {
             default_author_name: None,
             default_author_email: None,
             render_cache_max_bytes: default_render_cache_max_bytes(),
+            render_max_concurrency: default_render_max_concurrency(),
+            render_job_heap_mb: default_render_job_heap_mb(),
+            render_job_timeout_secs: default_render_job_timeout_secs(),
             watch: Vec::new(),
         }
     }
@@ -235,11 +284,50 @@ impl Config {
     /// never make the cache evict and rebuild the same artifact repeatedly.
     pub const RENDER_CACHE_MIN_BYTES: u64 = 64 * 1024 * 1024;
 
+    /// Bounds for [`Config::render_max_concurrency`]. At least one job must be
+    /// able to run, and the ceiling keeps a misconfiguration from
+    /// oversubscribing a workstation with heavyweight Node processes.
+    pub const RENDER_MIN_CONCURRENCY: usize = 1;
+    pub const RENDER_MAX_CONCURRENCY: usize = 8;
+
+    /// Bounds for [`Config::render_job_heap_mb`]. The floor keeps a tiny cap
+    /// from aborting every non-trivial model; the ceiling stops a typo from
+    /// handing a single Node process an unbounded heap.
+    pub const RENDER_MIN_JOB_HEAP_MB: u64 = 512;
+    pub const RENDER_MAX_JOB_HEAP_MB: u64 = 16 * 1024;
+
+    /// Bounds for [`Config::render_job_timeout_secs`].
+    pub const RENDER_MIN_JOB_TIMEOUT_SECS: u64 = 30;
+    pub const RENDER_MAX_JOB_TIMEOUT_SECS: u64 = 60 * 60;
+
     /// Effective render artifact cache capacity, clamped to a safe floor.
     #[must_use]
     pub fn render_cache_capacity_bytes(&self) -> u64 {
         self.render_cache_max_bytes
             .max(Self::RENDER_CACHE_MIN_BYTES)
+    }
+
+    /// Effective maximum render build concurrency, clamped to a safe range.
+    #[must_use]
+    pub fn render_max_concurrency(&self) -> usize {
+        self.render_max_concurrency
+            .clamp(Self::RENDER_MIN_CONCURRENCY, Self::RENDER_MAX_CONCURRENCY)
+    }
+
+    /// Effective per-job Node heap cap in MiB, clamped to a safe range.
+    #[must_use]
+    pub fn render_job_heap_mb(&self) -> u64 {
+        self.render_job_heap_mb
+            .clamp(Self::RENDER_MIN_JOB_HEAP_MB, Self::RENDER_MAX_JOB_HEAP_MB)
+    }
+
+    /// Effective per-job wall-clock timeout, clamped to a safe range.
+    #[must_use]
+    pub fn render_job_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.render_job_timeout_secs.clamp(
+            Self::RENDER_MIN_JOB_TIMEOUT_SECS,
+            Self::RENDER_MAX_JOB_TIMEOUT_SECS,
+        ))
     }
 
     pub fn load_or_default(paths: &Paths) -> BridgeResult<Self> {
@@ -474,6 +562,71 @@ mod tests {
         // them must fall back to the conservative default rather than fail.
         let cfg: Config = toml::from_str("port = 9000\n").unwrap();
         assert_eq!(cfg.render_cache_max_bytes, default_render_cache_max_bytes());
+    }
+
+    #[test]
+    fn render_scheduler_limits_default_conservatively() {
+        let cfg = Config::default();
+        assert_eq!(cfg.render_max_concurrency, default_render_max_concurrency());
+        assert_eq!(cfg.render_job_heap_mb, default_render_job_heap_mb());
+        assert_eq!(
+            cfg.render_job_timeout_secs,
+            default_render_job_timeout_secs()
+        );
+        // Effective values equal the (already in-range) defaults.
+        assert_eq!(cfg.render_max_concurrency(), 2);
+        assert_eq!(cfg.render_job_heap_mb(), 2048);
+        assert_eq!(cfg.render_job_timeout().as_secs(), 15 * 60);
+    }
+
+    #[test]
+    fn render_scheduler_limits_clamp_out_of_range_values() {
+        // Zero / tiny values clamp up to the safe floors.
+        let tiny = Config {
+            render_max_concurrency: 0,
+            render_job_heap_mb: 1,
+            render_job_timeout_secs: 0,
+            ..Config::default()
+        };
+        assert_eq!(
+            tiny.render_max_concurrency(),
+            Config::RENDER_MIN_CONCURRENCY
+        );
+        assert_eq!(tiny.render_job_heap_mb(), Config::RENDER_MIN_JOB_HEAP_MB);
+        assert_eq!(
+            tiny.render_job_timeout().as_secs(),
+            Config::RENDER_MIN_JOB_TIMEOUT_SECS
+        );
+
+        // Absurdly large values clamp down to the safe ceilings.
+        let huge = Config {
+            render_max_concurrency: 4096,
+            render_job_heap_mb: 1_000_000,
+            render_job_timeout_secs: 10_000_000,
+            ..Config::default()
+        };
+        assert_eq!(
+            huge.render_max_concurrency(),
+            Config::RENDER_MAX_CONCURRENCY
+        );
+        assert_eq!(huge.render_job_heap_mb(), Config::RENDER_MAX_JOB_HEAP_MB);
+        assert_eq!(
+            huge.render_job_timeout().as_secs(),
+            Config::RENDER_MAX_JOB_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn config_missing_render_scheduler_fields_use_defaults() {
+        // Config files written before this milestone omit the scheduler
+        // fields; loading them must fall back to the defaults, not fail.
+        let cfg: Config = toml::from_str("port = 9000\n").unwrap();
+        assert_eq!(cfg.render_max_concurrency, default_render_max_concurrency());
+        assert_eq!(cfg.render_job_heap_mb, default_render_job_heap_mb());
+        assert_eq!(
+            cfg.render_job_timeout_secs,
+            default_render_job_timeout_secs()
+        );
     }
 
     #[test]

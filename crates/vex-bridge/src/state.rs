@@ -83,11 +83,36 @@ pub struct IfcSnapshot {
 pub struct RenderArtifactJob {
     pub project_id: String,
     pub commit_hash: String,
-    pub status: RenderArtifactJobStatus,
+    pub status: RenderJobState,
     pub updated_at_unix: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Durable lifecycle of a derived render job — the on-disk source of truth.
+///
+/// It distinguishes every state the scheduler can observe, including
+/// `Superseded`: a job that was still merely queued when a newer commit for
+/// the same project arrived, and so must not have a worker spend memory or CPU
+/// rendering an obsolete revision. Supersede applies to *derived* render work
+/// only; semantic commits are never affected.
+///
+/// The narrower [`RenderArtifactJobStatus`] is the projection exposed by the
+/// HTTP status endpoint. Keeping durable state richer than the wire contract
+/// lets the daemon reason about superseded work without changing the protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum RenderJobState {
+    Queued,
+    Building,
+    Ready,
+    Failed { message: String, retryable: bool },
+    Superseded { superseded_by: String },
+}
+
+/// Endpoint-facing projection of [`RenderJobState`], kept in lockstep with the
+/// render status protocol enum so the HTTP contract is unchanged by this
+/// milestone. It never carries a state the protocol cannot represent;
+/// `Superseded` collapses to "no artifact requested" at the boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum RenderArtifactJobStatus {
     Queued,
@@ -318,11 +343,11 @@ impl State {
         self.pending_push.len()
     }
 
-    pub fn set_render_artifact_status(
+    pub fn set_render_job_state(
         &mut self,
         project_id: String,
         commit_hash: String,
-        status: RenderArtifactJobStatus,
+        status: RenderJobState,
     ) {
         self.render_artifacts
             .retain(|job| !(job.project_id == project_id && job.commit_hash == commit_hash));
@@ -341,32 +366,57 @@ impl State {
 
     /// Record a newly requested render job unless equivalent work already has
     /// a terminal artifact or is currently owned by a worker.
+    ///
+    /// Enqueuing also *coalesces* the project's queue: any job for the same
+    /// project that is still merely `Queued` is marked `Superseded` by this
+    /// newer commit, so a worker never renders an obsolete revision. Work a
+    /// worker already owns (`Building`) and completed artifacts (`Ready`) are
+    /// never superseded — only speculative queued work is.
     pub fn enqueue_render_artifact(&mut self, project_id: String, commit_hash: String) -> bool {
         if matches!(
-            self.render_artifact_status(&project_id, &commit_hash),
-            Some(
-                RenderArtifactJobStatus::Queued
-                    | RenderArtifactJobStatus::Building
-                    | RenderArtifactJobStatus::Ready
-            )
+            self.render_job_state(&project_id, &commit_hash),
+            Some(RenderJobState::Queued | RenderJobState::Building | RenderJobState::Ready)
         ) {
             return false;
         }
-        self.set_render_artifact_status(project_id, commit_hash, RenderArtifactJobStatus::Queued);
+        self.supersede_queued_render_artifacts(&project_id, &commit_hash);
+        self.set_render_job_state(project_id, commit_hash, RenderJobState::Queued);
         true
+    }
+
+    /// Mark every still-`Queued` job for `project_id` — other than
+    /// `superseded_by` itself — as superseded by the newer commit. Building and
+    /// ready jobs are deliberately left untouched so in-progress renders and
+    /// published artifacts are never discarded.
+    fn supersede_queued_render_artifacts(&mut self, project_id: &str, superseded_by: &str) {
+        let now = now_unix();
+        for job in &mut self.render_artifacts {
+            if job.project_id == project_id
+                && job.commit_hash != superseded_by
+                && matches!(job.status, RenderJobState::Queued)
+            {
+                job.status = RenderJobState::Superseded {
+                    superseded_by: superseded_by.to_string(),
+                };
+                job.updated_at_unix = now;
+            }
+        }
     }
 
     /// A process restart terminates in-memory renderer tasks. Record their
     /// interruption before startup so the daemon can safely enqueue them again.
+    /// Only jobs a worker could have been actively running (`Queued`/`Building`)
+    /// are affected; superseded, ready, and already-failed jobs keep their
+    /// durable outcome, so obsolete work is never resurrected on restart.
     pub fn interrupt_active_render_artifacts(&mut self) -> Vec<(String, String)> {
         let mut interrupted = Vec::new();
         for job in &mut self.render_artifacts {
             if matches!(
                 job.status,
-                RenderArtifactJobStatus::Queued | RenderArtifactJobStatus::Building
+                RenderJobState::Queued | RenderJobState::Building
             ) {
                 interrupted.push((job.project_id.clone(), job.commit_hash.clone()));
-                job.status = RenderArtifactJobStatus::Failed {
+                job.status = RenderJobState::Failed {
                     message: "render worker was interrupted by daemon restart".into(),
                     retryable: true,
                 };
@@ -376,11 +426,10 @@ impl State {
         interrupted
     }
 
-    pub fn render_artifact_status(
-        &self,
-        project_id: &str,
-        commit_hash: &str,
-    ) -> Option<RenderArtifactJobStatus> {
+    /// Durable state of a single render job, including states the HTTP endpoint
+    /// does not surface (notably `Superseded`). Used by the scheduler and
+    /// recovery logic; the endpoint uses [`State::render_artifact_status`].
+    pub fn render_job_state(&self, project_id: &str, commit_hash: &str) -> Option<RenderJobState> {
         self.render_artifacts
             .iter()
             .rev()
@@ -388,10 +437,32 @@ impl State {
             .map(|job| job.status.clone())
     }
 
+    /// Endpoint-facing render status. `Superseded` is intentionally reported as
+    /// absent (`None`): no artifact will ever be built for a superseded commit,
+    /// so callers fall back to the canonical IFC exactly as they would for work
+    /// that was never requested. This keeps the HTTP status contract identical
+    /// to before this milestone.
+    pub fn render_artifact_status(
+        &self,
+        project_id: &str,
+        commit_hash: &str,
+    ) -> Option<RenderArtifactJobStatus> {
+        match self.render_job_state(project_id, commit_hash)? {
+            RenderJobState::Queued => Some(RenderArtifactJobStatus::Queued),
+            RenderJobState::Building => Some(RenderArtifactJobStatus::Building),
+            RenderJobState::Ready => Some(RenderArtifactJobStatus::Ready),
+            RenderJobState::Failed { message, retryable } => {
+                Some(RenderArtifactJobStatus::Failed { message, retryable })
+            }
+            RenderJobState::Superseded { .. } => None,
+        }
+    }
+
     /// Commit hashes for a project whose render artifacts a worker still owns
     /// (queued or building). These must be protected from cache eviction: a
     /// building artifact is published by an atomic rename, and evicting a
-    /// sibling directory mid-build must never race that publish.
+    /// sibling directory mid-build must never race that publish. Superseded
+    /// jobs are deliberately excluded — nothing will be built for them.
     pub fn active_render_commits(&self, project_id: &str) -> Vec<String> {
         self.render_artifacts
             .iter()
@@ -399,7 +470,7 @@ impl State {
                 job.project_id == project_id
                     && matches!(
                         job.status,
-                        RenderArtifactJobStatus::Queued | RenderArtifactJobStatus::Building
+                        RenderJobState::Queued | RenderJobState::Building
                     )
             })
             .map(|job| job.commit_hash.clone())
@@ -451,17 +522,13 @@ mod tests {
         assert!(state.enqueue_render_artifact("project".into(), "commit".into()));
         assert!(!state.enqueue_render_artifact("project".into(), "commit".into()));
 
-        state.set_render_artifact_status(
-            "project".into(),
-            "commit".into(),
-            RenderArtifactJobStatus::Ready,
-        );
+        state.set_render_job_state("project".into(), "commit".into(), RenderJobState::Ready);
         assert!(!state.enqueue_render_artifact("project".into(), "commit".into()));
 
-        state.set_render_artifact_status(
+        state.set_render_job_state(
             "project".into(),
             "commit".into(),
-            RenderArtifactJobStatus::Failed {
+            RenderJobState::Failed {
                 message: "temporary".into(),
                 retryable: true,
             },
@@ -470,68 +537,156 @@ mod tests {
     }
 
     #[test]
+    fn enqueuing_newer_commit_supersedes_only_older_queued_jobs() {
+        let mut state = State::default();
+        // c1 is still queued, c2 is already building, and `done` is a finished
+        // artifact for an unrelated commit.
+        assert!(state.enqueue_render_artifact("project".into(), "c1".into()));
+        state.set_render_job_state("project".into(), "c2".into(), RenderJobState::Building);
+        state.set_render_job_state("project".into(), "done".into(), RenderJobState::Ready);
+
+        // A newer commit arrives: only the still-queued c1 is superseded.
+        assert!(state.enqueue_render_artifact("project".into(), "c3".into()));
+
+        assert!(matches!(
+            state.render_job_state("project", "c1"),
+            Some(RenderJobState::Superseded { superseded_by }) if superseded_by == "c3"
+        ));
+        // In-progress build is never superseded.
+        assert!(matches!(
+            state.render_job_state("project", "c2"),
+            Some(RenderJobState::Building)
+        ));
+        // Ready artifact is never superseded.
+        assert!(matches!(
+            state.render_job_state("project", "done"),
+            Some(RenderJobState::Ready)
+        ));
+        // The newest commit is the only queued job left.
+        assert!(matches!(
+            state.render_job_state("project", "c3"),
+            Some(RenderJobState::Queued)
+        ));
+    }
+
+    #[test]
+    fn supersede_is_scoped_per_project() {
+        let mut state = State::default();
+        assert!(state.enqueue_render_artifact("a".into(), "c1".into()));
+        assert!(state.enqueue_render_artifact("b".into(), "c1".into()));
+        // Enqueuing a newer commit for project "a" must not disturb "b".
+        assert!(state.enqueue_render_artifact("a".into(), "c2".into()));
+
+        assert!(matches!(
+            state.render_job_state("a", "c1"),
+            Some(RenderJobState::Superseded { .. })
+        ));
+        assert!(matches!(
+            state.render_job_state("b", "c1"),
+            Some(RenderJobState::Queued)
+        ));
+    }
+
+    #[test]
+    fn superseded_jobs_map_to_absent_endpoint_status() {
+        let mut state = State::default();
+        assert!(state.enqueue_render_artifact("project".into(), "c1".into()));
+        assert!(state.enqueue_render_artifact("project".into(), "c2".into()));
+        // c1 is superseded durably ...
+        assert!(matches!(
+            state.render_job_state("project", "c1"),
+            Some(RenderJobState::Superseded { .. })
+        ));
+        // ... but the HTTP status contract only ever sees the stable four
+        // states, so a superseded commit reports as "not requested" (None).
+        assert_eq!(state.render_artifact_status("project", "c1"), None);
+        assert_eq!(
+            state.render_artifact_status("project", "c2"),
+            Some(RenderArtifactJobStatus::Queued)
+        );
+    }
+
+    #[test]
     fn active_render_jobs_are_recoverable_after_restart() {
         let mut state = State::default();
-        state.set_render_artifact_status(
-            "project".into(),
-            "queued".into(),
-            RenderArtifactJobStatus::Queued,
-        );
-        state.set_render_artifact_status(
+        state.set_render_job_state("project".into(), "queued".into(), RenderJobState::Queued);
+        state.set_render_job_state(
             "project".into(),
             "building".into(),
-            RenderArtifactJobStatus::Building,
+            RenderJobState::Building,
         );
-        state.set_render_artifact_status(
+        state.set_render_job_state("project".into(), "ready".into(), RenderJobState::Ready);
+        // A superseded job is terminal and must not be resurrected on restart.
+        state.set_render_job_state(
             "project".into(),
-            "ready".into(),
-            RenderArtifactJobStatus::Ready,
+            "superseded".into(),
+            RenderJobState::Superseded {
+                superseded_by: "queued".into(),
+            },
         );
 
         let interrupted = state.interrupt_active_render_artifacts();
         assert_eq!(interrupted.len(), 2);
         assert!(matches!(
-            state.render_artifact_status("project", "queued"),
-            Some(RenderArtifactJobStatus::Failed {
+            state.render_job_state("project", "queued"),
+            Some(RenderJobState::Failed {
                 retryable: true,
                 ..
             })
         ));
         assert!(matches!(
-            state.render_artifact_status("project", "ready"),
-            Some(RenderArtifactJobStatus::Ready)
+            state.render_job_state("project", "ready"),
+            Some(RenderJobState::Ready)
+        ));
+        assert!(matches!(
+            state.render_job_state("project", "superseded"),
+            Some(RenderJobState::Superseded { .. })
         ));
     }
 
     #[test]
     fn active_render_commits_lists_only_in_progress_jobs() {
         let mut state = State::default();
-        state.set_render_artifact_status(
-            "project".into(),
-            "queued".into(),
-            RenderArtifactJobStatus::Queued,
-        );
-        state.set_render_artifact_status(
+        state.set_render_job_state("project".into(), "queued".into(), RenderJobState::Queued);
+        state.set_render_job_state(
             "project".into(),
             "building".into(),
-            RenderArtifactJobStatus::Building,
+            RenderJobState::Building,
         );
-        state.set_render_artifact_status(
+        state.set_render_job_state("project".into(), "ready".into(), RenderJobState::Ready);
+        state.set_render_job_state(
             "project".into(),
-            "ready".into(),
-            RenderArtifactJobStatus::Ready,
+            "superseded".into(),
+            RenderJobState::Superseded {
+                superseded_by: "queued".into(),
+            },
         );
-        state.set_render_artifact_status(
-            "other".into(),
-            "building".into(),
-            RenderArtifactJobStatus::Building,
-        );
+        state.set_render_job_state("other".into(), "building".into(), RenderJobState::Building);
 
         let mut active = state.active_render_commits("project");
         active.sort();
-        // A completed (`ready`) artifact is evictable; only queued/building
-        // work for this project is protected, and other projects are excluded.
+        // A completed (`ready`) or `superseded` artifact is evictable; only
+        // queued/building work for this project is protected, and other
+        // projects are excluded.
         assert_eq!(active, vec!["building".to_string(), "queued".to_string()]);
+    }
+
+    #[test]
+    fn legacy_render_job_state_deserializes_without_superseded() {
+        // State files written before this milestone only ever stored the four
+        // original states; they must still load into the enriched enum.
+        let state: State = serde_json::from_str(
+            r#"{
+                "render_artifacts":[
+                    {"project_id":"p","commit_hash":"c","status":{"status":"building"},"updated_at_unix":1}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            state.render_job_state("p", "c"),
+            Some(RenderJobState::Building)
+        ));
     }
 
     #[test]

@@ -2194,6 +2194,20 @@ class RealIfcViewer {
     // and unassigned tiles are never hidden by storey isolation.
     this.artifactStoreyTileIds = new Set();
     this.artifactBaseTileId = null;
+    // Multi-LOD grouping: several tiles (an exact LOD0 tile and an optional
+    // coarser proxy) can describe the same logical content (a storey). This
+    // map keys each group id to its {exact, coarse} tile descriptors so the
+    // viewer shows exactly one LOD per group and can upgrade coarse -> exact.
+    this.artifactGroups = new Map();
+    // The group whose element is currently selected. A selection on a coarse
+    // proxy sets this so the exact LOD0 tile is fetched and the precise
+    // selection is finalised against LOD0 geometry (a coarse proxy is never
+    // treated as the exact selection).
+    this.selectedArtifactGroupId = null;
+    this.pendingArtifactSelection = null;
+    // A group is upgraded from its coarse proxy to exact LOD0 once it subtends
+    // at least this fraction of the view (radius / camera distance).
+    this.artifactExactLodRatio = 0.35;
     // Keep artifact streaming responsive on integrated GPUs. Tile descriptors
     // carry compressed byte sizes, so this is a deliberately conservative
     // proxy for decoded GPU allocation rather than a false-precision reading.
@@ -2385,44 +2399,135 @@ class RealIfcViewer {
 
     this.clearSelection();
     this.selectedId = Number.isFinite(entry.express_id) ? entry.express_id : null;
+    const tile = tileId ? this.artifactTileDescriptors.get(tileId) : null;
+    const groupId = tile ? this.artifactTileGroupId(tile) : (tileId || null);
+    this.selectedArtifactGroupId = groupId;
+    const group = groupId ? this.artifactGroups.get(groupId) : null;
+    const isCoarseHit = tile ? Number(tile.lod) > 0 : false;
+
+    if (isCoarseHit && group && group.exact) {
+      // A coarse proxy is never treated as the exact selection. Record the
+      // element identity (the coarse index still carries express_id/global_id),
+      // upgrade the group to its exact LOD0 tile, and finalise the precise
+      // selection overlay against LOD0 geometry once it is resident.
+      this.pendingArtifactSelection = {
+        groupId,
+        expressId: Number.isFinite(entry.express_id) ? entry.express_id : null,
+        globalId: entry.global_id || null,
+      };
+      this.showProperties(
+        entry.global_id ? {GlobalId: {value: entry.global_id}} : null,
+        Number.isFinite(entry.express_id) ? entry.express_id : 'artifact',
+      );
+      // The exact tile may already be resident (for example hidden under
+      // isolation); finalise now if so, otherwise schedule its fetch/reveal.
+      const selectionFinalized = this.maybeFinalizeArtifactSelection();
+      this.refreshArtifactVisibility();
+      if (!selectionFinalized) this.scheduleArtifactTiles();
+      return;
+    }
+
+    // Exact LOD0 hit: build the precise selection overlay straight from the
+    // hit geometry.
     const range = (entry.triangle_ranges || []).find(candidate =>
       hit.faceIndex >= candidate.first_triangle
       && hit.faceIndex < candidate.first_triangle + candidate.triangle_count
     );
-    const source = hit.object.geometry;
-    const sourceIndex = source && source.getIndex && source.getIndex();
-    if (range && sourceIndex) {
-      const start = range.first_triangle * 3;
-      const count = range.triangle_count * 3;
-      const selectionGeometry = new THREE.BufferGeometry();
-      const sourcePositions = source.getAttribute('position');
-      const positions = new Float32Array(count * 3);
-      // Build a compact standalone overlay so disposing a selection never
-      // disposes the GPU buffers shared by its source tile.
-      for (let index = 0; index < count; index += 1) {
-        const vertex = sourceIndex.array[start + index];
-        positions[index * 3] = sourcePositions.getX(vertex);
-        positions[index * 3 + 1] = sourcePositions.getY(vertex);
-        positions[index * 3 + 2] = sourcePositions.getZ(vertex);
-      }
-      selectionGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      const material = new THREE.MeshBasicMaterial({
-        color: 0x4b8fe3,
-        transparent: true,
-        opacity: 0.7,
-        depthTest: false,
-        side: THREE.DoubleSide,
-      });
-      this.selectionSubset = new THREE.Mesh(selectionGeometry, material);
-      this.selectionSubset.userData.vexArtifactSelection = true;
-      this.selectionSubset.renderOrder = 1;
-      this.modelScene.add(this.selectionSubset);
-      this.orientModel(this.selectionSubset);
-    }
+    this.buildArtifactSelectionOverlay(hit.object.geometry, range ? [range] : []);
     this.showProperties(
       entry.global_id ? {GlobalId: {value: entry.global_id}} : null,
       Number.isFinite(entry.express_id) ? entry.express_id : 'artifact',
     );
+  }
+
+  // Find the first indexed mesh inside a resident tile scene so a selection
+  // overlay can be rebuilt from that tile's geometry.
+  findArtifactTileMesh(object) {
+    if (!object) return null;
+    let found = null;
+    object.traverse(item => {
+      if (found) return;
+      if (item.isMesh && item.geometry && item.geometry.getIndex && item.geometry.getIndex()) found = item;
+    });
+    return found;
+  }
+
+  // Build a compact standalone selection overlay from a source geometry's
+  // indexed triangle ranges. Standalone so disposing a selection never
+  // disposes the GPU buffers shared by its source tile.
+  buildArtifactSelectionOverlay(sourceGeometry, ranges) {
+    const sourceIndex = sourceGeometry && sourceGeometry.getIndex && sourceGeometry.getIndex();
+    const sourcePositions = sourceGeometry && sourceGeometry.getAttribute && sourceGeometry.getAttribute('position');
+    if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
+    if (this.selectionSubset && this.selectionSubset.userData.vexArtifactSelection) {
+      this.selectionSubset.geometry.dispose();
+      this.selectionSubset.material.dispose();
+    }
+    this.selectionSubset = null;
+    if (!sourceIndex || !sourcePositions || !Array.isArray(ranges) || !ranges.length) return;
+    let total = 0;
+    for (const range of ranges) {
+      if (Number.isFinite(range.first_triangle) && Number.isFinite(range.triangle_count)) {
+        total += range.triangle_count * 3;
+      }
+    }
+    if (!total) return;
+    const positions = new Float32Array(total * 3);
+    let cursor = 0;
+    for (const range of ranges) {
+      if (!Number.isFinite(range.first_triangle) || !Number.isFinite(range.triangle_count)) continue;
+      const start = range.first_triangle * 3;
+      const count = range.triangle_count * 3;
+      for (let offset = 0; offset < count; offset += 1) {
+        const vertex = sourceIndex.array[start + offset];
+        positions[cursor * 3] = sourcePositions.getX(vertex);
+        positions[cursor * 3 + 1] = sourcePositions.getY(vertex);
+        positions[cursor * 3 + 2] = sourcePositions.getZ(vertex);
+        cursor += 1;
+      }
+    }
+    const selectionGeometry = new THREE.BufferGeometry();
+    selectionGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x4b8fe3,
+      transparent: true,
+      opacity: 0.7,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+    this.selectionSubset = new THREE.Mesh(selectionGeometry, material);
+    this.selectionSubset.userData.vexArtifactSelection = true;
+    this.selectionSubset.renderOrder = 1;
+    this.modelScene.add(this.selectionSubset);
+    this.orientModel(this.selectionSubset);
+  }
+
+  // Complete a pending coarse-selection upgrade once the group's exact LOD0
+  // tile and index are resident, rebuilding the precise overlay from LOD0.
+  // Returns true when the pending selection is resolved (finalised or found to
+  // have no exact tile/entry), false while still waiting for LOD0 to arrive.
+  maybeFinalizeArtifactSelection() {
+    const pending = this.pendingArtifactSelection;
+    if (!pending) return false;
+    const group = this.artifactGroups.get(pending.groupId);
+    const exactTile = group && group.exact;
+    if (!exactTile) { this.pendingArtifactSelection = null; return true; }
+    const record = this.artifactTileRecords.get(exactTile.tile_id);
+    const exactIndex = this.artifactUsesTileLocalIndex()
+      ? this.artifactSemanticIndexes.get(exactTile.tile_id)
+      : this.artifactSemanticIndex;
+    if (!record || !record.scene || !exactIndex || !Array.isArray(exactIndex.entries)) return false;
+    const entry = exactIndex.entries.find(candidate =>
+      (pending.expressId !== null && candidate.express_id === pending.expressId)
+      || (pending.globalId && candidate.global_id === pending.globalId)
+    );
+    if (!entry) { this.pendingArtifactSelection = null; return true; }
+    const mesh = this.findArtifactTileMesh(record.scene);
+    if (!mesh) { this.pendingArtifactSelection = null; return true; }
+    record.lastUsedAt = performance.now();
+    this.buildArtifactSelectionOverlay(mesh.geometry, entry.triangle_ranges || []);
+    this.pendingArtifactSelection = null;
+    return true;
   }
 
   async selectElement(expressId) {
@@ -2462,6 +2567,8 @@ class RealIfcViewer {
 
   clearSelection() {
     this.selectedId = null;
+    this.selectedArtifactGroupId = null;
+    this.pendingArtifactSelection = null;
     if (this.selectionSubset && this.selectionSubset.parent) this.selectionSubset.parent.remove(this.selectionSubset);
     if (this.selectionSubset && this.selectionSubset.userData.vexArtifactSelection) {
       this.selectionSubset.geometry.dispose();
@@ -3021,7 +3128,11 @@ class RealIfcViewer {
       if (!tiles.length || !this.semanticIndexResource(manifest, tiles[0])) {
         return {reason: 'Render artifact is incomplete; using raw IFC fallback.'};
       }
-      tiles.sort((a, b) => (a.lod - b.lod) || (b.geometric_error - a.geometric_error));
+      // Coarse proxies (higher lod / larger geometric error) sort first so the
+      // initial synchronous tile and early streaming give fast whole-model
+      // coverage; exact LOD0 tiles are upgraded afterwards by distance and
+      // interaction.
+      tiles.sort((a, b) => (b.lod - a.lod) || (b.geometric_error - a.geometric_error) || (a.tile_id < b.tile_id ? -1 : a.tile_id > b.tile_id ? 1 : 0));
       this.setLoadStatus('Downloading render artifact coarse tile...');
       const first = await this.loadArtifactTile(tiles[0], controller.signal, token);
       if (token !== this.loadToken) {
@@ -3112,6 +3223,10 @@ class RealIfcViewer {
 
   scheduleArtifactTiles() {
     if (!this.artifactAbortController || !this.model || this.modelKind !== 'artifact') return;
+    // Distance and interaction can flip which LOD a group wants, so refresh
+    // visibility (to reveal an already-resident upgrade) before queueing any
+    // newly-wanted tiles.
+    this.refreshArtifactVisibility();
     this.queueMissingArtifactTiles(this.model, this.loadToken);
     if (this.artifactSchedulePending || !this.artifactTileQueue.length) return;
     this.artifactSchedulePending = true;
@@ -3123,8 +3238,32 @@ class RealIfcViewer {
 
   registerArtifactTiles(tiles) {
     for (const tile of tiles || []) {
-      if (tile && tile.tile_id) this.artifactTileDescriptors.set(tile.tile_id, tile);
+      if (!tile || !tile.tile_id) continue;
+      this.artifactTileDescriptors.set(tile.tile_id, tile);
+      const groupId = this.artifactTileGroupId(tile);
+      let group = this.artifactGroups.get(groupId);
+      if (!group) {
+        group = {id: groupId, exact: null, coarse: null};
+        this.artifactGroups.set(groupId, group);
+      }
+      if (Number(tile.lod) > 0) {
+        // Keep the coarsest proxy (largest geometric error) as the group's
+        // single coarse LOD when several are ever published.
+        if (!group.coarse || Number(tile.geometric_error) > Number(group.coarse.geometric_error)) {
+          group.coarse = tile;
+        }
+      } else {
+        group.exact = tile;
+      }
     }
+  }
+
+  // The stable ownership key shared by every LOD tile that renders one logical
+  // group. Falls back to the tile id for single-LOD (accurate profile / v1)
+  // tiles that never advertise a group.
+  artifactTileGroupId(tile) {
+    if (!tile) return null;
+    return (typeof tile.group === 'string' && tile.group) ? tile.group : tile.tile_id;
   }
 
   queueMissingArtifactTiles(model, token) {
@@ -3138,10 +3277,11 @@ class RealIfcViewer {
         || this.artifactTileLoading.has(tileId)) {
         continue;
       }
-      // When a storey is isolated, only stream that storey's tile (plus the
-      // explicit unassigned tile). Hidden storeys remain descriptors and are
-      // queued when the user returns to the whole-model view.
-      if (!this.artifactTileVisible(tileId)) continue;
+      // Only stream the LOD each group currently wants: one LOD per group,
+      // coarse for distant/initial groups and exact for near/selected/isolated
+      // ones. Non-wanted LODs and hidden storeys stay as descriptors and are
+      // queued when distance, interaction, or isolation changes.
+      if (!this.artifactTileWanted(tileId)) continue;
       this.artifactTileQueue.push({tile, model, token});
       queued.add(tileId);
     }
@@ -3154,21 +3294,26 @@ class RealIfcViewer {
   }
 
   // Resolve the storey a tile belongs to. Explicit manifest storey metadata
-  // wins; otherwise fall back to the stable `storey-<globalId>` v2 tile-id
-  // contract. Returns null for the unassigned tile and for v1 LOD tiles.
+  // wins; otherwise fall back to the stable `storey-<globalId>` v2 ownership
+  // key (a tile's group id, or its tile id for single-LOD tiles). Returns null
+  // for the unassigned tile and for v1 LOD tiles. Deriving from the group id
+  // keeps a coarse proxy (`storey-<id>/coarse`) in the same storey as its
+  // exact tile instead of inventing a phantom storey.
   tileStoreyId(tile) {
     if (!tile) return null;
     if (tile.storey && typeof tile.storey.global_id === 'string') return tile.storey.global_id;
     if (typeof tile.storey_id === 'string') return tile.storey_id;
-    const id = tile.tile_id;
-    if (typeof id === 'string' && id.indexOf('storey-') === 0) return id.slice('storey-'.length);
+    const groupId = this.artifactTileGroupId(tile);
+    if (typeof groupId === 'string' && groupId.indexOf('storey-') === 0) return groupId.slice('storey-'.length);
     return null;
   }
 
-  // Build the storey list for artifact mode from tile ownership so the level
-  // selector, prioritisation, and isolation all agree. The unassigned tile is
-  // intentionally excluded: it is not a storey and stays visible under
-  // isolation.
+  // Build the storey list for artifact mode from group ownership so the level
+  // selector, prioritisation, and isolation all agree. One storey is derived
+  // per storey-owning group, and every LOD tile of that group is registered as
+  // storey-owned so isolation shows or hides a storey's coarse and exact tiles
+  // together. The unassigned group is intentionally excluded: it is not a
+  // storey and stays visible under isolation.
   deriveArtifactStoreys() {
     this.artifactStoreyTileIds = new Set();
     this.storeys = [];
@@ -3180,22 +3325,27 @@ class RealIfcViewer {
     }
     const rotationAxis = this.upAxisFix ? new THREE.Vector3(1, 0, 0) : null;
     const found = [];
-    for (const tile of this.artifactManifest.tiles || []) {
-      const storeyId = this.tileStoreyId(tile);
-      if (!storeyId || !tile.tile_id) continue;
-      this.artifactStoreyTileIds.add(tile.tile_id);
+    for (const group of this.artifactGroups.values()) {
+      const representative = group.exact || group.coarse;
+      const storeyId = this.tileStoreyId(representative);
+      if (!storeyId) continue;
+      // Every LOD tile of this storey group is storey-owned.
+      for (const tile of [group.exact, group.coarse]) {
+        if (tile && tile.tile_id) this.artifactStoreyTileIds.add(tile.tile_id);
+      }
       let elevation = null;
-      const bounds = tile.bounds;
+      const bounds = representative && representative.bounds;
       if (bounds && Array.isArray(bounds.min) && bounds.min.length === 3 && bounds.min.every(Number.isFinite)) {
         const min = new THREE.Vector3(bounds.min[0], bounds.min[1], bounds.min[2]);
         if (rotationAxis) min.applyAxisAngle(rotationAxis, this.upAxisFix);
         elevation = min.z;
       }
-      found.push({tileId: tile.tile_id, storeyId, elevation});
+      found.push({groupId: group.id, tileId: representative.tile_id, storeyId, elevation});
     }
     // Ground-up ordering so the level list reads bottom to top.
     found.sort((a, b) => (a.elevation ?? 0) - (b.elevation ?? 0));
     this.storeys = found.map((entry, index) => ({
+      groupId: entry.groupId,
       tileId: entry.tileId,
       storeyId: entry.storeyId,
       name: `Storey ${index + 1}`,
@@ -3204,22 +3354,121 @@ class RealIfcViewer {
     if (typeof this.onStoreys === 'function') this.onStoreys(this.storeys);
   }
 
-  activeArtifactStoreyTileId() {
+  activeArtifactStoreyGroupId() {
     if (this.modelKind !== 'artifact') return null;
     if (this.modelLevelIndex === null || this.modelLevelIndex === undefined) return null;
     const storey = this.storeys[this.modelLevelIndex];
-    return storey ? storey.tileId : null;
+    return storey ? storey.groupId : null;
   }
 
-  // A tile is visible under storey isolation when no storey is selected, when
-  // it is the selected storey's tile, or when it is not owned by any storey
-  // (the unassigned tile, whose geometry is never dropped).
+  // Estimate a group's world-space centre and radius (half the bounds
+  // diagonal) after the viewer's Y-up -> Z-up correction, so distance
+  // heuristics match what the camera actually sees.
+  artifactGroupBounds(group) {
+    const source = (group && group.exact) || (group && group.coarse);
+    const bounds = source && source.bounds;
+    if (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max)
+      || !bounds.min.every(Number.isFinite) || !bounds.max.every(Number.isFinite)) {
+      return null;
+    }
+    const center = new THREE.Vector3(
+      (bounds.min[0] + bounds.max[0]) / 2,
+      (bounds.min[1] + bounds.max[1]) / 2,
+      (bounds.min[2] + bounds.max[2]) / 2
+    );
+    if (this.upAxisFix) center.applyAxisAngle(new THREE.Vector3(1, 0, 0), this.upAxisFix);
+    const radius = 0.5 * Math.hypot(
+      bounds.max[0] - bounds.min[0],
+      bounds.max[1] - bounds.min[1],
+      bounds.max[2] - bounds.min[2]
+    );
+    return {center, radius};
+  }
+
+  // A group is close enough to justify its exact LOD0 tile when it subtends a
+  // large enough fraction of the view.
+  artifactGroupNearCamera(group) {
+    const info = this.artifactGroupBounds(group);
+    if (!info) return false;
+    const distance = info.center.distanceTo(this.modelCamera.position);
+    if (!(distance > 0)) return true;
+    return (info.radius / distance) > this.artifactExactLodRatio;
+  }
+
+  // Decide whether a group should show its exact LOD0 tile (true) or its
+  // coarse proxy (false). Single-LOD groups, the selected group, the isolated
+  // storey, and near groups all want exact; everything else stays coarse.
+  groupDesiresExact(groupId) {
+    const group = this.artifactGroups.get(groupId);
+    if (!group || !group.coarse) return true;
+    if (!group.exact) return false;
+    if (this.selectedArtifactGroupId === groupId) return true;
+    const activeGroupId = this.activeArtifactStoreyGroupId();
+    if (activeGroupId !== null) return groupId === activeGroupId;
+    return this.artifactGroupNearCamera(group);
+  }
+
+  // The LOD tile a group aims to show (drives fetching). Falls back to the
+  // other LOD when the preferred one does not exist.
+  preferredGroupLodTileId(groupId) {
+    const group = this.artifactGroups.get(groupId);
+    if (!group) return groupId;
+    const exactId = group.exact && group.exact.tile_id;
+    const coarseId = group.coarse && group.coarse.tile_id;
+    return this.groupDesiresExact(groupId) ? (exactId || coarseId) : (coarseId || exactId);
+  }
+
+  // The single LOD tile a group should currently render: the best resident
+  // tile matching the preference, else any resident tile, else the preferred
+  // (not-yet-resident) tile. Guarantees exactly one visible LOD per group and
+  // keeps the coarse proxy on screen until the exact upgrade arrives.
+  visibleGroupLodTileId(groupId) {
+    const group = this.artifactGroups.get(groupId);
+    if (!group) return groupId;
+    const exactId = group.exact && group.exact.tile_id;
+    const coarseId = group.coarse && group.coarse.tile_id;
+    const desiresExact = this.groupDesiresExact(groupId);
+    const preferred = desiresExact ? (exactId || coarseId) : (coarseId || exactId);
+    const other = desiresExact ? coarseId : exactId;
+    if (preferred && this.artifactTileRecords.has(preferred)) return preferred;
+    if (other && this.artifactTileRecords.has(other)) return other;
+    return preferred;
+  }
+
+  // Whether a tile is the LOD its group currently wants resident. Drives which
+  // tiles are streamed. Hidden storeys are never wanted.
+  artifactTileWanted(tileId) {
+    const tile = this.artifactTileDescriptors.get(tileId);
+    if (!tile) return false;
+    const groupId = this.artifactTileGroupId(tile);
+    const activeGroupId = this.activeArtifactStoreyGroupId();
+    if (activeGroupId !== null && this.artifactStoreyTileIds.has(tileId) && groupId !== activeGroupId) {
+      return false;
+    }
+    return this.preferredGroupLodTileId(groupId) === tileId;
+  }
+
+  // A tile is visible when it is its group's currently rendered LOD and the
+  // group is not hidden by storey isolation.
   artifactTileVisible(tileId) {
     if (!tileId) return true;
-    const activeTileId = this.activeArtifactStoreyTileId();
-    if (activeTileId === null) return true;
-    if (!this.artifactStoreyTileIds.has(tileId)) return true;
-    return tileId === activeTileId;
+    const tile = this.artifactTileDescriptors.get(tileId);
+    const groupId = tile ? this.artifactTileGroupId(tile) : tileId;
+    const activeGroupId = this.activeArtifactStoreyGroupId();
+    if (activeGroupId !== null && this.artifactStoreyTileIds.has(tileId) && groupId !== activeGroupId) {
+      return false;
+    }
+    return this.visibleGroupLodTileId(groupId) === tileId;
+  }
+
+  // Recompute per-tile visibility so exactly one LOD per group is shown as
+  // tiles arrive and as distance/interaction/isolation change.
+  refreshArtifactVisibility() {
+    if (!this.model) return;
+    for (const child of this.model.children) {
+      const tileId = child.userData && child.userData.vexTileId;
+      child.visible = this.artifactTileVisible(tileId);
+    }
   }
 
   applyArtifactStoreyIsolation() {
@@ -3227,18 +3476,20 @@ class RealIfcViewer {
     // tall/multi-storey elements are shown whole rather than sliced.
     this.modelRenderer.clippingPlanes = this.sectionActive ? [this.sectionPlane] : [];
     if (!this.model) return;
-    for (const child of this.model.children) {
-      const tileId = child.userData && child.userData.vexTileId;
-      child.visible = this.artifactTileVisible(tileId);
-    }
+    this.refreshArtifactVisibility();
     // Prefer streaming the isolated storey next.
     this.scheduleArtifactTiles();
   }
 
   artifactTilePriority(tile) {
-    const activeTileId = this.activeArtifactStoreyTileId();
+    const groupId = this.artifactTileGroupId(tile);
+    const activeGroupId = this.activeArtifactStoreyGroupId();
     // The isolated storey's tile is the most useful thing to have on screen.
-    if (activeTileId && tile && tile.tile_id === activeTileId) return -Infinity;
+    if (activeGroupId !== null && groupId === activeGroupId) return -Infinity;
+    // A pending selection upgrade to exact LOD0 is the next most urgent fetch.
+    if (this.selectedArtifactGroupId && groupId === this.selectedArtifactGroupId && Number(tile.lod) === 0) {
+      return -1e17;
+    }
     const bounds = tile && tile.bounds;
     if (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max)) return Number.MAX_SAFE_INTEGER;
     const center = new THREE.Vector3(
@@ -3247,12 +3498,16 @@ class RealIfcViewer {
       (bounds.min[2] + bounds.max[2]) / 2
     );
     if (this.upAxisFix) center.applyAxisAngle(new THREE.Vector3(1, 0, 0), this.upAxisFix);
-    // Lower LOD values are the coarse representation in the artifact contract.
-    // Distance still determines which equally detailed tiles are useful first.
-    let priority = (Number(tile.lod) || 0) * 1e12 + center.distanceToSquared(this.modelCamera.position);
-    // When a storey is isolated, tiles that are hidden by ownership are the
-    // least urgent to stream.
-    if (activeTileId && this.artifactStoreyTileIds.has(tile.tile_id)) priority += 1e15;
+    // Coarse proxies (lod > 0) are streamed first for fast whole-model
+    // coverage; exact LOD0 tiles follow. Distance orders equally detailed
+    // tiles so nearer content arrives sooner.
+    const isCoarse = Number(tile.lod) > 0;
+    let priority = (isCoarse ? 0 : 1e15) + center.distanceToSquared(this.modelCamera.position);
+    // When a storey is isolated, tiles owned by hidden storeys are the least
+    // urgent to stream.
+    if (activeGroupId !== null && groupId !== activeGroupId && this.artifactStoreyTileIds.has(tile.tile_id)) {
+      priority += 1e18;
+    }
     return priority;
   }
 
@@ -3306,6 +3561,13 @@ class RealIfcViewer {
       this.artifactTileRecords.set(tile.tile_id, {scene, bytes, lastUsedAt: performance.now()});
       this.setArtifactSemanticIndex(tile, semanticIndex);
       this.artifactResidentBytes += bytes;
+      // A newly-resident tile can be the exact upgrade a group now wants, so
+      // refresh visibility to swap it in (and hide the coarse proxy) without
+      // ever rendering both LODs of a group at once.
+      this.refreshArtifactVisibility();
+      // If this exact tile completes a pending coarse-selection upgrade,
+      // finalise the precise selection against its LOD0 geometry.
+      this.maybeFinalizeArtifactSelection();
       this.setModelSourceMeta(currentViewMode);
     } catch (error) {
       if (error && error.name === 'AbortError') return;
@@ -3318,13 +3580,19 @@ class RealIfcViewer {
 
   evictArtifactTiles(incomingBytes, protectedTileId) {
     if (this.artifactResidentBytes + incomingBytes <= this.artifactMemoryBudgetBytes) return;
-    // Never evict the tile we are about to commit, the base/coarse tile, or the
-    // storey the user is currently isolating.
-    const activeTileId = this.activeArtifactStoreyTileId();
+    // Never evict the tile we are about to commit, the base/coarse tile, the
+    // storey the user is currently isolating, or the group with an active
+    // selection upgrade in flight.
+    const activeGroupId = this.activeArtifactStoreyGroupId();
+    const selectedGroupId = this.selectedArtifactGroupId;
     const candidates = [...this.artifactTileRecords.entries()]
-      .filter(([tileId]) => tileId !== protectedTileId
-        && tileId !== this.artifactBaseTileId
-        && tileId !== activeTileId)
+      .filter(([tileId]) => {
+        if (tileId === protectedTileId || tileId === this.artifactBaseTileId) return false;
+        const groupId = this.artifactTileGroupId(this.artifactTileDescriptors.get(tileId));
+        if (activeGroupId !== null && groupId === activeGroupId) return false;
+        if (selectedGroupId && groupId === selectedGroupId) return false;
+        return true;
+      })
       .sort(([, left], [, right]) => {
         // Reclaim hidden tiles before visible ones, then least-recently-used.
         const leftVisible = left.scene && left.scene.visible ? 1 : 0;
@@ -3547,6 +3815,9 @@ class RealIfcViewer {
     this.artifactTileLoading.clear();
     this.artifactStoreyTileIds = new Set();
     this.artifactBaseTileId = null;
+    this.artifactGroups.clear();
+    this.selectedArtifactGroupId = null;
+    this.pendingArtifactSelection = null;
     this.artifactResidentBytes = 0;
     this.highlightObjects = [];
     this.removedObjects = [];

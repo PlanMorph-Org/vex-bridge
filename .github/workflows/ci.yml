@@ -78,8 +78,14 @@ jobs:
           node --check tools/vex-render-worker.mjs
           node --check tools/pressure-test-render-worker.mjs
           node --check tools/test-storey-tiling.mjs
+          node --check tools/test-lod-profiles.mjs
+          node --check tools/check-dashboard-syntax.mjs
+
+      - name: Verify dashboard viewer module syntax
+        run: node tools/check-dashboard-syntax.mjs
 
       - name: Verify render artifact fidelity and storey tiling
         run: |
           node tools/pressure-test-render-worker.mjs
           node tools/test-storey-tiling.mjs
+          node tools/test-lod-profiles.mjs

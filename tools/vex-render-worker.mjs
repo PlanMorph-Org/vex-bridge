@@ -25,6 +25,30 @@ const SEMANTIC_INDEX_SCHEMA = 'vex.render-semantic-index/1';
 const RENDER_POLICY_ID = 'vex.render-policy.storey-first/1';
 const TILE_STRATEGY = 'storey-first';
 const UNASSIGNED_TILE_ID = 'unassigned';
+const COARSE_TILE_SUFFIX = '/coarse';
+const DEFAULT_RENDER_PROFILE = 'balanced';
+
+// Render profiles are an explicit, safe policy input. They never change the
+// exact LOD0 tile (its GLB stays byte-for-byte the current full-detail
+// rendition); they only decide whether a coarse level-of-detail proxy is also
+// emitted and how aggressively small elements are dropped from that proxy.
+//
+//   accurate  exact geometry only; no coarse proxy is ever generated.
+//   balanced  (default) exact LOD0 + a conservative whole-element bounding-box
+//             proxy that keeps every element, for progressive viewing.
+//   draft     exact LOD0 + the same bounding-box proxy, but elements whose
+//             bounding box is small relative to the tile are dropped from the
+//             proxy for the fastest, lowest-detail preview.
+//
+// No mesh simplifier is vendored, so the coarse LOD is deliberately a valid,
+// conservative per-element axis-aligned bounding box rather than a decimated
+// mesh. Each proxy box maps back to its element's Express ID and GlobalId, so
+// coarse tiles remain identifiable but are never treated as exact geometry.
+const RENDER_PROFILES = {
+  draft: { id: 'draft', emitCoarse: true, coarseMinDiagonalRatio: 0.02 },
+  balanced: { id: 'balanced', emitCoarse: true, coarseMinDiagonalRatio: 0 },
+  accurate: { id: 'accurate', emitCoarse: false, coarseMinDiagonalRatio: 0 },
+};
 // web-ifc entity type identifiers used to resolve storey membership directly
 // from the IFC spatial hierarchy rather than inferring it from geometry.
 const IFC_REL_AGGREGATES = 160246688;
@@ -39,10 +63,15 @@ function usage() {
   return `Usage:
   node tools\\vex-render-worker.mjs --ifc <model.ifc> --out <staging-dir> \\
     --project-id <project-id> --commit <64-hex-commit> \\
-    --web-ifc-api <web-ifc-api-node.js> --wasm-dir <directory>
+    --web-ifc-api <web-ifc-api-node.js> --wasm-dir <directory> \\
+    [--render-profile <draft|balanced|accurate>]
 
 Writes manifest.json and content-addressed objects/<sha256> files. The output
 directory may be new or empty; it is never overwritten.
+
+--render-profile selects the level-of-detail policy and defaults to
+'balanced'. It is a safe, optional input: an unspecified profile always yields
+the balanced default, and every profile keeps the exact LOD0 tile identical.
 
 Runtime dependency:
   --web-ifc-api must name a Node-target web-ifc-api-node.js module.
@@ -57,18 +86,21 @@ function parseArgs(argv) {
   }
 
   const values = new Map();
-  const expected = new Set(['--ifc', '--out', '--project-id', '--commit', '--web-ifc-api', '--wasm-dir']);
+  const required = new Set(['--ifc', '--out', '--project-id', '--commit', '--web-ifc-api', '--wasm-dir']);
+  const optional = new Set(['--render-profile']);
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
-    if (!expected.has(flag) || value === undefined || value.startsWith('--') || values.has(flag)) {
-      throw new Error('expected all required worker options exactly once');
+    if ((!required.has(flag) && !optional.has(flag)) || value === undefined || value.startsWith('--') || values.has(flag)) {
+      throw new Error('expected only recognised worker options, each at most once');
     }
     values.set(flag, value);
   }
 
-  if (values.size !== expected.size) {
-    throw new Error('expected --ifc, --out, --project-id, --commit, --web-ifc-api, and --wasm-dir');
+  for (const flag of required) {
+    if (!values.has(flag)) {
+      throw new Error('expected --ifc, --out, --project-id, --commit, --web-ifc-api, and --wasm-dir');
+    }
   }
 
   const projectId = values.get('--project-id').trim();
@@ -78,6 +110,13 @@ function parseArgs(argv) {
     throw new Error('--commit must be a complete 64-character hexadecimal hash');
   }
 
+  // A missing --render-profile safely resolves to the balanced default, so
+  // existing callers that never pass the flag keep the exact current output.
+  const renderProfile = (values.get('--render-profile') ?? DEFAULT_RENDER_PROFILE).trim().toLowerCase();
+  if (!Object.prototype.hasOwnProperty.call(RENDER_PROFILES, renderProfile)) {
+    throw new Error(`--render-profile must be one of ${Object.keys(RENDER_PROFILES).join(', ')}`);
+  }
+
   return {
     ifc: resolve(values.get('--ifc')),
     out: resolve(values.get('--out')),
@@ -85,6 +124,7 @@ function parseArgs(argv) {
     commit,
     webIfcApi: resolve(values.get('--web-ifc-api')),
     wasmDir: resolve(values.get('--wasm-dir')),
+    renderProfile,
   };
 }
 
@@ -285,7 +325,7 @@ function transformPlacement(vertices, indices, matrix, color) {
     }
     localIndices[index] = localIndex;
   }
-  return { positions, normals, colors, indices: localIndices, vertexCount, min, max };
+  return { positions, normals, colors, indices: localIndices, vertexCount, min, max, color: [red, green, blue, alpha] };
 }
 
 function handleExpressId(value) {
@@ -472,6 +512,130 @@ function assembleTile(tileId, elements) {
   }
   const glb = buildGlb(chunks, totals, bounds);
   return { tileId, glb, entries, bounds, totals };
+}
+
+// Union the axis-aligned bounds of every placement belonging to one element.
+function elementBounds(element) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const placement of element.placements) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      min[axis] = Math.min(min[axis], placement.min[axis]);
+      max[axis] = Math.max(max[axis], placement.max[axis]);
+    }
+  }
+  return { min, max };
+}
+
+function boundsDiagonal(min, max) {
+  const dx = max[0] - min[0];
+  const dy = max[1] - min[1];
+  const dz = max[2] - min[2];
+  return Math.hypot(dx, dy, dz);
+}
+
+// Build a valid, closed, outward-facing axis-aligned box for one element. This
+// is the conservative whole-element proxy used by the coarse LOD: it always
+// contains the element, has correct outward normals and counter-clockwise
+// front faces (so it renders solid, never inside-out), and reuses the exact
+// tile's POSITION/NORMAL/COLOR_0 attribute layout so it flows through the same
+// GLB and semantic-index machinery.
+function buildElementBox(min, max, color) {
+  const [x0, y0, z0] = min;
+  const [x1, y1, z1] = max;
+  const [red, green, blue, alpha] = color;
+  const faces = [
+    { n: [1, 0, 0], v: [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]] },
+    { n: [-1, 0, 0], v: [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]] },
+    { n: [0, 1, 0], v: [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]] },
+    { n: [0, -1, 0], v: [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]] },
+    { n: [0, 0, 1], v: [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]] },
+    { n: [0, 0, -1], v: [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]] },
+  ];
+  const positions = new Float32Array(72);
+  const normals = new Float32Array(72);
+  const colors = new Float32Array(96);
+  const indices = new Uint32Array(36);
+  let vp = 0;
+  let np = 0;
+  let cp = 0;
+  let ip = 0;
+  let base = 0;
+  for (const face of faces) {
+    for (const vertex of face.v) {
+      positions[vp++] = numberOrThrow(vertex[0], 'coarse box x');
+      positions[vp++] = numberOrThrow(vertex[1], 'coarse box y');
+      positions[vp++] = numberOrThrow(vertex[2], 'coarse box z');
+      normals[np++] = face.n[0];
+      normals[np++] = face.n[1];
+      normals[np++] = face.n[2];
+      colors[cp++] = red;
+      colors[cp++] = green;
+      colors[cp++] = blue;
+      colors[cp++] = alpha;
+    }
+    indices[ip++] = base;
+    indices[ip++] = base + 1;
+    indices[ip++] = base + 2;
+    indices[ip++] = base;
+    indices[ip++] = base + 2;
+    indices[ip++] = base + 3;
+    base += 4;
+  }
+  return { positions, normals, colors, indices, vertexCount: 24, min: [x0, y0, z0], max: [x1, y1, z1] };
+}
+
+/**
+ * Assemble a coarse LOD tile: one conservative bounding-box proxy per element.
+ *
+ * Every emitted box maps back to its element via the tile-local semantic index
+ * (Express ID + GlobalId + triangle range), so a coarse tile stays selectable
+ * for identity, but the viewer must never treat it as exact geometry. Elements
+ * whose bounding box is small relative to the whole tile are dropped when the
+ * profile requests it (draft), which keeps the proxy light without ever
+ * touching the exact LOD0 tile. Returns `null` when no element qualifies so a
+ * meaningless empty coarse tile is never published.
+ */
+function assembleCoarseTile(tileId, elements, profile) {
+  const groupMin = [Infinity, Infinity, Infinity];
+  const groupMax = [-Infinity, -Infinity, -Infinity];
+  const candidates = [];
+  for (const element of elements) {
+    const { min, max } = elementBounds(element);
+    if (!min.every(Number.isFinite) || !max.every(Number.isFinite)) continue;
+    const diagonal = boundsDiagonal(min, max);
+    if (!(diagonal > 0)) continue; // skip degenerate (zero-volume) elements
+    for (let axis = 0; axis < 3; axis += 1) {
+      groupMin[axis] = Math.min(groupMin[axis], min[axis]);
+      groupMax[axis] = Math.max(groupMax[axis], max[axis]);
+    }
+    candidates.push({ element, min, max, diagonal });
+  }
+  if (candidates.length === 0) return null;
+
+  const tileDiagonal = boundsDiagonal(groupMin, groupMax);
+  const minDiagonal = profile.coarseMinDiagonalRatio * tileDiagonal;
+  const coarseElements = [];
+  let geometricError = 0;
+  for (const candidate of candidates) {
+    if (candidate.diagonal < minDiagonal) continue;
+    const placementColor = candidate.element.placements.find(placement => Array.isArray(placement.color));
+    const color = placementColor ? placementColor.color : [0.72, 0.72, 0.72, 1];
+    const box = buildElementBox(candidate.min, candidate.max, color);
+    coarseElements.push({
+      expressId: candidate.element.expressId,
+      globalId: candidate.element.globalId,
+      placements: [box],
+    });
+    // A box proxy can deviate from the true surface by at most the element's
+    // own extent, so its bounding diagonal is a conservative geometric error.
+    geometricError = Math.max(geometricError, candidate.diagonal);
+  }
+  if (coarseElements.length === 0) return null;
+
+  const tile = assembleTile(tileId, coarseElements);
+  tile.geometricError = numberOrThrow(geometricError, 'coarse geometric error');
+  return tile;
 }
 
 function concatenate(TypedArray, chunks, property, totalLength) {
@@ -738,11 +902,33 @@ async function run(options) {
     });
     for (const group of orderedGroups) group.elements.sort(compareElements);
 
-    const assembledTiles = orderedGroups.map(group => assembleTile(group.tileId, group.elements));
+    const profile = RENDER_PROFILES[options.renderProfile];
+    // Each storey group owns its stable identity and one or more LOD tiles.
+    // The exact LOD0 tile keeps the group's canonical tile id (so it stays
+    // byte-identical to the single-LOD output and v1-compatible); a coarse
+    // LOD1 proxy, when the profile emits one, takes a derived tile id but
+    // shares the same `group`.
+    const assembledTiles = [];
+    for (const group of orderedGroups) {
+      const exact = assembleTile(group.tileId, group.elements);
+      const coarse = profile.emitCoarse
+        ? assembleCoarseTile(`${group.tileId}${COARSE_TILE_SUFFIX}`, group.elements, profile)
+        : null;
+      // A group only advertises a `group` id once it actually owns more than
+      // one LOD tile; a single-LOD group keeps the original flat shape.
+      const groupId = coarse ? group.tileId : null;
+      if (coarse) {
+        // Coarse first so the viewer can paint a low-detail preview before the
+        // exact tile arrives.
+        assembledTiles.push({ ...coarse, lod: 1, group: groupId, geometricError: coarse.geometricError, fidelity: 'whole-element-bounding-box' });
+      }
+      assembledTiles.push({ ...exact, lod: 0, group: groupId, geometricError: 0, fidelity: 'exact' });
+    }
     // A model with no geometry (or no spatial hierarchy and no geometry) still
     // publishes one valid, empty unassigned tile.
     if (assembledTiles.length === 0) {
-      assembledTiles.push(assembleTile(UNASSIGNED_TILE_ID, []));
+      const empty = assembleTile(UNASSIGNED_TILE_ID, []);
+      assembledTiles.push({ ...empty, lod: 0, group: null, geometricError: 0, fidelity: 'exact' });
     }
 
     // Content-address every tile GLB and its tile-local semantic index.
@@ -751,6 +937,8 @@ async function run(options) {
       const semanticIndex = {
         schema: SEMANTIC_INDEX_SCHEMA,
         tile_id: tile.tileId,
+        lod: tile.lod,
+        fidelity: tile.fidelity,
         coordinate_system: 'web-ifc-y-up',
         triangle_indexing: 'GLB mesh 0 primitive 0; each range is expressed as triangle (not index) offsets.',
         entries: tile.entries,
@@ -763,11 +951,11 @@ async function run(options) {
       tile.glbHash = glbHash;
       tile.semanticHash = semanticHash;
       tile.semanticBytes = semanticBytes;
-      return {
+      const descriptor = {
         tile_id: tile.tileId,
-        lod: 0,
+        lod: tile.lod,
         bounds: tile.bounds,
-        geometric_error: 0,
+        geometric_error: tile.geometricError,
         artifact: resource(glbHash, tile.glb.length, 'model/gltf-binary'),
         semantic_index: {
           schema: SEMANTIC_INDEX_SCHEMA,
@@ -775,6 +963,10 @@ async function run(options) {
           artifact: resource(semanticHash, semanticBytes.length, 'application/json'),
         },
       };
+      // Only emitted when a group owns several LODs, so single-LOD manifests
+      // (accurate profile, empty models) keep the original v2 tile shape.
+      if (tile.group) descriptor.group = tile.group;
+      return descriptor;
     });
     const encodedAt = performance.now();
 
@@ -789,13 +981,18 @@ async function run(options) {
     // The policy identity hashes only renderer configuration (not per-model
     // tiles) so the same policy yields the same identity across models, while
     // a configuration change produces a distinct, non-colliding identity.
+    // Folding the render profile into the hash guarantees each profile
+    // produces a distinct policy hash (and therefore artifact_id).
     const renderPolicyHash = sha256(Buffer.from(JSON.stringify({
       id: RENDER_POLICY_ID,
       manifest_schema: MANIFEST_SCHEMA,
       semantic_index_schema: SEMANTIC_INDEX_SCHEMA,
       tile_strategy: TILE_STRATEGY,
       spatial_subdivision: false,
-      lod_levels: 1,
+      render_profile: profile.id,
+      lod_levels: profile.emitCoarse ? 2 : 1,
+      coarse_strategy: profile.emitCoarse ? 'whole-element-bounding-box' : 'none',
+      coarse_min_diagonal_ratio: profile.coarseMinDiagonalRatio,
       coordinate_system: 'web-ifc-y-up',
     }), 'utf8'));
     const artifactId = sha256(Buffer.from(JSON.stringify({
@@ -805,6 +1002,8 @@ async function run(options) {
       render_policy: { id: RENDER_POLICY_ID, hash: renderPolicyHash },
       tiles: assembledTiles.map(tile => ({
         tile_id: tile.tileId,
+        lod: tile.lod,
+        group: tile.group ?? null,
         tile: tile.glbHash,
         semantic_index: tile.semanticHash,
       })),
@@ -827,12 +1026,23 @@ async function run(options) {
     let placedGeometryCount = 0;
     let productCount = 0;
     let outputBytes = 0;
+    let exactVertexCount = 0;
+    let exactTriangleCount = 0;
+    let coarseTileCount = 0;
     for (const tile of assembledTiles) {
       vertexCount += tile.totals.vertexCount;
       triangleCount += tile.totals.triangleCount;
       placedGeometryCount += tile.totals.placedGeometryCount;
-      productCount += tile.entries.length;
       outputBytes += tile.glb.length + tile.semanticBytes.length;
+      if (tile.lod === 0) {
+        // Product and exact-geometry counts describe the authoritative LOD0
+        // rendition only, so coarse proxies never inflate them.
+        productCount += tile.entries.length;
+        exactVertexCount += tile.totals.vertexCount;
+        exactTriangleCount += tile.totals.triangleCount;
+      } else {
+        coarseTileCount += 1;
+      }
     }
 
     const memory = process.memoryUsage();
@@ -841,15 +1051,23 @@ async function run(options) {
       status: 'completed',
       project_id: options.projectId,
       commit_hash: options.commit,
+      render_profile: profile.id,
+      lod_levels: profile.emitCoarse ? 2 : 1,
       input_bytes: inputStat.size,
       output_bytes: outputBytes,
       tile_count: assembledTiles.length,
+      coarse_tile_count: coarseTileCount,
       product_count: productCount,
       placed_geometry_count: placedGeometryCount,
       vertex_count: vertexCount,
       triangle_count: triangleCount,
+      exact_vertex_count: exactVertexCount,
+      exact_triangle_count: exactTriangleCount,
       tiles: assembledTiles.map(tile => ({
         tile_id: tile.tileId,
+        group: tile.group ?? null,
+        lod: tile.lod,
+        geometric_error: tile.geometricError,
         entry_count: tile.entries.length,
         vertex_count: tile.totals.vertexCount,
         triangle_count: tile.totals.triangleCount,

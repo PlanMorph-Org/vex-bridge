@@ -312,12 +312,87 @@ The worker groups geometry into one GLB tile per building storey, plus a single
   tile's mesh. Vertex and triangle counts in the semantic entries reflect the
   tile GLB, and material/color output matches the previous full-model rendition.
 
+#### Multi-LOD artifacts and render profiles
+
+A storey is a *group* that can own more than one tile at different levels of
+detail. The exact rendition and the optional coarse proxy are distinguished by
+two orthogonal identities:
+
+- **Stable group ownership** — the `RenderTileDescriptor.group` key. Every LOD
+  tile of one storey shares the same `group` (the storey's canonical
+  `storey-<GlobalId>` id). It is emitted only when a group actually owns more
+  than one LOD, so single-LOD manifests keep their original flat shape and stay
+  v1-compatible.
+- **Per-LOD tile identity** — the `tile_id` and `lod`. The exact tile keeps the
+  canonical group id as its `tile_id` (`storey-<GlobalId>` / `unassigned`) and
+  is emitted at `lod` `0` with `geometric_error` `0`; a coarse proxy takes the
+  derived `tile_id` `<group>/coarse`, a higher `lod`, and a positive
+  `geometric_error`. `lod` `0` is always the exact, pickable base; larger `lod`
+  values are coarser. `geometric_error` is the authoritative fidelity signal
+  (`0` means exact).
+
+The **`--render-profile`** worker input (with a matching, safe config default)
+selects the LOD policy. It is optional: an unspecified profile resolves to
+`balanced`, so existing callers keep the exact current output.
+
+| Profile | Coarse proxy | Small-element handling |
+| --- | --- | --- |
+| `accurate` | none — exact LOD0 tiles only | n/a |
+| `balanced` (default) | one coarse proxy per storey | keeps every element |
+| `draft` | one coarse proxy per storey | drops elements whose bounding box is < 2% of the tile diagonal from the proxy only |
+
+- **LOD0 is never altered by the profile.** The exact tile's GLB is byte-for-byte
+  identical across all three profiles, so LOD0 remains the exact
+  current-quality rendition and content-addressed identity is preserved.
+- **The profile is folded into the policy identity.** `render_profile`,
+  `lod_levels`, and the coarse strategy are part of the render-policy hash, so
+  each profile produces a distinct `render_policy.hash` and `artifact_id` even
+  when two profiles happen to yield identical coarse geometry.
+
+##### Coarse-LOD fidelity semantics
+
+No mesh simplifier is vendored, so the coarse LOD is deliberately **not** a
+decimated mesh (which a naive triangle sampler would render invalid). Instead
+each coarse tile is a **conservative, valid, whole-element proxy**: one closed,
+outward-facing axis-aligned bounding box per element, with correct normals,
+counter-clockwise front faces, and the element's placement color. Consequences:
+
+- The proxy always *contains* the true element; its `geometric_error` is the
+  largest included element's bounding-box diagonal (a conservative upper bound
+  on deviation).
+- The proxy is **not** an accurate shape — it is a placeholder for distance and
+  fast initial coverage only, and must never be treated as exact geometry.
+- Object bounds and identity are retained: every proxy box maps back to its
+  element's Express ID and GlobalId through the coarse tile's semantic index, so
+  a coarse tile stays identifiable and a coarse pick can be upgraded to the
+  exact element.
+- The coarse index's `entries` are a subset of the exact tile's entries
+  (balanced keeps all; draft may drop tiny elements from the proxy). The exact
+  LOD0 tile never drops anything.
+
+##### Progressive selection in the viewer
+
+The dashboard renders exactly **one** LOD per group at a time (never both):
+
+- Distant/initial storeys show their coarse proxy first for fast coverage;
+  groups that are near the camera, isolated by the level selector, or hold the
+  current selection are upgraded to the exact LOD0 tile. As an exact tile
+  arrives it replaces the coarse proxy, and eviction reclaims hidden (non-active)
+  LODs first, so the memory budget behaves as before.
+- Picking honours the invariant that a **coarse proxy is never selected as
+  exact**. A pick that lands on a coarse tile resolves the element identity from
+  the coarse semantic index, fetches/upgrades the group to LOD0, and finalises
+  the precise selection overlay against the exact LOD0 geometry once it is
+  resident.
+
 #### Limitations
 
 - **No spatial subdivision.** Tiling is storey-granular only; there is no
   quadtree/octree spatial partitioning within a storey.
-- **No level of detail.** Every tile is emitted at LOD 0 with geometric error
-  `0`; there is no mesh simplification or LOD pyramid yet.
+- **Coarse LOD is a bounding proxy, not a simplified mesh.** No decimation
+  library is vendored, so coarser LODs are conservative whole-element bounding
+  boxes rather than a true simplified-mesh pyramid. `accurate` emits no coarse
+  proxy at all.
 - **No property hydration.** Only Express IDs, GlobalIds, and triangle ranges
   are indexed; richer property payloads are not embedded.
 - **Empty and hierarchy-free models are safe.** Storeys that contain no
@@ -334,7 +409,7 @@ For a complete 64-character commit hash, Bridge exposes:
 
 | Endpoint | Meaning |
 | --- | --- |
-| `GET /v1/projects/:id/render/:commit/status` | Returns `queued`, `building`, `failed`, `not_requested`, or a validated `ready` manifest. |
+| `GET /v1/projects/:id/render/:commit/status` | Returns `queued`, `building`, `failed`, `not_requested`, or a validated `ready` manifest. A commit whose queued job was superseded by a newer commit reports `not_requested` (no artifact will be built for it), so the wire contract is unchanged. |
 | `GET /v1/projects/:id/render/:commit/manifest` | Returns the validated manifest when an artifact is ready. |
 | `GET /v1/projects/:id/render/:commit/objects/:sha256` | Returns one manifest-declared, SHA-256-verified binary object. Supports a single HTTP byte range (see [Range requests](#range-requests)). |
 
@@ -436,3 +511,74 @@ and never interferes with — the atomic publish rename, and a pruning failure
 never changes the published artifact, the commit, or the job outcome. When an
 evicted commit is requested again, the object endpoint returns `404` and the
 raw IFC/web-ifc fallback path regenerates it on demand.
+
+### Scheduling, concurrency, and memory bounds
+
+Render jobs are derived work, so many IFC exports arriving together must never
+be allowed to exhaust a workstation. A single process-wide render scheduler
+owns every job produced by `render_worker::queue_after_commit` and enforces a
+bounded, memory-aware execution envelope. Three settings in `config.toml`
+control it, each clamped to a safe range so a typo can neither disable
+scheduling nor oversubscribe the machine:
+
+| Setting | Default | Clamp | Effect |
+| --- | --- | --- | --- |
+| `render_max_concurrency` | `2` | `1..=8` | Maximum render jobs building at once. |
+| `render_job_heap_mb` | `2048` | `512..=16384` | Per-job Node old-generation heap cap, passed as `--max-old-space-size`. |
+| `render_job_timeout_secs` | `900` | `30..=3600` | Per-job wall-clock timeout; an over-running build is killed and recorded as a retryable failure. |
+
+**Memory is bounded, not merely capped per job.** Because the scheduler runs at
+most `render_max_concurrency` jobs and each Node worker is launched with a
+bounded `--max-old-space-size`, peak render heap is roughly
+`render_max_concurrency × render_job_heap_mb` no matter how much work is
+queued. `--max-old-space-size` is a Node *runtime* flag and is therefore placed
+before the worker script path; when Node reaches the cap it aborts, which
+surfaces as a retryable job failure while the raw IFC fallback stays available.
+The defaults are deliberately conservative (about 4 GiB peak render heap);
+operators wanting strict single-flight behaviour can set
+`render_max_concurrency = 1`.
+
+**Scheduling is fair across projects.** When a slot frees up, the scheduler
+runs the queued job whose project currently has the fewest jobs in flight,
+breaking ties by arrival order. A single large project that commits repeatedly
+therefore cannot monopolise the workers and starve other projects: each other
+project's older, waiting job is preferred over the busy project's newest one.
+
+### Commit coalescing and durable job lifecycle
+
+A render job's durable lifecycle is the on-disk source of truth (persisted in
+`state.json`) and survives daemon restarts. It distinguishes:
+
+- `queued` — accepted, waiting for a worker slot;
+- `building` — a worker owns it and is rendering;
+- `ready` — a validated artifact was published;
+- `failed { retryable }` — generation failed (the IFC fallback still works);
+- `superseded { superseded_by }` — a newer commit for the same project made
+  this still-queued job obsolete before any worker started it.
+
+**Coalescing.** When a newer commit for a project is queued, every job for that
+project that is still merely `queued` is marked `superseded` rather than
+rendered. This bounds *derived* work to the freshest commit per project and
+prevents wasted memory on obsolete revisions. Supersede is deliberately narrow:
+
+- a job a worker already owns (`building`) is **never** superseded — in-progress
+  renders always run to completion;
+- a published `ready` artifact is **never** superseded or discarded;
+- **semantic commits are never affected** — coalescing only skips derived
+  render output; every commit remains independent and fully rendered on demand
+  through the canonical IFC path.
+
+A job that is superseded after it was handed to the scheduler is re-checked
+against durable state immediately before building and skipped, so a race with a
+newer commit can never cause obsolete geometry to be rendered.
+
+**Truthful status and restart safety.** The lifecycle is only ever advanced to
+`building` immediately before a worker runs, and to `ready` only after the
+atomic publish + validation succeeds, so the durable status never claims
+progress that did not happen. `superseded` is a distinct durable state, so the
+daemon never resurrects obsolete work. On restart, in-memory workers are gone,
+so any job left `queued` or `building` is recorded as a retryable failure and
+safely re-queued; `ready`, `failed`, and `superseded` jobs keep their durable
+outcome and are not resurrected. The HTTP status endpoint is unchanged: it maps
+`superseded` to `not_requested` because no artifact will ever be produced for
+an obsolete commit, so clients transparently fall back to the canonical IFC.

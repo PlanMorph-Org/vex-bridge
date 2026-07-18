@@ -529,6 +529,7 @@ mod tests {
             tiles: vec![proto::RenderTileDescriptor {
                 tile_id: "full-model".into(),
                 lod: 0,
+                group: None,
                 bounds: proto::RenderBounds {
                     min: [0.0, 0.0, 0.0],
                     max: [1.0, 1.0, 1.0],

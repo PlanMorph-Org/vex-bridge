@@ -13,6 +13,12 @@
  *     repeated runs;
  *   - semantic entry triangle counts match the tile GLB;
  *   - safe handling of a model with storeys but no geometry.
+ *
+ * It runs with the `accurate` render profile so the output is exactly the
+ * single exact LOD0 tile per storey: this keeps the storey-ownership
+ * assertions focused and independently guards that the accurate profile
+ * reproduces the legacy single-LOD tiling. Multi-LOD behaviour (coarse proxies
+ * and profile-aware selection) is covered by test-lod-profiles.mjs.
  */
 
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -52,7 +58,7 @@ function run(command, args) {
   });
 }
 
-async function generate(ifc, out) {
+async function generate(ifc, out, profile = 'accurate') {
   await run(node, [
     worker,
     '--ifc', ifc,
@@ -61,6 +67,7 @@ async function generate(ifc, out) {
     '--commit', commit,
     '--web-ifc-api', api,
     '--wasm-dir', webIfcDir,
+    '--render-profile', profile,
   ]);
   return JSON.parse(await readFile(join(out, 'manifest.json'), 'utf8'));
 }

@@ -11,7 +11,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
@@ -59,9 +58,11 @@ function glbJson(glb) {
   return JSON.parse(glb.subarray(20, 20 + jsonLength).toString('utf8').trim());
 }
 
-const out = await mkdtemp(join(tmpdir(), 'vex-render-pressure-'));
+const out = await mkdtemp(join(root, '.render-pressure-test-'));
 try {
   const raw = jsonOutput((await run(node, [spike, fixture])).stdout);
+  // No --render-profile: this exercises the default (balanced) path, which
+  // emits the exact LOD0 tile plus a conservative coarse proxy.
   const generated = jsonOutput((await run(node, [
     worker,
     '--ifc', fixture,
@@ -76,13 +77,24 @@ try {
   assert(manifest.render_policy?.id === 'vex.render-policy.storey-first/1', 'render policy identity mismatch');
   assert(Array.isArray(manifest.tiles) && manifest.tiles.length >= 1, 'manifest has no tiles');
   // The simple fixture has no spatial hierarchy, so all of its geometry falls
-  // into the single deterministic unassigned tile.
-  assert(manifest.tiles.length === 1 && manifest.tiles[0].tile_id === 'unassigned',
-    'simple fixture must yield exactly one unassigned tile');
+  // into the single deterministic unassigned group. LOD0 must be exactly one
+  // exact unassigned tile; the default profile also adds one coarse proxy.
+  const exactTiles = manifest.tiles.filter(tile => tile.lod === 0);
+  const coarseTiles = manifest.tiles.filter(tile => tile.lod > 0);
+  assert(exactTiles.length === 1 && exactTiles[0].tile_id === 'unassigned',
+    'simple fixture must yield exactly one exact unassigned tile');
+  assert(exactTiles[0].geometric_error === 0, 'exact LOD0 tile must have zero geometric error');
+  assert(coarseTiles.length === 1 && coarseTiles[0].tile_id === 'unassigned/coarse',
+    'default profile must emit exactly one coarse proxy tile');
+  assert(coarseTiles[0].lod > 0 && coarseTiles[0].geometric_error > 0,
+    'coarse proxy must carry a higher LOD and a positive geometric error');
+  assert(coarseTiles[0].group === 'unassigned' && exactTiles[0].group === 'unassigned',
+    'both LODs must share the same group ownership key');
 
-  let generatedTriangles = 0;
-  let mappedTriangles = 0;
-  let mappedGlobalIds = 0;
+  let exactTriangles = 0;
+  let exactMappedTriangles = 0;
+  let exactMappedGlobalIds = 0;
+  let coarseMappedGlobalIds = 0;
   let glbBytes = 0;
   for (const tile of manifest.tiles) {
     assert(tile.artifact?.content_type === 'model/gltf-binary', 'tile is not GLB');
@@ -93,10 +105,11 @@ try {
     assert(sha256(glb) === tile.artifact.sha256, 'GLB digest mismatch');
     const gltf = glbJson(glb);
     const primitive = gltf.meshes?.[0]?.primitives?.[0];
+    let tileTriangles = 0;
     if (primitive) {
       assert(primitive.attributes?.COLOR_0 !== undefined,
         'GLB does not preserve IFC placement colors');
-      generatedTriangles += gltf.accessors[primitive.indices].count / 3;
+      tileTriangles = gltf.accessors[primitive.indices].count / 3;
     }
     glbBytes += glb.length;
 
@@ -105,26 +118,45 @@ try {
     const semanticIndex = JSON.parse(await readFile(join(out, 'objects', indexResource.sha256), 'utf8'));
     assert(sha256(Buffer.from(JSON.stringify(semanticIndex))) === indexResource.sha256, 'semantic index digest mismatch');
     assert(semanticIndex.tile_id === tile.tile_id, 'semantic index tile_id mismatch');
-    mappedTriangles += semanticIndex.entries
+    assert(semanticIndex.lod === tile.lod, 'semantic index lod mismatch');
+    const tileMappedTriangles = semanticIndex.entries
       .flatMap(entry => entry.triangle_ranges || [])
       .reduce((sum, range) => sum + range.triangle_count, 0);
-    mappedGlobalIds += semanticIndex.entries.filter(entry => entry.global_id).length;
+    const tileMappedGlobalIds = semanticIndex.entries.filter(entry => entry.global_id).length;
+    // Every tile (exact or coarse) must fully cover its own GLB triangles so a
+    // pick never lands on an unmapped triangle.
+    assert(tileMappedTriangles === tileTriangles,
+      `tile ${tile.tile_id} semantic ranges do not cover every triangle`);
+    if (tile.lod === 0) {
+      exactTriangles += tileTriangles;
+      exactMappedTriangles += tileMappedTriangles;
+      exactMappedGlobalIds += tileMappedGlobalIds;
+    } else {
+      coarseMappedGlobalIds += tileMappedGlobalIds;
+    }
   }
 
   assert(raw.vertex_count > 0 && raw.triangle_count > 0, 'fixture did not yield geometry');
-  assert(generated.vertex_count === raw.vertex_count, 'artifact vertex count differs from raw web-ifc');
-  assert(generated.triangle_count === raw.triangle_count, 'artifact triangle count differs from raw web-ifc');
-  assert(generatedTriangles === raw.triangle_count, 'GLB tile triangles differ from raw web-ifc');
-  assert(mappedTriangles === raw.triangle_count, 'semantic ranges do not cover every triangle');
-  assert(mappedGlobalIds === raw.global_id_count, 'GlobalId mapping differs from raw web-ifc');
+  // Parity is asserted against the exact LOD0 rendition only: the coarse proxy
+  // is a conservative bounding-box approximation and is not expected to match
+  // raw web-ifc geometry.
+  assert(generated.exact_vertex_count === raw.vertex_count, 'exact LOD0 vertex count differs from raw web-ifc');
+  assert(generated.exact_triangle_count === raw.triangle_count, 'exact LOD0 triangle count differs from raw web-ifc');
+  assert(exactTriangles === raw.triangle_count, 'exact GLB tile triangles differ from raw web-ifc');
+  assert(exactMappedTriangles === raw.triangle_count, 'exact semantic ranges do not cover every triangle');
+  assert(exactMappedGlobalIds === raw.global_id_count, 'exact GlobalId mapping differs from raw web-ifc');
+  // The coarse proxy retains element identity so a coarse pick can be upgraded.
+  assert(coarseMappedGlobalIds === raw.global_id_count, 'coarse proxy dropped GlobalId mapping');
 
   console.log(JSON.stringify({
     schema: 'vex.render-pressure-test/1',
     status: 'passed',
     tile_count: manifest.tiles.length,
+    exact_tile_count: exactTiles.length,
+    coarse_tile_count: coarseTiles.length,
     vertex_count: raw.vertex_count,
     triangle_count: raw.triangle_count,
-    global_id_count: mappedGlobalIds,
+    global_id_count: exactMappedGlobalIds,
     glb_bytes: glbBytes,
     raw_timings_ms: raw.timings_ms,
     generated_timings_ms: generated.timings_ms,

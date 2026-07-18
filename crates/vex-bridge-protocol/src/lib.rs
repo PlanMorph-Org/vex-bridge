@@ -446,8 +446,18 @@ pub struct RenderBounds {
 pub struct RenderTileDescriptor {
     /// Stable manifest-local identifier used by the semantic index.
     pub tile_id: String,
-    /// Level of detail, where larger values are more detailed.
+    /// Level of detail. `0` is the exact, pickable base rendition; larger
+    /// values are coarser, lower-detail proxies for the same content (the
+    /// authoritative fidelity signal is `geometric_error`, where `0` means
+    /// exact geometry).
     pub lod: u32,
+    /// Stable ownership key shared by every LOD tile that renders the same
+    /// content (v2 manifests). When present it distinguishes which tiles are
+    /// alternate levels of detail of one logical group (for example a storey)
+    /// from the tile's own per-LOD `tile_id`. Absent when a tile is the sole
+    /// LOD for its content, preserving the original flat manifest shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub bounds: RenderBounds,
     /// Maximum geometric approximation error for this tile, in model units.
     pub geometric_error: f64,
@@ -727,6 +737,12 @@ impl RenderArtifactManifest {
                             schema: self.schema.clone(),
                         });
                     }
+                    if tile.group.is_some() {
+                        return Err(RenderArtifactValidationError::UnexpectedField {
+                            field: "tile.group",
+                            schema: self.schema.clone(),
+                        });
+                    }
                 }
                 _ => {
                     let index = tile.semantic_index.as_ref().ok_or(
@@ -736,6 +752,9 @@ impl RenderArtifactManifest {
                         &format!("tile:{}:semantic_index", tile.tile_id),
                         index,
                     )?;
+                    if let Some(group) = tile.group.as_ref() {
+                        validate_non_empty("tile.group", group)?;
+                    }
                 }
             }
         }
@@ -966,6 +985,7 @@ mod tests {
             tiles: vec![RenderTileDescriptor {
                 tile_id: "0/0/0".to_string(),
                 lod: 0,
+                group: None,
                 bounds: RenderBounds {
                     min: [0.0, 0.0, 0.0],
                     max: [10.0, 5.0, 3.0],
@@ -1004,6 +1024,7 @@ mod tests {
             tiles: vec![RenderTileDescriptor {
                 tile_id: "full-model".to_string(),
                 lod: 0,
+                group: None,
                 bounds: RenderBounds {
                     min: [0.0, 0.0, 0.0],
                     max: [10.0, 5.0, 3.0],
@@ -1174,6 +1195,56 @@ mod tests {
         assert!(matches!(
             tampered.validate(),
             Err(RenderArtifactValidationError::InvalidSha256 { .. })
+        ));
+    }
+
+    #[test]
+    fn v2_manifest_accepts_multi_lod_group_ownership() {
+        // A storey group may own a coarse (lod > 0) tile plus its exact base
+        // tile; both carry the same non-empty `group` key while keeping
+        // distinct per-LOD tile ids.
+        let mut grouped = manifest_v2();
+        grouped.tiles[0].group = Some("storey-a".to_string());
+        grouped.tiles[0].tile_id = "storey-a".to_string();
+        let mut coarse = grouped.tiles[0].clone();
+        coarse.tile_id = "storey-a/coarse".to_string();
+        coarse.group = Some("storey-a".to_string());
+        coarse.lod = 1;
+        coarse.geometric_error = 4.0;
+        grouped.tiles.insert(0, coarse);
+        assert!(grouped.validate().is_ok());
+
+        // The group key survives a serialization round trip and is only
+        // emitted when actually set.
+        let value = serde_json::to_value(&grouped).unwrap();
+        assert_eq!(value["tiles"][0]["group"], "storey-a");
+        assert_eq!(value["tiles"][0]["lod"], 1);
+        let decoded: RenderArtifactManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, grouped);
+    }
+
+    #[test]
+    fn v2_manifest_rejects_empty_group_key() {
+        let mut empty_group = manifest_v2();
+        empty_group.tiles[0].group = Some(String::new());
+        assert!(matches!(
+            empty_group.validate(),
+            Err(RenderArtifactValidationError::MissingField("tile.group"))
+        ));
+    }
+
+    #[test]
+    fn v1_manifest_rejects_tile_group_key() {
+        // The stable-ownership `group` key is a v2-only concept; a v1 tile that
+        // carries one is rejected the same way other v2-only tile fields are.
+        let mut grouped_v1 = manifest();
+        grouped_v1.tiles[0].group = Some("storey-a".to_string());
+        assert!(matches!(
+            grouped_v1.validate(),
+            Err(RenderArtifactValidationError::UnexpectedField {
+                field: "tile.group",
+                ..
+            })
         ));
     }
 }
