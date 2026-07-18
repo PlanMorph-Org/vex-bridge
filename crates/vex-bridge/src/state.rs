@@ -387,6 +387,24 @@ impl State {
             .find(|job| job.project_id == project_id && job.commit_hash == commit_hash)
             .map(|job| job.status.clone())
     }
+
+    /// Commit hashes for a project whose render artifacts a worker still owns
+    /// (queued or building). These must be protected from cache eviction: a
+    /// building artifact is published by an atomic rename, and evicting a
+    /// sibling directory mid-build must never race that publish.
+    pub fn active_render_commits(&self, project_id: &str) -> Vec<String> {
+        self.render_artifacts
+            .iter()
+            .filter(|job| {
+                job.project_id == project_id
+                    && matches!(
+                        job.status,
+                        RenderArtifactJobStatus::Queued | RenderArtifactJobStatus::Building
+                    )
+            })
+            .map(|job| job.commit_hash.clone())
+            .collect()
+    }
 }
 
 pub fn now_unix() -> i64 {
@@ -483,6 +501,37 @@ mod tests {
             state.render_artifact_status("project", "ready"),
             Some(RenderArtifactJobStatus::Ready)
         ));
+    }
+
+    #[test]
+    fn active_render_commits_lists_only_in_progress_jobs() {
+        let mut state = State::default();
+        state.set_render_artifact_status(
+            "project".into(),
+            "queued".into(),
+            RenderArtifactJobStatus::Queued,
+        );
+        state.set_render_artifact_status(
+            "project".into(),
+            "building".into(),
+            RenderArtifactJobStatus::Building,
+        );
+        state.set_render_artifact_status(
+            "project".into(),
+            "ready".into(),
+            RenderArtifactJobStatus::Ready,
+        );
+        state.set_render_artifact_status(
+            "other".into(),
+            "building".into(),
+            RenderArtifactJobStatus::Building,
+        );
+
+        let mut active = state.active_render_commits("project");
+        active.sort();
+        // A completed (`ready`) artifact is evictable; only queued/building
+        // work for this project is protected, and other projects are excluded.
+        assert_eq!(active, vec!["building".to_string(), "queued".to_string()]);
     }
 
     #[test]

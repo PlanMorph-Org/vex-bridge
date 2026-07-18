@@ -127,6 +127,41 @@ jobs:
         shell: powershell
         run: choco install innosetup --no-progress -y
 
+      # Stage Microsoft's own official WebView2 Evergreen Bootstrapper
+      # (~2 MB, Microsoft-signed) into SourceDir so VexAtlasSetup.iss can
+      # bundle it (see the #if FileExists guard in the .iss). This is the
+      # documented redistributable entry point — it is not an app binary we
+      # build, and the installer never downloads or executes anything at
+      # install time; it only launches this pre-verified, Microsoft-signed
+      # stub with its official /silent /install switches. If the download or
+      # signature check fails for any reason, we deliberately do NOT fail the
+      # release: the .iss guard means the setup is simply built without
+      # WebView2 auto-provisioning that run (falling back to Windows' own
+      # WebView2 detection/prompt), rather than bundling an unverified file.
+      - name: Download WebView2 Evergreen Bootstrapper
+        if: matrix.artifact_suffix == 'windows-x86_64'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dest = Join-Path $env:GITHUB_WORKSPACE "dist\vex-bridge-${env:GITHUB_REF_NAME}-windows-x86_64\MicrosoftEdgeWebView2Setup.exe"
+          # Microsoft's documented, stable Evergreen Bootstrapper redistribution
+          # link: https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution
+          $url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+          try {
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+            $sig = Get-AuthenticodeSignature -FilePath $dest
+            $signedByMicrosoft = $sig.Status -eq "Valid" -and $sig.SignerCertificate.Subject -match "O=Microsoft Corporation"
+            if (-not $signedByMicrosoft) {
+              Write-Warning "Downloaded WebView2 bootstrapper failed Authenticode verification (status=$($sig.Status)); omitting it from this build."
+              Remove-Item -Path $dest -ErrorAction SilentlyContinue
+            } else {
+              Write-Host "WebView2 bootstrapper downloaded and Microsoft signature verified."
+            }
+          } catch {
+            Write-Warning "Could not download WebView2 bootstrapper ($($_.Exception.Message)); building setup without it."
+            Remove-Item -Path $dest -ErrorAction SilentlyContinue
+          }
+
       - name: Build Windows setup executable
         if: matrix.artifact_suffix == 'windows-x86_64'
         shell: powershell

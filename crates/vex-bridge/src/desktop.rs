@@ -122,10 +122,10 @@ fn run_native_window(url: &str) -> BridgeResult<()> {
                 );
                 let _ = webview.evaluate_script(&script);
             }
-            Event::UserEvent(UserEvent::OpenExternal { url }) => {
-                if url.starts_with("http://") || url.starts_with("https://") {
-                    let _ = open::that(&url);
-                }
+            Event::UserEvent(UserEvent::OpenExternal { url })
+                if url.starts_with("http://") || url.starts_with("https://") =>
+            {
+                let _ = open::that(&url);
             }
             _ => {}
         }
@@ -139,6 +139,28 @@ pub fn show_startup_error(message: &str) {
         .set_level(rfd::MessageLevel::Error)
         .set_title("Vex Atlas could not start")
         .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// Show a clear native failure dialog after the desktop window's event loop
+/// panics, instead of letting the windowed process disappear with no visible
+/// explanation. `report_path` is the on-disk crash report
+/// [`crate::crash_report::install`] wrote for this panic, if the write
+/// succeeded.
+pub fn show_crash_dialog(report_path: Option<std::path::PathBuf>) {
+    let description = match report_path {
+        Some(path) => format!(
+            "Vex Atlas stopped unexpectedly and needs to close.\n\nA crash report was saved to:\n{}",
+            path.display()
+        ),
+        None => "Vex Atlas stopped unexpectedly and needs to close. No crash report could be saved."
+            .to_string(),
+    };
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Vex Atlas stopped unexpectedly")
+        .set_description(&description)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
 }

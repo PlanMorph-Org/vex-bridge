@@ -349,6 +349,24 @@ fn open_dashboard(url: &str) {
     }
 }
 
+/// Surface a clear native failure notification after the tray's event loop
+/// panics. The tray runs windowless (no console, no window), so without this
+/// the process would otherwise just vanish with no visible sign it crashed.
+/// `report_path` is the on-disk crash report [`crate::crash_report::install`]
+/// wrote for this panic, if the write succeeded.
+pub fn notify_crash(report_path: Option<std::path::PathBuf>) {
+    let body = match report_path {
+        Some(path) => format!(
+            "The Vex Atlas tray stopped unexpectedly. A crash report was saved to:\n{}",
+            path.display()
+        ),
+        None => {
+            "The Vex Atlas tray stopped unexpectedly. No crash report could be saved.".to_string()
+        }
+    };
+    send_notification("Vex Atlas - Tray Stopped", &body);
+}
+
 fn should_notify(event: &proto::ActivityEvent) -> bool {
     matches!(
         event.kind,

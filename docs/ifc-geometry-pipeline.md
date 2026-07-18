@@ -272,16 +272,61 @@ expected processing target.
 Vex Bridge generates a derived artifact asynchronously after a semantic commit
 without affecting that commit. The worker checks out the exact canonical IFC,
 uses the bundled Node-target `web-ifc` 0.0.77 runtime to tessellate it, then
-publishes a validated GLB and semantic index. Node.js must be available as
-`node` or configured through `node_bin`; a missing runtime safely leaves the
-raw IFC fallback available.
+publishes a validated set of GLB tiles and semantic indexes. Node.js must be
+available as `node` or configured through `node_bin`; a missing runtime safely
+leaves the raw IFC fallback available.
 
-The initial worker emits one full-model GLB tile at LOD 0. It preserves
-placement transforms, normals, placement colors, triangle ranges, Express IDs,
-and GlobalIds. The dashboard loads this artifact before it downloads or
-tessellates the raw IFC, and resolves artifact clicks through the semantic
-triangle ranges. Storey-first tiling, LOD generation, and property hydration
-remain follow-up optimizations rather than hidden behavior changes.
+The worker emits a v2 (`vex.render-manifest/2`) artifact using the
+`vex.render-policy.storey-first/1` policy. It preserves placement transforms,
+normals, placement colors, triangle ranges, Express IDs, and GlobalIds exactly
+as the earlier full-model rendition did. The dashboard loads these tiles before
+it downloads or tessellates the raw IFC, and resolves artifact clicks through
+the tile-local semantic triangle ranges.
+
+#### Storey-first tiling
+
+The worker groups geometry into one GLB tile per building storey, plus a single
+`unassigned` tile, instead of one full-model tile:
+
+- **Membership is spatial, never geometric.** Each geometry-bearing product is
+  mapped to its storey by walking the IFC spatial hierarchy through
+  `IfcRelContainedInSpatialStructure` (which element sits in which spatial node)
+  and `IfcRelAggregates` (how spatial nodes and assemblies decompose). An
+  element contained in a space is attributed to the storey that aggregates the
+  space, and an assembly part is attributed through its aggregating parent.
+  Storey ownership is **never** inferred from a mesh's Z bounds.
+- **Elements stay whole.** A tall or multi-storey element belongs entirely to
+  its single explicit containment storey and is never split across tiles.
+- **Unassigned geometry is isolated.** Geometry with no resolvable storey (no
+  spatial hierarchy, or containment only in a site/building) is collected into
+  the one `unassigned` tile.
+- **Deterministic identity and ordering.** A tile id is `storey-<GlobalId>`
+  (falling back to `storey-express-<id>` only when a storey lacks a GlobalId),
+  or `unassigned`. Tiles are ordered by that stable storey identity with the
+  unassigned tile last, and entries within a tile are ordered by GlobalId then
+  Express ID. The same commit therefore produces byte-identical,
+  content-addressed tiles and the same `artifact_id` on every run.
+- **Per-tile correctness.** Each tile carries its own local bounds, its own GLB
+  mesh with rebased indices, and a tile-local semantic index
+  (`RenderTileDescriptor::semantic_index`) whose triangle ranges reference that
+  tile's mesh. Vertex and triangle counts in the semantic entries reflect the
+  tile GLB, and material/color output matches the previous full-model rendition.
+
+#### Limitations
+
+- **No spatial subdivision.** Tiling is storey-granular only; there is no
+  quadtree/octree spatial partitioning within a storey.
+- **No level of detail.** Every tile is emitted at LOD 0 with geometric error
+  `0`; there is no mesh simplification or LOD pyramid yet.
+- **No property hydration.** Only Express IDs, GlobalIds, and triangle ranges
+  are indexed; richer property payloads are not embedded.
+- **Empty and hierarchy-free models are safe.** Storeys that contain no
+  geometry produce no tile, and a model with no geometry (or no spatial
+  hierarchy at all) still publishes exactly one valid, empty `unassigned` tile.
+
+Only v2 artifacts are emitted. Published v1 (`vex.render-manifest/1`) artifacts
+with a single manifest-global semantic index remain readable and valid, so they
+never need regeneration.
 
 ### Current API
 
@@ -291,7 +336,7 @@ For a complete 64-character commit hash, Bridge exposes:
 | --- | --- |
 | `GET /v1/projects/:id/render/:commit/status` | Returns `queued`, `building`, `failed`, `not_requested`, or a validated `ready` manifest. |
 | `GET /v1/projects/:id/render/:commit/manifest` | Returns the validated manifest when an artifact is ready. |
-| `GET /v1/projects/:id/render/:commit/objects/:sha256` | Returns one manifest-declared, SHA-256-verified binary object. |
+| `GET /v1/projects/:id/render/:commit/objects/:sha256` | Returns one manifest-declared, SHA-256-verified binary object. Supports a single HTTP byte range (see [Range requests](#range-requests)). |
 
 Artifacts live below:
 
@@ -300,6 +345,7 @@ Artifacts live below:
   manifest.json                 # worker input, retained for diagnostics
   manifest.validated.json       # Bridge-owned manifest served to clients
   objects/<sha256>
+  .accessed                     # Bridge-owned last-serve timestamp (LRU input)
 ```
 
 The manifest and semantic-index schemas are versioned. Each tile describes
@@ -329,3 +375,64 @@ The production worker is deliberately isolated behind this contract. Its
 Node-target web-ifc implementation can be replaced by a native engine after
 profiling representative models, provided replacement output preserves the
 same artifact identity and GlobalId/Vex mappings.
+
+### Range requests
+
+Render objects are immutable and content-addressed, so the object endpoint
+supports HTTP range requests for progressive tile streaming and interrupted
+download resumption. Every object response — full or partial — advertises
+`Accept-Ranges: bytes`, the immutable `"<sha256>"` ETag, and long-lived
+immutable cache headers.
+
+- The object's bytes are always read in full and re-verified against the
+  manifest-declared SHA-256 *before* any slice is returned, so a range serve
+  carries exactly the same integrity, token, and manifest-membership
+  guarantees as a full fetch.
+- A single satisfiable `Range: bytes=start-end` (including open-ended
+  `bytes=start-` and suffix `bytes=-N` forms) returns `206 Partial Content`
+  with a `Content-Range: bytes start-end/total` and the exact slice length. An
+  end past the object is clamped to the final byte.
+- A syntactically valid but unsatisfiable range (start at or beyond the length,
+  a zero-length suffix, or any range against an empty object) returns
+  `416 Range Not Satisfiable` with `Content-Range: bytes */total`.
+- Multi-range sets (`bytes=a-b,c-d`), unknown units, and malformed ranges are
+  made safe by ignoring the header and returning the full `200 OK` body, as
+  permitted by RFC 7233. `multipart/byteranges` is intentionally not emitted.
+
+Full-object fetches keep their existing behavior and API: a request with no
+`Range` header returns the whole object with `200 OK`.
+
+### Cache capacity and eviction
+
+Each watched project's render cache is bounded by
+`render_cache_max_bytes` in `config.toml` (default 2 GiB; values below a 64 MiB
+floor are clamped up so a typo cannot make the cache thrash). After a worker
+atomically publishes a new artifact, Bridge measures total completed-artifact
+usage and, if it exceeds the cap, evicts the **least-recently-served completed
+artifacts** until usage is back under the limit.
+
+Least-recently-used ordering is driven by the Bridge-owned `.accessed` marker,
+which is updated **only after a valid, permitted serve that returns object
+bytes** (a `200` or `206`; never a `416`, and never an unauthorized or
+integrity-failed request). Artifacts that have never been served fall back to
+their `manifest.validated.json` modification time.
+
+Eviction is deliberately conservative — it never removes:
+
+- an artifact with an in-flight serve (guarded for the duration of the read);
+- the project's current commit (its latest recorded IFC snapshot, i.e. HEAD);
+- the just-published commit, or any commit a worker is still building
+  (`queued`/`building`);
+- staging directories (`.<hash>-<uuid>.partial`) or the embedded render
+  runtime.
+
+Only directories named by a complete commit hash that contain the Bridge-owned
+validated manifest are eviction candidates, symlinks are never followed, and
+each directory's containment inside the cache root is re-verified immediately
+before removal. Because protected artifacts are never deleted, the cap is a
+target rather than a hard ceiling: if live data alone exceeds it, usage stays
+above the cap rather than evicting an in-use artifact. Eviction runs after —
+and never interferes with — the atomic publish rename, and a pruning failure
+never changes the published artifact, the commit, or the job outcome. When an
+evicted commit is requested again, the object endpoint returns `404` and the
+raw IFC/web-ifc fallback path regenerates it on demand.

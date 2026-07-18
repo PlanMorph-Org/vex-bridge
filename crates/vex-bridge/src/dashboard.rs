@@ -2147,6 +2147,7 @@ class RealIfcViewer {
       TWO: THREE.TOUCH.DOLLY_PAN
     };
     if ('zoomToCursor' in this.controls) this.controls.zoomToCursor = true;
+    this.controls.addEventListener('change', () => this.scheduleArtifactTiles());
     this.helpers = new THREE.Group();
     this.modelScene.add(this.helpers);
     this.raycaster = new THREE.Raycaster();
@@ -2176,7 +2177,29 @@ class RealIfcViewer {
     this.modelKind = null;
     this.artifactManifest = null;
     this.artifactSemanticIndex = null;
-    this.artifactTilesLoaded = 0;
+    this.artifactSemanticIndexes = new Map();
+    // Resident tile scenes are the single source of truth for the loaded-tile
+    // count; deriving progress from this map keeps the UI honest even after
+    // eviction, so there is no separate counter that can drift.
+    this.artifactTileQueue = [];
+    this.artifactTileDescriptors = new Map();
+    this.artifactTileRecords = new Map();
+    // Tiles with an in-flight fetch/decode, keyed by tile_id, so the scheduler
+    // never dispatches the same tile twice.
+    this.artifactTileLoading = new Set();
+    this.artifactTileLoads = 0;
+    this.artifactResidentBytes = 0;
+    // Storey-first tiling isolates a storey by tile ownership rather than clip
+    // planes (so tall/multi-storey elements stay whole). The base/coarse tile
+    // and unassigned tiles are never hidden by storey isolation.
+    this.artifactStoreyTileIds = new Set();
+    this.artifactBaseTileId = null;
+    // Keep artifact streaming responsive on integrated GPUs. Tile descriptors
+    // carry compressed byte sizes, so this is a deliberately conservative
+    // proxy for decoded GPU allocation rather than a false-precision reading.
+    this.artifactMemoryBudgetBytes = 512 * 1024 * 1024;
+    this.artifactMaxInflight = 3;
+    this.artifactSchedulePending = false;
     this.highlightObjects = [];
     this.removedObjects = [];
     this.planPan = new THREE.Vector2(0, 0);
@@ -2328,8 +2351,31 @@ class RealIfcViewer {
   }
 
   selectArtifactElement(hit) {
-    const index = this.artifactSemanticIndex;
+    let tileId = null;
+    for (let object = hit.object; object; object = object.parent) {
+      if (object.userData && object.userData.vexTileId) {
+        tileId = object.userData.vexTileId;
+        break;
+      }
+    }
+    // v2 keeps a semantic index per tile: selection MUST resolve against the
+    // index of the tile that was actually hit. Falling back to another tile's
+    // index (or a stale global one) would map the hit triangle to the wrong
+    // element, so if the hit tile's index is not resident yet we simply do not
+    // select. v1 has a single manifest-global index that every tile shares.
+    let index;
+    if (this.artifactUsesTileLocalIndex()) {
+      if (!tileId) return;
+      index = this.artifactSemanticIndexes.get(tileId);
+      if (!index) return;
+    } else {
+      index = this.artifactSemanticIndex;
+    }
     if (!index || !Array.isArray(index.entries)) return;
+    if (tileId) {
+      const record = this.artifactTileRecords.get(tileId);
+      if (record) record.lastUsedAt = performance.now();
+    }
     const entry = index.entries.find(candidate => (candidate.triangle_ranges || []).some(range =>
       Number.isFinite(range.first_triangle) && Number.isFinite(range.triangle_count)
       && hit.faceIndex >= range.first_triangle
@@ -2507,6 +2553,11 @@ class RealIfcViewer {
       if (sel) sel.value = 'full';
     }
     this.modelRenderer.clippingPlanes = this.sectionActive ? [this.sectionPlane] : [];
+    // In artifact mode storey isolation is by tile ownership, not clip planes.
+    // Turning Section on cleared any active storey (above); re-apply ownership
+    // so every tile hidden by a prior isolation becomes visible again, and
+    // turning Section off restores the still-selected storey's isolation.
+    if (this.modelKind === 'artifact') this.applyArtifactStoreyIsolation();
     if (this.sectionActive) {
       const slider = document.getElementById('sectionSlider');
       this.setSection(slider ? Number(slider.value) : 100);
@@ -2625,6 +2676,10 @@ class RealIfcViewer {
   }
 
   applyModelLevel() {
+    if (this.modelKind === 'artifact') {
+      this.applyArtifactStoreyIsolation();
+      return;
+    }
     if (!this.modelBox) return;
     if (this.modelLevelIndex === null) {
       this.modelRenderer.clippingPlanes = this.sectionActive ? [this.sectionPlane] : [];
@@ -2814,12 +2869,26 @@ class RealIfcViewer {
           this.model = artifact.model;
           this.modelKind = 'artifact';
           this.artifactManifest = artifact.manifest;
-          this.artifactTilesLoaded = 1;
+          this.registerArtifactTiles(artifact.tiles);
+          this.artifactTileRecords.clear();
+          this.artifactTileLoading.clear();
+          this.artifactResidentBytes = 0;
+          this.artifactBaseTileId = (artifact.firstTile && artifact.firstTile.tile_id) || null;
+          if (artifact.firstTile && artifact.firstTile.tile_id) {
+            const bytes = Number(artifact.firstTile.artifact && artifact.firstTile.artifact.byte_length) || 0;
+            this.artifactTileRecords.set(artifact.firstTile.tile_id, {
+              scene: artifact.model.children[0],
+              bytes,
+              lastUsedAt: performance.now()
+            });
+            this.artifactResidentBytes = bytes;
+          }
           this.modelScene.add(this.model);
           this.orientModel(this.model);
           this.prepareModelForRender(this.model);
           this.currentKey = key;
           this.fitArtifactToManifest(artifact.manifest, this.model);
+          this.deriveArtifactStoreys();
           this.applyPlanCut();
           this.applyModelLevel();
           this.showOrbitHint();
@@ -2827,7 +2896,7 @@ class RealIfcViewer {
             this.loadRemainingArtifactTiles(artifact.tiles.slice(1), artifact.model, token);
             artifact.semanticIndex.then(index => {
               if (token !== this.loadToken || this.model !== artifact.model) return;
-              this.artifactSemanticIndex = index;
+              this.setArtifactSemanticIndex(artifact.firstTile, index);
               this.setModelSourceMeta(mode);
             }).catch(error => {
               if (token === this.loadToken && this.model === artifact.model) {
@@ -2887,7 +2956,7 @@ class RealIfcViewer {
     const suffix = mode === 'changes' ? 'changes only' : 'full model';
     if (this.modelKind === 'artifact') {
       const progress = this.artifactManifest && this.artifactManifest.tiles
-        ? `${this.artifactTilesLoaded}/${this.artifactManifest.tiles.length} tiles`
+        ? `${this.artifactTileRecords.size}/${this.artifactManifest.tiles.length} tiles`
         : 'coarse tile';
       this.setViewStatus('');
       this.planMeta.textContent = `render artifact · ${progress}`;
@@ -2949,7 +3018,7 @@ class RealIfcViewer {
       }
       const tiles = (manifest.tiles || []).filter(tile =>
         tile && tile.artifact && /gltf-binary/i.test(tile.artifact.content_type || ''));
-      if (!tiles.length || !manifest.semantic_index || !manifest.semantic_index.artifact) {
+      if (!tiles.length || !this.semanticIndexResource(manifest, tiles[0])) {
         return {reason: 'Render artifact is incomplete; using raw IFC fallback.'};
       }
       tiles.sort((a, b) => (a.lod - b.lod) || (b.geometric_error - a.geometric_error));
@@ -2963,8 +3032,8 @@ class RealIfcViewer {
       model.name = 'Vex render artifact';
       model.userData.vexArtifact = true;
       model.add(first);
-      const semanticIndex = this.fetchArtifactSemanticIndex(manifest.semantic_index.artifact, controller.signal);
-      return {model, manifest, tiles, semanticIndex};
+      const semanticIndex = this.fetchArtifactSemanticIndexForTile(manifest, tiles[0], controller.signal);
+      return {model, manifest, tiles, semanticIndex, firstTile: tiles[0]};
     } catch (error) {
       if (error && error.name === 'AbortError') throw error;
       console.warn('Render artifact load failed; falling back to raw IFC:', error);
@@ -3013,31 +3082,265 @@ class RealIfcViewer {
     return JSON.parse(text);
   }
 
+  semanticIndexResource(manifest, tile) {
+    if (manifest && manifest.semantic_index && manifest.semantic_index.artifact) {
+      return manifest.semantic_index.artifact;
+    }
+    if (tile && tile.semantic_index && tile.semantic_index.artifact) {
+      return tile.semantic_index.artifact;
+    }
+    return null;
+  }
+
+  async fetchArtifactSemanticIndexForTile(manifest, tile, signal) {
+    const resource = this.semanticIndexResource(manifest, tile);
+    if (!resource) throw new Error(`artifact tile ${tile && tile.tile_id || 'unknown'} has no semantic index`);
+    return this.fetchArtifactSemanticIndex(resource, signal);
+  }
+
+  setArtifactSemanticIndex(tile, index) {
+    const tileId = tile && tile.tile_id;
+    if (tileId) this.artifactSemanticIndexes.set(tileId, index);
+    this.artifactSemanticIndex = index;
+  }
+
   async loadRemainingArtifactTiles(tiles, model, token) {
-    for (const tile of tiles) {
+    this.registerArtifactTiles(tiles);
+    this.queueMissingArtifactTiles(model, token);
+    this.scheduleArtifactTiles();
+  }
+
+  scheduleArtifactTiles() {
+    if (!this.artifactAbortController || !this.model || this.modelKind !== 'artifact') return;
+    this.queueMissingArtifactTiles(this.model, this.loadToken);
+    if (this.artifactSchedulePending || !this.artifactTileQueue.length) return;
+    this.artifactSchedulePending = true;
+    requestAnimationFrame(() => {
+      this.artifactSchedulePending = false;
+      this.pumpArtifactTileQueue();
+    });
+  }
+
+  registerArtifactTiles(tiles) {
+    for (const tile of tiles || []) {
+      if (tile && tile.tile_id) this.artifactTileDescriptors.set(tile.tile_id, tile);
+    }
+  }
+
+  queueMissingArtifactTiles(model, token) {
+    if (!model || token !== this.loadToken) return;
+    const queued = new Set(this.artifactTileQueue.map(request => request.tile && request.tile.tile_id));
+    for (const tile of this.artifactTileDescriptors.values()) {
+      const tileId = tile.tile_id;
+      if (!tileId
+        || queued.has(tileId)
+        || this.artifactTileRecords.has(tileId)
+        || this.artifactTileLoading.has(tileId)) {
+        continue;
+      }
+      // When a storey is isolated, only stream that storey's tile (plus the
+      // explicit unassigned tile). Hidden storeys remain descriptors and are
+      // queued when the user returns to the whole-model view.
+      if (!this.artifactTileVisible(tileId)) continue;
+      this.artifactTileQueue.push({tile, model, token});
+      queued.add(tileId);
+    }
+  }
+
+  // v2 keeps a semantic index per tile; v1 keeps a single manifest-global one.
+  artifactUsesTileLocalIndex() {
+    const manifest = this.artifactManifest;
+    return !!manifest && !(manifest.semantic_index && manifest.semantic_index.artifact);
+  }
+
+  // Resolve the storey a tile belongs to. Explicit manifest storey metadata
+  // wins; otherwise fall back to the stable `storey-<globalId>` v2 tile-id
+  // contract. Returns null for the unassigned tile and for v1 LOD tiles.
+  tileStoreyId(tile) {
+    if (!tile) return null;
+    if (tile.storey && typeof tile.storey.global_id === 'string') return tile.storey.global_id;
+    if (typeof tile.storey_id === 'string') return tile.storey_id;
+    const id = tile.tile_id;
+    if (typeof id === 'string' && id.indexOf('storey-') === 0) return id.slice('storey-'.length);
+    return null;
+  }
+
+  // Build the storey list for artifact mode from tile ownership so the level
+  // selector, prioritisation, and isolation all agree. The unassigned tile is
+  // intentionally excluded: it is not a storey and stays visible under
+  // isolation.
+  deriveArtifactStoreys() {
+    this.artifactStoreyTileIds = new Set();
+    this.storeys = [];
+    this.planLevelIndex = 0;
+    this.modelLevelIndex = null;
+    if (this.modelKind !== 'artifact' || !this.artifactManifest) {
+      if (typeof this.onStoreys === 'function') this.onStoreys([]);
+      return;
+    }
+    const rotationAxis = this.upAxisFix ? new THREE.Vector3(1, 0, 0) : null;
+    const found = [];
+    for (const tile of this.artifactManifest.tiles || []) {
+      const storeyId = this.tileStoreyId(tile);
+      if (!storeyId || !tile.tile_id) continue;
+      this.artifactStoreyTileIds.add(tile.tile_id);
+      let elevation = null;
+      const bounds = tile.bounds;
+      if (bounds && Array.isArray(bounds.min) && bounds.min.length === 3 && bounds.min.every(Number.isFinite)) {
+        const min = new THREE.Vector3(bounds.min[0], bounds.min[1], bounds.min[2]);
+        if (rotationAxis) min.applyAxisAngle(rotationAxis, this.upAxisFix);
+        elevation = min.z;
+      }
+      found.push({tileId: tile.tile_id, storeyId, elevation});
+    }
+    // Ground-up ordering so the level list reads bottom to top.
+    found.sort((a, b) => (a.elevation ?? 0) - (b.elevation ?? 0));
+    this.storeys = found.map((entry, index) => ({
+      tileId: entry.tileId,
+      storeyId: entry.storeyId,
+      name: `Storey ${index + 1}`,
+      elevation: entry.elevation
+    }));
+    if (typeof this.onStoreys === 'function') this.onStoreys(this.storeys);
+  }
+
+  activeArtifactStoreyTileId() {
+    if (this.modelKind !== 'artifact') return null;
+    if (this.modelLevelIndex === null || this.modelLevelIndex === undefined) return null;
+    const storey = this.storeys[this.modelLevelIndex];
+    return storey ? storey.tileId : null;
+  }
+
+  // A tile is visible under storey isolation when no storey is selected, when
+  // it is the selected storey's tile, or when it is not owned by any storey
+  // (the unassigned tile, whose geometry is never dropped).
+  artifactTileVisible(tileId) {
+    if (!tileId) return true;
+    const activeTileId = this.activeArtifactStoreyTileId();
+    if (activeTileId === null) return true;
+    if (!this.artifactStoreyTileIds.has(tileId)) return true;
+    return tileId === activeTileId;
+  }
+
+  applyArtifactStoreyIsolation() {
+    // Section stays plane-based; storey isolation is by tile ownership so
+    // tall/multi-storey elements are shown whole rather than sliced.
+    this.modelRenderer.clippingPlanes = this.sectionActive ? [this.sectionPlane] : [];
+    if (!this.model) return;
+    for (const child of this.model.children) {
+      const tileId = child.userData && child.userData.vexTileId;
+      child.visible = this.artifactTileVisible(tileId);
+    }
+    // Prefer streaming the isolated storey next.
+    this.scheduleArtifactTiles();
+  }
+
+  artifactTilePriority(tile) {
+    const activeTileId = this.activeArtifactStoreyTileId();
+    // The isolated storey's tile is the most useful thing to have on screen.
+    if (activeTileId && tile && tile.tile_id === activeTileId) return -Infinity;
+    const bounds = tile && tile.bounds;
+    if (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max)) return Number.MAX_SAFE_INTEGER;
+    const center = new THREE.Vector3(
+      (bounds.min[0] + bounds.max[0]) / 2,
+      (bounds.min[1] + bounds.max[1]) / 2,
+      (bounds.min[2] + bounds.max[2]) / 2
+    );
+    if (this.upAxisFix) center.applyAxisAngle(new THREE.Vector3(1, 0, 0), this.upAxisFix);
+    // Lower LOD values are the coarse representation in the artifact contract.
+    // Distance still determines which equally detailed tiles are useful first.
+    let priority = (Number(tile.lod) || 0) * 1e12 + center.distanceToSquared(this.modelCamera.position);
+    // When a storey is isolated, tiles that are hidden by ownership are the
+    // least urgent to stream.
+    if (activeTileId && this.artifactStoreyTileIds.has(tile.tile_id)) priority += 1e15;
+    return priority;
+  }
+
+  pumpArtifactTileQueue() {
+    if (!this.artifactAbortController || !this.model || this.modelKind !== 'artifact') return;
+    this.artifactTileQueue.sort((left, right) => this.artifactTilePriority(left.tile) - this.artifactTilePriority(right.tile));
+    while (this.artifactTileLoads < this.artifactMaxInflight && this.artifactTileQueue.length) {
+      const request = this.artifactTileQueue.shift();
+      if (!request || request.token !== this.loadToken || request.model !== this.model) continue;
+      const tileId = request.tile && request.tile.tile_id;
+      // Never dispatch a tile that is already resident or already in flight.
+      if (!tileId || this.artifactTileRecords.has(tileId) || this.artifactTileLoading.has(tileId)) continue;
+      this.artifactTileLoading.add(tileId);
+      this.artifactTileLoads += 1;
+      this.loadScheduledArtifactTile(request).finally(() => {
+        this.artifactTileLoads -= 1;
+        this.artifactTileLoading.delete(tileId);
+        this.pumpArtifactTileQueue();
+      });
+    }
+  }
+
+  async loadScheduledArtifactTile({tile, model, token}) {
+    try {
+      if (!this.artifactAbortController) return;
+      this.setLoadStatus(`Render artifact: streaming tiles ${this.artifactTileRecords.size}/${this.artifactManifest.tiles.length}...`);
+      const scenePromise = this.loadArtifactTile(tile, this.artifactAbortController.signal, token);
+      const indexPromise = this.fetchArtifactSemanticIndexForTile(
+        this.artifactManifest,
+        tile,
+        this.artifactAbortController.signal
+      );
+      let scene;
+      let semanticIndex;
       try {
-        if (token !== this.loadToken || this.model !== model || !this.artifactAbortController) return;
-        this.setLoadStatus(`Render artifact: loading tile ${this.artifactTilesLoaded + 1}/${this.artifactManifest.tiles.length}...`);
-        const scene = await this.loadArtifactTile(tile, this.artifactAbortController.signal, token);
-        if (token !== this.loadToken || this.model !== model) {
-          this.disposeArtifactObject(scene);
-          return;
-        }
-        model.add(scene);
-        this.applyMaterialQuality(scene);
-        this.updateShadowPolicy(model);
-        ++this.artifactTilesLoaded;
-        this.setModelSourceMeta(currentViewMode);
+        [scene, semanticIndex] = await Promise.all([scenePromise, indexPromise]);
       } catch (error) {
-        if (error && error.name === 'AbortError') return;
-        console.warn('Render artifact tile failed to load:', error);
-        if (token === this.loadToken && this.model === model) {
-          this.modelMeta.textContent = `render artifact · ${this.artifactTilesLoaded} tiles (some unavailable)`;
-        }
+        scenePromise.then(loadedScene => this.disposeArtifactObject(loadedScene)).catch(() => {});
+        throw error;
+      }
+      if (token !== this.loadToken || this.model !== model) {
+        this.disposeArtifactObject(scene);
+        return;
+      }
+      const bytes = Number(tile.artifact && tile.artifact.byte_length) || 0;
+      this.evictArtifactTiles(bytes, tile.tile_id);
+      scene.visible = this.artifactTileVisible(tile.tile_id);
+      model.add(scene);
+      this.applyMaterialQuality(scene);
+      this.updateShadowPolicy(model);
+      this.artifactTileRecords.set(tile.tile_id, {scene, bytes, lastUsedAt: performance.now()});
+      this.setArtifactSemanticIndex(tile, semanticIndex);
+      this.artifactResidentBytes += bytes;
+      this.setModelSourceMeta(currentViewMode);
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+      console.warn('Render artifact tile failed to load:', error);
+      if (token === this.loadToken && this.model === model) {
+        this.modelMeta.textContent = `render artifact · ${this.artifactTileRecords.size} tiles (some unavailable)`;
       }
     }
-    if (token === this.loadToken && this.model === model) {
-      this.setModelSourceMeta(currentViewMode);
+  }
+
+  evictArtifactTiles(incomingBytes, protectedTileId) {
+    if (this.artifactResidentBytes + incomingBytes <= this.artifactMemoryBudgetBytes) return;
+    // Never evict the tile we are about to commit, the base/coarse tile, or the
+    // storey the user is currently isolating.
+    const activeTileId = this.activeArtifactStoreyTileId();
+    const candidates = [...this.artifactTileRecords.entries()]
+      .filter(([tileId]) => tileId !== protectedTileId
+        && tileId !== this.artifactBaseTileId
+        && tileId !== activeTileId)
+      .sort(([, left], [, right]) => {
+        // Reclaim hidden tiles before visible ones, then least-recently-used.
+        const leftVisible = left.scene && left.scene.visible ? 1 : 0;
+        const rightVisible = right.scene && right.scene.visible ? 1 : 0;
+        if (leftVisible !== rightVisible) return leftVisible - rightVisible;
+        return left.lastUsedAt - right.lastUsedAt;
+      });
+    for (const [tileId, record] of candidates) {
+      if (this.artifactResidentBytes + incomingBytes <= this.artifactMemoryBudgetBytes) break;
+      if (record.scene && record.scene.parent) record.scene.parent.remove(record.scene);
+      this.disposeArtifactObject(record.scene);
+      this.artifactTileRecords.delete(tileId);
+      // Drop the evicted tile's semantic index so a stale index can never map a
+      // future hit on a re-streamed tile to the wrong element.
+      this.artifactSemanticIndexes.delete(tileId);
+      this.artifactResidentBytes = Math.max(0, this.artifactResidentBytes - record.bytes);
     }
   }
 
@@ -3237,7 +3540,14 @@ class RealIfcViewer {
     this.modelBox = null;
     this.artifactManifest = null;
     this.artifactSemanticIndex = null;
-    this.artifactTilesLoaded = 0;
+    this.artifactSemanticIndexes.clear();
+    this.artifactTileQueue = [];
+    this.artifactTileDescriptors.clear();
+    this.artifactTileRecords.clear();
+    this.artifactTileLoading.clear();
+    this.artifactStoreyTileIds = new Set();
+    this.artifactBaseTileId = null;
+    this.artifactResidentBytes = 0;
     this.highlightObjects = [];
     this.removedObjects = [];
     this.storeys = [];

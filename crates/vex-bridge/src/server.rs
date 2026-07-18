@@ -64,12 +64,7 @@ fn validate_render_resource_uris(
     project_id: &str,
     commit: &str,
 ) -> Result<(), String> {
-    for resource in manifest
-        .tiles
-        .iter()
-        .map(|tile| &tile.artifact)
-        .chain(std::iter::once(&manifest.semantic_index.artifact))
-    {
+    for resource in manifest.resources() {
         let expected = canonical_render_object_uri(project_id, commit, &resource.sha256);
         if resource.uri != expected {
             return Err(format!(
@@ -78,6 +73,136 @@ fn validate_render_resource_uris(
         }
     }
     Ok(())
+}
+
+/// Result of interpreting a client `Range` header against a known object
+/// length. Render objects are immutable and content-addressed, so only a
+/// single `bytes=` range is meaningful; anything else is made safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByteRange {
+    /// No range, an unknown unit, or a malformed/multi range: serve the whole
+    /// object with `200 OK` (RFC 7233 permits ignoring the Range header).
+    Full,
+    /// A single satisfiable inclusive range `start..=end`.
+    Partial { start: u64, end: u64 },
+    /// A syntactically valid but unsatisfiable range: answer `416`.
+    Unsatisfiable,
+}
+
+/// Parse a standards-compliant single `bytes=` range. Only one range is
+/// supported; a multi-range set, an unknown unit, or malformed syntax degrades
+/// safely to [`ByteRange::Full`] rather than erroring.
+fn parse_render_byte_range(header: Option<&str>, len: u64) -> ByteRange {
+    let Some(raw) = header else {
+        return ByteRange::Full;
+    };
+    let Some(spec) = raw.trim().strip_prefix("bytes=") else {
+        // Unknown range unit: ignore per RFC 7233 §3.1 and serve the full body.
+        return ByteRange::Full;
+    };
+    let spec = spec.trim();
+    if spec.is_empty() || spec.contains(',') {
+        // A multi-range set is deliberately unsupported: serve the full body.
+        return ByteRange::Full;
+    }
+    let Some((start_raw, end_raw)) = spec.split_once('-') else {
+        return ByteRange::Full;
+    };
+    let start_raw = start_raw.trim();
+    let end_raw = end_raw.trim();
+    // No content can satisfy any range.
+    if len == 0 {
+        return ByteRange::Unsatisfiable;
+    }
+    match (start_raw.is_empty(), end_raw.is_empty()) {
+        // Suffix range: `bytes=-N` selects the last N bytes.
+        (true, false) => match end_raw.parse::<u64>() {
+            Ok(0) => ByteRange::Unsatisfiable,
+            Ok(suffix) => ByteRange::Partial {
+                start: len.saturating_sub(suffix),
+                end: len - 1,
+            },
+            Err(_) => ByteRange::Full,
+        },
+        // Open-ended range: `bytes=N-` selects from N to the end.
+        (false, true) => match start_raw.parse::<u64>() {
+            Ok(start) if start < len => ByteRange::Partial {
+                start,
+                end: len - 1,
+            },
+            Ok(_) => ByteRange::Unsatisfiable,
+            Err(_) => ByteRange::Full,
+        },
+        // Closed range: `bytes=A-B`.
+        (false, false) => match (start_raw.parse::<u64>(), end_raw.parse::<u64>()) {
+            (Ok(start), Ok(end)) if start > end => ByteRange::Full,
+            (Ok(start), Ok(_)) if start >= len => ByteRange::Unsatisfiable,
+            (Ok(start), Ok(end)) => ByteRange::Partial {
+                start,
+                end: end.min(len - 1),
+            },
+            _ => ByteRange::Full,
+        },
+        // `bytes=-` is malformed: serve the full body.
+        (true, true) => ByteRange::Full,
+    }
+}
+
+/// Build the HTTP response for a verified, permitted render object serve.
+///
+/// Every branch advertises `Accept-Ranges: bytes`, the immutable SHA-256 ETag,
+/// and immutable cache headers. A satisfiable range yields `206 Partial
+/// Content` with a `Content-Range`; an unsatisfiable range yields `416` with a
+/// `Content-Range: bytes */<total>`.
+fn render_object_response(
+    content_type: &str,
+    sha256: &str,
+    bytes: Vec<u8>,
+    range: ByteRange,
+) -> Response {
+    let total = bytes.len() as u64;
+    let etag = format!("\"{sha256}\"");
+    let mut response = match range {
+        ByteRange::Unsatisfiable => StatusCode::RANGE_NOT_SATISFIABLE.into_response(),
+        ByteRange::Partial { start, end } => {
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [(header::CONTENT_TYPE, content_type)],
+                slice,
+            )
+                .into_response()
+        }
+        ByteRange::Full => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
+    };
+    let headers = response.headers_mut();
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).expect("validated SHA-256 is a valid ETag"),
+    );
+    match range {
+        ByteRange::Partial { start, end } => {
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{total}"))
+                    .expect("byte range is a valid Content-Range"),
+            );
+        }
+        ByteRange::Unsatisfiable => {
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes */{total}"))
+                    .expect("unsatisfied range is a valid Content-Range"),
+            );
+        }
+        ByteRange::Full => {}
+    }
+    response
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1600,10 +1725,7 @@ async fn handle_project_render_object(
             )
         })?;
     let resource = manifest
-        .tiles
-        .iter()
-        .map(|tile| &tile.artifact)
-        .chain(std::iter::once(&manifest.semantic_index.artifact))
+        .resources()
         .find(|resource| resource.sha256 == sha256)
         .ok_or_else(|| {
             err_response(
@@ -1613,6 +1735,9 @@ async fn handle_project_render_object(
         })?;
 
     let root = render_artifact_dir(&state, &project_id, &commit).await?;
+    // Hold a serve guard for the whole read so cache eviction can never delete
+    // this artifact directory out from under an in-flight download.
+    let _serve_guard = crate::render_artifact::ArtifactServeGuard::acquire(&root);
     let path = root.join("objects").join(&sha256);
     let bytes = tokio::fs::read(&path).await.map_err(|error| {
         let status = if error.kind() == std::io::ErrorKind::NotFound {
@@ -1632,20 +1757,23 @@ async fn handle_project_render_object(
         ));
     }
 
-    let mut response = (
-        [(header::CONTENT_TYPE, resource.content_type.as_str())],
-        bytes,
-    )
-        .into_response();
-    let response_headers = response.headers_mut();
-    response_headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    // The object is authorized, declared by the validated manifest, and its
+    // bytes match the manifest digest: interpret any client range and build a
+    // standards-compliant response over the immutable object.
+    let range = parse_render_byte_range(
+        headers
+            .get(header::RANGE)
+            .and_then(|value| value.to_str().ok()),
+        bytes.len() as u64,
     );
-    response_headers.insert(
-        header::ETAG,
-        HeaderValue::from_str(&format!("\"{sha256}\"")).expect("validated SHA-256 is a valid ETag"),
-    );
+    let response = render_object_response(&resource.content_type, &sha256, bytes, range);
+
+    // Access tracking updates only after a valid, permitted serve that
+    // actually returns object bytes (200 or 206), never for an unsatisfiable
+    // range. This drives least-recently-used cache eviction.
+    if matches!(range, ByteRange::Full | ByteRange::Partial { .. }) {
+        crate::render_artifact::record_artifact_access(&root);
+    }
     Ok(response)
 }
 
@@ -2900,6 +3028,287 @@ mod tests {
             sha256_hex(b"vex-render-artifact"),
             "1165f3b59ba78e92ad6c69757db2bad5cf777df4eaae63aee796832ff34a58f1"
         );
+    }
+
+    fn render_resource(
+        project_id: &str,
+        commit: &str,
+        sha256: &str,
+    ) -> proto::RenderArtifactResource {
+        proto::RenderArtifactResource {
+            uri: canonical_render_object_uri(project_id, commit, sha256),
+            content_type: "application/octet-stream".into(),
+            sha256: sha256.into(),
+            byte_length: 1,
+        }
+    }
+
+    fn v1_render_manifest(project_id: &str, commit: &str) -> proto::RenderArtifactManifest {
+        let tile_sha = "a".repeat(64);
+        let index_sha = "b".repeat(64);
+        proto::RenderArtifactManifest {
+            schema: proto::schema::RENDER_MANIFEST.into(),
+            project_id: project_id.into(),
+            commit_hash: commit.into(),
+            artifact_id: "artifact-1".into(),
+            generated_at: "2026-07-17T00:00:00Z".into(),
+            render_policy: None,
+            tiles: vec![proto::RenderTileDescriptor {
+                tile_id: "full-model".into(),
+                lod: 0,
+                bounds: proto::RenderBounds {
+                    min: [0.0, 0.0, 0.0],
+                    max: [1.0, 1.0, 1.0],
+                },
+                geometric_error: 0.0,
+                artifact: render_resource(project_id, commit, &tile_sha),
+                semantic_index: None,
+            }],
+            semantic_index: Some(proto::RenderSemanticIndexDescriptor {
+                schema: proto::schema::RENDER_SEMANTIC_INDEX.into(),
+                entry_count: 1,
+                artifact: render_resource(project_id, commit, &index_sha),
+            }),
+        }
+    }
+
+    fn v2_render_manifest(project_id: &str, commit: &str) -> proto::RenderArtifactManifest {
+        let tile_sha = "c".repeat(64);
+        let index_sha = "d".repeat(64);
+        proto::RenderArtifactManifest {
+            schema: proto::schema::RENDER_MANIFEST_V2.into(),
+            project_id: project_id.into(),
+            commit_hash: commit.into(),
+            artifact_id: "artifact-2".into(),
+            generated_at: "2026-07-17T00:00:00Z".into(),
+            render_policy: Some(proto::RenderPolicy {
+                id: "vex.render-policy.full-model/1".into(),
+                hash: "e".repeat(64),
+            }),
+            tiles: vec![proto::RenderTileDescriptor {
+                tile_id: "full-model".into(),
+                lod: 0,
+                bounds: proto::RenderBounds {
+                    min: [0.0, 0.0, 0.0],
+                    max: [1.0, 1.0, 1.0],
+                },
+                geometric_error: 0.0,
+                artifact: render_resource(project_id, commit, &tile_sha),
+                semantic_index: Some(proto::RenderSemanticIndexDescriptor {
+                    schema: proto::schema::RENDER_SEMANTIC_INDEX.into(),
+                    entry_count: 1,
+                    artifact: render_resource(project_id, commit, &index_sha),
+                }),
+            }],
+            semantic_index: None,
+        }
+    }
+
+    #[test]
+    fn validate_render_resource_uris_accepts_v1_and_v2_manifests() {
+        let project = "project-x";
+        let commit = "f".repeat(64);
+
+        let v1 = v1_render_manifest(project, &commit);
+        assert!(v1.validate().is_ok());
+        assert!(validate_render_resource_uris(&v1, project, &commit).is_ok());
+        assert_eq!(v1.resources().count(), 2);
+
+        let v2 = v2_render_manifest(project, &commit);
+        assert!(v2.validate().is_ok());
+        assert!(validate_render_resource_uris(&v2, project, &commit).is_ok());
+        // The tile artifact and its tile-local semantic index are both served.
+        assert_eq!(v2.resources().count(), 2);
+    }
+
+    #[test]
+    fn validate_render_resource_uris_rejects_non_canonical_tile_index() {
+        // A v2 tile-local semantic index whose URI is not the canonical object
+        // endpoint must be rejected so the server never serves a
+        // worker-controlled URI.
+        let project = "project-x";
+        let commit = "f".repeat(64);
+        let mut manifest = v2_render_manifest(project, &commit);
+        manifest.tiles[0]
+            .semantic_index
+            .as_mut()
+            .unwrap()
+            .artifact
+            .uri = "/v1/projects/project-x/render/evil/objects/deadbeef".into();
+
+        let error = validate_render_resource_uris(&manifest, project, &commit).unwrap_err();
+        assert!(error.contains("canonical object endpoint"));
+    }
+
+    #[test]
+    fn render_manifest_only_declares_its_own_object_hashes() {
+        // The object handler resolves a requested hash strictly against the
+        // manifest's declared resources, so an invented hash is never found.
+        let project = "project-x";
+        let commit = "f".repeat(64);
+        let manifest = v2_render_manifest(project, &commit);
+        let declared: Vec<_> = manifest.resources().map(|r| r.sha256.clone()).collect();
+
+        assert!(declared.iter().any(|sha| sha == &"c".repeat(64)));
+        assert!(declared.iter().any(|sha| sha == &"d".repeat(64)));
+        assert!(!manifest
+            .resources()
+            .any(|resource| resource.sha256 == "9".repeat(64)));
+    }
+
+    #[test]
+    fn parse_render_byte_range_serves_full_when_absent_or_unusable() {
+        // No header, unknown unit, multi-range, and malformed forms all degrade
+        // safely to a full-body 200.
+        assert_eq!(parse_render_byte_range(None, 100), ByteRange::Full);
+        assert_eq!(
+            parse_render_byte_range(Some("items=0-10"), 100),
+            ByteRange::Full
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=0-1,3-4"), 100),
+            ByteRange::Full
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes="), 100),
+            ByteRange::Full
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=-"), 100),
+            ByteRange::Full
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=abc-def"), 100),
+            ByteRange::Full
+        );
+        // A start greater than the end is invalid syntax: ignore the header.
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=50-10"), 100),
+            ByteRange::Full
+        );
+    }
+
+    #[test]
+    fn parse_render_byte_range_handles_valid_single_ranges() {
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=0-99"), 100),
+            ByteRange::Partial { start: 0, end: 99 }
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=10-19"), 100),
+            ByteRange::Partial { start: 10, end: 19 }
+        );
+        // Open-ended runs to the last byte.
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=90-"), 100),
+            ByteRange::Partial { start: 90, end: 99 }
+        );
+        // Suffix selects the final N bytes; an oversized suffix clamps to whole.
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=-10"), 100),
+            ByteRange::Partial { start: 90, end: 99 }
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=-500"), 100),
+            ByteRange::Partial { start: 0, end: 99 }
+        );
+    }
+
+    #[test]
+    fn parse_render_byte_range_clamps_end_to_last_byte() {
+        // An end past the object length is valid and clamps to the final byte.
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=50-9999"), 100),
+            ByteRange::Partial { start: 50, end: 99 }
+        );
+    }
+
+    #[test]
+    fn parse_render_byte_range_reports_unsatisfiable() {
+        // Start at or beyond the length, a zero-length suffix, and any range
+        // against empty content are unsatisfiable (416).
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=100-200"), 100),
+            ByteRange::Unsatisfiable
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=100-"), 100),
+            ByteRange::Unsatisfiable
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=-0"), 100),
+            ByteRange::Unsatisfiable
+        );
+        assert_eq!(
+            parse_render_byte_range(Some("bytes=0-0"), 0),
+            ByteRange::Unsatisfiable
+        );
+    }
+
+    #[test]
+    fn render_object_full_response_advertises_ranges_and_etag() {
+        let sha = "a".repeat(64);
+        let response = render_object_response(
+            "model/gltf-binary",
+            &sha,
+            b"full-object-bytes".to_vec(),
+            ByteRange::Full,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers.get(header::ACCEPT_RANGES).unwrap(), "bytes");
+        assert_eq!(headers.get(header::ETAG).unwrap(), &format!("\"{sha}\""));
+        assert!(headers
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("immutable"));
+        assert!(headers.get(header::CONTENT_RANGE).is_none());
+    }
+
+    #[test]
+    fn render_object_unsatisfiable_response_is_416_with_content_range() {
+        let sha = "b".repeat(64);
+        let response = render_object_response(
+            "application/octet-stream",
+            &sha,
+            vec![0u8; 42],
+            ByteRange::Unsatisfiable,
+        );
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes */42"
+        );
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn render_object_partial_response_returns_slice_and_content_range() {
+        let sha = "c".repeat(64);
+        let body = (0u8..100).collect::<Vec<u8>>();
+        let response = render_object_response(
+            "application/octet-stream",
+            &sha,
+            body,
+            ByteRange::Partial { start: 10, end: 19 },
+        );
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 10-19/100"
+        );
+        assert_eq!(
+            response.headers().get(header::ETAG).unwrap(),
+            &format!("\"{sha}\"")
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes.len(), 10);
+        assert_eq!(&bytes[..], &(10u8..20).collect::<Vec<u8>>()[..]);
     }
 
     #[test]

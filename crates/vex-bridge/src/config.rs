@@ -107,6 +107,20 @@ pub struct Config {
     #[serde(default)]
     pub default_author_email: Option<String>,
 
+    /// Soft capacity, in bytes, of each watched project's local derived render
+    /// artifact cache (`<project>/.vex/cache/render`). When a newly published
+    /// artifact pushes total usage above this limit, Bridge evicts the
+    /// least-recently-served *completed* artifacts until the cache is back
+    /// under capacity. The artifact currently being served, the current commit
+    /// (HEAD), any artifact a worker is still building, and staging directories
+    /// are never evicted, so the limit is a target rather than a hard ceiling.
+    ///
+    /// Defaults conservatively (see [`default_render_cache_max_bytes`]). A
+    /// value below [`Config::RENDER_CACHE_MIN_BYTES`] is clamped up so a typo
+    /// can never make the cache thrash.
+    #[serde(default = "default_render_cache_max_bytes")]
+    pub render_cache_max_bytes: u64,
+
     /// Folders the daemon should auto-watch in Tier 3 mode. Each entry maps a
     /// project id to a local directory; any IFC file appearing under that
     /// directory triggers a commit + push.
@@ -152,6 +166,14 @@ fn default_node_bin() -> String {
 }
 fn default_port() -> u16 {
     7878
+}
+/// Conservative default cap for the per-project render artifact cache: 2 GiB.
+///
+/// A single storey-tiled model is typically a few tens of megabytes, so this
+/// comfortably retains a working set of recent commits on a developer
+/// workstation without letting derived data grow without bound.
+fn default_render_cache_max_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
 }
 fn default_globs() -> Vec<String> {
     vec!["*.ifc".into()]
@@ -201,12 +223,25 @@ impl Default for Config {
             port: default_port(),
             default_author_name: None,
             default_author_email: None,
+            render_cache_max_bytes: default_render_cache_max_bytes(),
             watch: Vec::new(),
         }
     }
 }
 
 impl Config {
+    /// Lower bound for [`Config::render_cache_capacity_bytes`]. A configured
+    /// value below this floor is clamped up so a mistakenly tiny setting can
+    /// never make the cache evict and rebuild the same artifact repeatedly.
+    pub const RENDER_CACHE_MIN_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// Effective render artifact cache capacity, clamped to a safe floor.
+    #[must_use]
+    pub fn render_cache_capacity_bytes(&self) -> u64 {
+        self.render_cache_max_bytes
+            .max(Self::RENDER_CACHE_MIN_BYTES)
+    }
+
     pub fn load_or_default(paths: &Paths) -> BridgeResult<Self> {
         if !paths.config_file.exists() {
             return Ok(Self::default());
@@ -403,6 +438,42 @@ mod tests {
         assert_eq!(custom.api_base, "https://vex.example.com");
         assert_eq!(custom.web_base, "https://studio.example.com");
         assert_eq!(custom.vex_serve_host, "ssh.example.com");
+    }
+
+    #[test]
+    fn render_cache_capacity_defaults_conservatively_and_clamps_floor() {
+        // The default is used when config.toml omits the field.
+        assert_eq!(
+            Config::default().render_cache_max_bytes,
+            default_render_cache_max_bytes()
+        );
+        // A generous configured value is honoured verbatim.
+        let generous = Config {
+            render_cache_max_bytes: 10 * 1024 * 1024 * 1024,
+            ..Config::default()
+        };
+        assert_eq!(
+            generous.render_cache_capacity_bytes(),
+            10 * 1024 * 1024 * 1024
+        );
+        // A too-small (or zero) value is clamped up to the safe floor so the
+        // cache never thrashes on a misconfiguration.
+        let tiny = Config {
+            render_cache_max_bytes: 0,
+            ..Config::default()
+        };
+        assert_eq!(
+            tiny.render_cache_capacity_bytes(),
+            Config::RENDER_CACHE_MIN_BYTES
+        );
+    }
+
+    #[test]
+    fn config_missing_render_cache_field_uses_default() {
+        // Older config.toml files predate the render cache setting; loading
+        // them must fall back to the conservative default rather than fail.
+        let cfg: Config = toml::from_str("port = 9000\n").unwrap();
+        assert_eq!(cfg.render_cache_max_bytes, default_render_cache_max_bytes());
     }
 
     #[test]

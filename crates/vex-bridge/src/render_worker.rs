@@ -5,6 +5,7 @@
 //! keeps large geometry jobs from exhausting a workstation when several IFC
 //! exports arrive together.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use tokio::process::Command;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{info, warn};
 
-use crate::config::Paths;
+use crate::config::{Config, Paths};
 use crate::errors::{BridgeError, BridgeResult};
 use crate::render_artifact;
 use crate::state::{RenderArtifactJobStatus, State};
@@ -88,6 +89,17 @@ pub fn queue_after_commit(
         let status = match result {
             Ok(path) => {
                 info!(project_id = %project_id, commit = %commit_hash, path = %path.display(), "render artifact published");
+                // Publishing is already atomic (rename into place); enforce the
+                // cache capacity only afterwards so eviction can never affect
+                // the just-published artifact or the publish itself.
+                prune_render_cache_after_publish(
+                    &state,
+                    &paths,
+                    &project_dir,
+                    &project_id,
+                    &commit_hash,
+                )
+                .await;
                 RenderArtifactJobStatus::Ready
             }
             Err(error) => {
@@ -114,6 +126,68 @@ async fn update_status(
     let mut state = state.write().await;
     state.set_render_artifact_status(project_id.into(), commit_hash.into(), status);
     state.save(paths)
+}
+
+/// Bound the on-disk render artifact cache after a successful publish.
+///
+/// The just-published commit, the project's current HEAD (its latest recorded
+/// IFC snapshot), and any commit a worker is still building are protected from
+/// eviction; the artifact currently being served is protected inside
+/// [`render_artifact::prune_render_cache`] via its serve guard. Eviction is
+/// best-effort: a failure here never affects the published artifact, the
+/// commit, or the job outcome.
+async fn prune_render_cache_after_publish(
+    state: &Arc<RwLock<State>>,
+    paths: &Paths,
+    project_dir: &Path,
+    project_id: &str,
+    commit_hash: &str,
+) {
+    let max_bytes = match Config::load_or_default(paths) {
+        Ok(config) => config.render_cache_capacity_bytes(),
+        Err(error) => {
+            warn!(project_id, commit = %commit_hash, %error, "could not load config for render cache pruning; skipping");
+            return;
+        }
+    };
+
+    let mut protected: HashSet<String> = HashSet::new();
+    protected.insert(commit_hash.to_string());
+    {
+        let state = state.read().await;
+        for commit in state.active_render_commits(project_id) {
+            protected.insert(commit);
+        }
+        if let Some(snapshot) = state.latest_ifc_snapshot_for_project(project_id) {
+            protected.insert(snapshot.commit_hash);
+        }
+    }
+
+    let project_dir = project_dir.to_path_buf();
+    let project_id = project_id.to_string();
+    let commit = commit_hash.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        render_artifact::prune_render_cache(&project_dir, max_bytes, &protected)
+    })
+    .await;
+    match result {
+        Ok(Ok(report)) if !report.evicted.is_empty() => {
+            info!(
+                project_id,
+                commit = %commit,
+                evicted = report.evicted.len(),
+                retained_bytes = report.retained_bytes,
+                "evicted least-recently-served render artifacts to bound cache",
+            );
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            warn!(project_id, commit = %commit, %error, "render cache pruning failed; cache may exceed its cap");
+        }
+        Err(error) => {
+            warn!(project_id, commit = %commit, %error, "render cache pruning task panicked");
+        }
+    }
 }
 
 async fn generate_artifact(
@@ -263,7 +337,7 @@ mod tests {
 
     #[test]
     fn runtime_assets_are_embedded() {
-        assert!(WORKER_SOURCE.contains("vex.render-manifest/1"));
+        assert!(WORKER_SOURCE.contains("vex.render-manifest/2"));
         assert!(!WEB_IFC_NODE_API.is_empty());
         assert!(!WEB_IFC_NODE_WASM.is_empty());
     }

@@ -24,7 +24,25 @@ pub mod schema {
     ///
     /// Render artifacts are a cache of the canonical IFC graph, not a source
     /// of semantic truth.
+    ///
+    /// `v1` carries a single manifest-global semantic index. It stays readable
+    /// and valid so already-published artifacts never need regeneration.
     pub const RENDER_MANIFEST: &str = "vex.render-manifest/1";
+
+    /// Second-generation render manifest.
+    ///
+    /// `v2` names the renderer policy identity (so distinct policies stay
+    /// identity-safe) and moves the semantic index to be tile-local. It still
+    /// emits only the single full-model tile initially.
+    pub const RENDER_MANIFEST_V2: &str = "vex.render-manifest/2";
+
+    /// Base namespace for a renderer policy identity.
+    ///
+    /// A v2 manifest binds its artifacts to a namespaced policy tag (for
+    /// example `vex.render-policy.full-model/1`) plus a content hash of the
+    /// policy parameters, so changing the renderer configuration produces a
+    /// distinct, non-colliding identity.
+    pub const RENDER_POLICY: &str = "vex.render-policy/1";
 
     /// Status payload for derived IFC render-artifact generation.
     pub const RENDER_STATUS: &str = "vex.render-status/1";
@@ -434,6 +452,10 @@ pub struct RenderTileDescriptor {
     /// Maximum geometric approximation error for this tile, in model units.
     pub geometric_error: f64,
     pub artifact: RenderArtifactResource,
+    /// Tile-local semantic index (v2 manifests). Absent in v1, where the
+    /// semantic index is a single manifest-global descriptor instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_index: Option<RenderSemanticIndexDescriptor>,
 }
 
 /// Immutable semantic lookup data for selection and element-to-tile mapping.
@@ -446,11 +468,28 @@ pub struct RenderSemanticIndexDescriptor {
     pub artifact: RenderArtifactResource,
 }
 
+/// Namespaced, content-hashed identity of the renderer policy that produced a
+/// v2 artifact set.
+///
+/// `id` is a namespaced `name/major` tag (for example
+/// `vex.render-policy.full-model/1`) so policies can be introduced without
+/// clashing, and `hash` is a lowercase SHA-256 over the policy parameters so a
+/// configuration change yields a distinct, identity-safe artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderPolicy {
+    pub id: String,
+    pub hash: String,
+}
+
 /// Commit-exact manifest for derived IFC render artifacts.
 ///
 /// The manifest only describes derived content. `commit_hash` remains the
 /// authoritative semantic model identity; each referenced object is immutable
 /// and independently integrity-checkable.
+///
+/// The manifest is versioned by its `schema` tag. `v1` carries a single
+/// manifest-global `semantic_index`; `v2` names a `render_policy` and moves the
+/// semantic index to be tile-local (`RenderTileDescriptor::semantic_index`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RenderArtifactManifest {
     pub schema: String,
@@ -461,8 +500,14 @@ pub struct RenderArtifactManifest {
     pub artifact_id: String,
     /// RFC3339 time the artifact set was generated.
     pub generated_at: String,
+    /// Renderer policy identity (v2 manifests). Absent in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_policy: Option<RenderPolicy>,
     pub tiles: Vec<RenderTileDescriptor>,
-    pub semantic_index: RenderSemanticIndexDescriptor,
+    /// Manifest-global semantic index (v1 manifests). Absent in v2, where the
+    /// semantic index is tile-local instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_index: Option<RenderSemanticIndexDescriptor>,
 }
 
 /// Lifecycle state of a derived IFC render-artifact build.
@@ -508,6 +553,16 @@ pub enum RenderArtifactValidationError {
         actual: String,
     },
     MissingField(&'static str),
+    /// A field is present but not permitted by the manifest's schema version
+    /// (for example a v1 manifest-global `semantic_index` in a v2 manifest).
+    UnexpectedField {
+        field: &'static str,
+        schema: String,
+    },
+    /// A renderer policy identity is not a namespaced `name/major` tag.
+    InvalidPolicyId {
+        actual: String,
+    },
     DuplicateTileId(String),
     InvalidSha256 {
         resource: String,
@@ -532,6 +587,12 @@ impl std::fmt::Display for RenderArtifactValidationError {
                 "{field} schema {actual:?} is not compatible with {expected:?}"
             ),
             Self::MissingField(field) => write!(f, "{field} must not be empty"),
+            Self::UnexpectedField { field, schema } => {
+                write!(f, "{field} is not permitted by manifest schema {schema:?}")
+            }
+            Self::InvalidPolicyId { actual } => {
+                write!(f, "render policy id {actual:?} is not a namespaced tag")
+            }
             Self::DuplicateTileId(tile_id) => write!(f, "tile_id {tile_id:?} is duplicated"),
             Self::InvalidSha256 { resource } => {
                 write!(f, "resource {resource:?} does not have a lowercase SHA-256")
@@ -547,20 +608,84 @@ impl std::fmt::Display for RenderArtifactValidationError {
 impl std::error::Error for RenderArtifactValidationError {}
 
 impl RenderArtifactManifest {
+    /// Iterate every immutable resource declared anywhere in the manifest:
+    /// each tile artifact, each tile-local semantic index (v2), and the
+    /// manifest-global semantic index (v1). Centralizing enumeration keeps
+    /// validation, publication, and serving in agreement about exactly which
+    /// objects a manifest declares.
+    pub fn resources(&self) -> impl Iterator<Item = &RenderArtifactResource> {
+        self.tiles
+            .iter()
+            .flat_map(|tile| {
+                std::iter::once(&tile.artifact)
+                    .chain(tile.semantic_index.iter().map(|index| &index.artifact))
+            })
+            .chain(self.semantic_index.iter().map(|index| &index.artifact))
+    }
+
+    /// Mutable counterpart to [`resources`](Self::resources), used to rewrite
+    /// worker-supplied URIs into canonical, bridge-owned object endpoints.
+    pub fn resources_mut(&mut self) -> impl Iterator<Item = &mut RenderArtifactResource> {
+        self.tiles
+            .iter_mut()
+            .flat_map(|tile| {
+                std::iter::once(&mut tile.artifact).chain(
+                    tile.semantic_index
+                        .iter_mut()
+                        .map(|index| &mut index.artifact),
+                )
+            })
+            .chain(
+                self.semantic_index
+                    .iter_mut()
+                    .map(|index| &mut index.artifact),
+            )
+    }
+
     /// Reject malformed manifests before caching or serving their immutable
-    /// artifacts. This deliberately validates the envelope, not remote bytes.
+    /// artifacts. This deliberately validates the envelope, not remote bytes,
+    /// and enforces the structural policy of the manifest's schema version.
+    ///
+    /// Every declared resource (tile, tile-local index, and manifest-global
+    /// index) is validated, so an unsafe or mismatched object cannot slip in
+    /// under a newer schema shape.
     pub fn validate(&self) -> Result<(), RenderArtifactValidationError> {
-        validate_schema("manifest", &self.schema, schema::RENDER_MANIFEST)?;
+        let major = validate_manifest_schema(&self.schema)?;
         validate_non_empty("project_id", &self.project_id)?;
         validate_non_empty("commit_hash", &self.commit_hash)?;
         validate_non_empty("artifact_id", &self.artifact_id)?;
         validate_non_empty("generated_at", &self.generated_at)?;
-        validate_schema(
-            "semantic_index",
-            &self.semantic_index.schema,
-            schema::RENDER_SEMANTIC_INDEX,
-        )?;
-        validate_resource("semantic_index", &self.semantic_index.artifact)?;
+
+        match major {
+            1 => {
+                // v1 carries one manifest-global semantic index and no policy.
+                if self.render_policy.is_some() {
+                    return Err(RenderArtifactValidationError::UnexpectedField {
+                        field: "render_policy",
+                        schema: self.schema.clone(),
+                    });
+                }
+                let index = self.semantic_index.as_ref().ok_or(
+                    RenderArtifactValidationError::MissingField("semantic_index"),
+                )?;
+                validate_semantic_index("semantic_index", index)?;
+            }
+            _ => {
+                // v2 names a policy identity and moves the index to be
+                // tile-local.
+                let policy = self
+                    .render_policy
+                    .as_ref()
+                    .ok_or(RenderArtifactValidationError::MissingField("render_policy"))?;
+                validate_render_policy(policy)?;
+                if self.semantic_index.is_some() {
+                    return Err(RenderArtifactValidationError::UnexpectedField {
+                        field: "semantic_index",
+                        schema: self.schema.clone(),
+                    });
+                }
+            }
+        }
 
         let mut tile_ids = std::collections::HashSet::with_capacity(self.tiles.len());
         for tile in &self.tiles {
@@ -593,9 +718,79 @@ impl RenderArtifactManifest {
                 });
             }
             validate_resource(&format!("tile:{}", tile.tile_id), &tile.artifact)?;
+
+            match major {
+                1 => {
+                    if tile.semantic_index.is_some() {
+                        return Err(RenderArtifactValidationError::UnexpectedField {
+                            field: "tile.semantic_index",
+                            schema: self.schema.clone(),
+                        });
+                    }
+                }
+                _ => {
+                    let index = tile.semantic_index.as_ref().ok_or(
+                        RenderArtifactValidationError::MissingField("tile.semantic_index"),
+                    )?;
+                    validate_semantic_index(
+                        &format!("tile:{}:semantic_index", tile.tile_id),
+                        index,
+                    )?;
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// Accept either supported manifest schema version, returning its major.
+fn validate_manifest_schema(actual: &str) -> Result<u32, RenderArtifactValidationError> {
+    if schema::is_compatible(actual, schema::RENDER_MANIFEST) {
+        Ok(1)
+    } else if schema::is_compatible(actual, schema::RENDER_MANIFEST_V2) {
+        Ok(2)
+    } else {
+        Err(RenderArtifactValidationError::IncompatibleSchema {
+            field: "manifest",
+            expected: schema::RENDER_MANIFEST_V2,
+            actual: actual.to_string(),
+        })
+    }
+}
+
+fn validate_semantic_index(
+    label: &str,
+    index: &RenderSemanticIndexDescriptor,
+) -> Result<(), RenderArtifactValidationError> {
+    validate_schema(
+        "semantic_index",
+        &index.schema,
+        schema::RENDER_SEMANTIC_INDEX,
+    )?;
+    validate_resource(label, &index.artifact)
+}
+
+fn validate_render_policy(policy: &RenderPolicy) -> Result<(), RenderArtifactValidationError> {
+    validate_non_empty("render_policy.id", &policy.id)?;
+    match schema::parse_tag(&policy.id) {
+        Some((name, _)) if !name.trim().is_empty() => {}
+        _ => {
+            return Err(RenderArtifactValidationError::InvalidPolicyId {
+                actual: policy.id.clone(),
+            })
+        }
+    }
+    if policy.hash.len() != 64
+        || !policy
+            .hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(RenderArtifactValidationError::InvalidSha256 {
+            resource: "render_policy.hash".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_schema(
@@ -767,6 +962,7 @@ mod tests {
             commit_hash: "e".repeat(64),
             artifact_id: "render-abc".to_string(),
             generated_at: "2026-07-17T13:38:07Z".to_string(),
+            render_policy: None,
             tiles: vec![RenderTileDescriptor {
                 tile_id: "0/0/0".to_string(),
                 lod: 0,
@@ -776,12 +972,47 @@ mod tests {
                 },
                 geometric_error: 0.0,
                 artifact: resource("/v1/render-artifacts/render-abc/tiles/0-0-0"),
+                semantic_index: None,
             }],
-            semantic_index: RenderSemanticIndexDescriptor {
+            semantic_index: Some(RenderSemanticIndexDescriptor {
                 schema: schema::RENDER_SEMANTIC_INDEX.to_string(),
                 entry_count: 1,
                 artifact: resource("/v1/render-artifacts/render-abc/semantic-index"),
-            },
+            }),
+        }
+    }
+
+    fn semantic_index() -> RenderSemanticIndexDescriptor {
+        RenderSemanticIndexDescriptor {
+            schema: schema::RENDER_SEMANTIC_INDEX.to_string(),
+            entry_count: 1,
+            artifact: resource("/v1/render-artifacts/render-abc/tiles/full-model/semantic-index"),
+        }
+    }
+
+    fn manifest_v2() -> RenderArtifactManifest {
+        RenderArtifactManifest {
+            schema: schema::RENDER_MANIFEST_V2.to_string(),
+            project_id: "project-123".to_string(),
+            commit_hash: "e".repeat(64),
+            artifact_id: "render-def".to_string(),
+            generated_at: "2026-07-17T13:38:07Z".to_string(),
+            render_policy: Some(RenderPolicy {
+                id: "vex.render-policy.full-model/1".to_string(),
+                hash: "b".repeat(64),
+            }),
+            tiles: vec![RenderTileDescriptor {
+                tile_id: "full-model".to_string(),
+                lod: 0,
+                bounds: RenderBounds {
+                    min: [0.0, 0.0, 0.0],
+                    max: [10.0, 5.0, 3.0],
+                },
+                geometric_error: 0.0,
+                artifact: resource("/v1/render-artifacts/render-def/tiles/full-model"),
+                semantic_index: Some(semantic_index()),
+            }],
+            semantic_index: None,
         }
     }
 
@@ -820,6 +1051,22 @@ mod tests {
     }
 
     #[test]
+    fn v1_manifest_round_trips_and_omits_v2_only_fields() {
+        // A published v1 manifest must stay readable, valid, and serialize
+        // without the v2-only render policy or tile-local index fields.
+        let manifest = manifest();
+        assert!(manifest.validate().is_ok());
+
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert!(value.get("render_policy").is_none());
+        assert!(value["tiles"][0].get("semantic_index").is_none());
+        assert!(value.get("semantic_index").is_some());
+
+        let decoded: RenderArtifactManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, manifest);
+    }
+
+    #[test]
     fn render_manifest_rejects_duplicate_tiles_and_incompatible_index_schema() {
         let mut duplicate = manifest();
         duplicate.tiles.push(duplicate.tiles[0].clone());
@@ -829,13 +1076,104 @@ mod tests {
         ));
 
         let mut incompatible_index = manifest();
-        incompatible_index.semantic_index.schema = "vex.render-semantic-index/2".to_string();
+        incompatible_index.semantic_index.as_mut().unwrap().schema =
+            "vex.render-semantic-index/2".to_string();
         assert!(matches!(
             incompatible_index.validate(),
             Err(RenderArtifactValidationError::IncompatibleSchema {
                 field: "semantic_index",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn v2_manifest_validates_with_tile_local_index_and_policy() {
+        let manifest = manifest_v2();
+        assert!(manifest.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&manifest).unwrap()["schema"],
+            schema::RENDER_MANIFEST_V2
+        );
+        // Resource enumeration reaches every declared object.
+        assert_eq!(manifest.resources().count(), 2);
+    }
+
+    #[test]
+    fn v2_manifest_requires_policy_and_tile_local_index() {
+        let mut missing_policy = manifest_v2();
+        missing_policy.render_policy = None;
+        assert!(matches!(
+            missing_policy.validate(),
+            Err(RenderArtifactValidationError::MissingField("render_policy"))
+        ));
+
+        let mut missing_index = manifest_v2();
+        missing_index.tiles[0].semantic_index = None;
+        assert!(matches!(
+            missing_index.validate(),
+            Err(RenderArtifactValidationError::MissingField(
+                "tile.semantic_index"
+            ))
+        ));
+
+        let mut bad_policy = manifest_v2();
+        bad_policy.render_policy.as_mut().unwrap().id = "full-model".to_string();
+        assert!(matches!(
+            bad_policy.validate(),
+            Err(RenderArtifactValidationError::InvalidPolicyId { .. })
+        ));
+
+        let mut bad_policy_hash = manifest_v2();
+        bad_policy_hash.render_policy.as_mut().unwrap().hash = "NOT-HEX".to_string();
+        assert!(matches!(
+            bad_policy_hash.validate(),
+            Err(RenderArtifactValidationError::InvalidSha256 { resource }) if resource == "render_policy.hash"
+        ));
+    }
+
+    #[test]
+    fn v2_manifest_rejects_v1_shaped_fields() {
+        // A manifest-global semantic index is not permitted alongside a v2
+        // schema, and neither is a tile that omits its own index.
+        let mut global_index = manifest_v2();
+        global_index.semantic_index = Some(semantic_index());
+        assert!(matches!(
+            global_index.validate(),
+            Err(RenderArtifactValidationError::UnexpectedField {
+                field: "semantic_index",
+                ..
+            })
+        ));
+
+        let mut policy_in_v1 = manifest();
+        policy_in_v1.render_policy = Some(RenderPolicy {
+            id: "vex.render-policy.full-model/1".to_string(),
+            hash: "b".repeat(64),
+        });
+        assert!(matches!(
+            policy_in_v1.validate(),
+            Err(RenderArtifactValidationError::UnexpectedField {
+                field: "render_policy",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn v2_manifest_rejects_tampered_tile_index_resource() {
+        // A tile-local index object with a non-SHA-256 digest is rejected the
+        // same way a tampered tile artifact is.
+        let mut tampered = manifest_v2();
+        tampered.tiles[0]
+            .semantic_index
+            .as_mut()
+            .unwrap()
+            .artifact
+            .sha256 = "not-a-valid-sha".to_string();
+        assert!(matches!(
+            tampered.validate(),
+            Err(RenderArtifactValidationError::InvalidSha256 { .. })
         ));
     }
 }

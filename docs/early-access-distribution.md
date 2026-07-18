@@ -62,6 +62,56 @@ Keep the four binaries in the same directory. If `config.toml` does not set
 running daemon/tray and only falls back to `vex` on `PATH` when no bundled copy
 exists.
 
+## WebView2 Runtime provisioning (Windows)
+
+The Vex Atlas desktop app is a WebView2-hosted UI, so a usable Microsoft Edge
+WebView2 Runtime must be present. The Windows setup executable checks the same
+per-machine and per-user registry locations Microsoft's own installers use
+(`HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`,
+the non-WOW6432Node HKLM equivalent, and the HKCU equivalent) for a usable
+`pv` version value. Most Windows 10/11 machines already have the Evergreen
+Runtime from Edge/Windows Update and need no action.
+
+When no usable runtime is detected, and the release pipeline staged Microsoft's
+official WebView2 Evergreen Bootstrapper (`MicrosoftEdgeWebView2Setup.exe`)
+into the release's `SourceDir`, the setup silently runs that
+Microsoft-signed bootstrapper (`/silent /install`) during install — including
+unattended/silent installs, since it is a required dependency rather than an
+optional app launch. The bootstrapper itself fetches the actual runtime from
+Microsoft's own CDN; Vex Atlas never downloads or executes anything at install
+time beyond running this pre-staged, official stub.
+
+`release.yml` downloads that bootstrapper from Microsoft's documented
+redistribution fwlink and verifies its Authenticode signature is a valid
+Microsoft signature before staging it. If the bootstrapper is missing (older
+builds, offline packaging, or a failed/unsigned download), `VexAtlasSetup.iss`
+detects its absence at compile time and simply omits WebView2 provisioning
+from that build (a `#pragma message` warning is emitted); the app relies on
+whatever runtime is already on the machine, and the WebView2 team's own
+just-in-time install prompt as a last resort. No undocumented or unsigned
+binaries are ever bundled.
+
+## Native crash reporting
+
+Every shipped native binary (`vex-bridge`, `vex-tray`, `vex-desktop`) installs
+a panic hook at startup (`vex_bridge::crash_report::install`). On panic, it
+writes a single redacted JSON crash report to
+`<app data dir>\vex-bridge\crash-reports\` (the same app-data root used by
+`config.toml`/logs; see `Paths::discover()`), alongside continuing to print to
+stderr/the existing log sink as before. Each report includes a UTC timestamp,
+the executable name and version, the panicking thread name, the panic
+message/location, and a backtrace when `RUST_BACKTRACE` capture is available.
+Report contents are passed through the same redaction convention used
+elsewhere (home directory collapsed to `~`, known access tokens replaced with
+`[redacted-token]`, and long token-shaped strings heuristically replaced with
+`[redacted]`) so reports are safe to attach to a support request.
+
+`vex-desktop` and `vex-tray` additionally wrap their startup/run logic in
+`catch_unwind`, so instead of the process silently disappearing on a panic,
+the desktop app shows a native error dialog and the tray posts a native OS
+notification, both naming the crash report's file path so a user can find and
+share it.
+
 ## Account connection
 
 Users connect the installed daemon to Architur through the browser pairing flow:

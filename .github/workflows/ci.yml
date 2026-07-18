@@ -61,3 +61,25 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  render-artifacts:
+    name: Render artifact worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify render worker syntax
+        run: |
+          node --check tools/vex-render-worker.mjs
+          node --check tools/pressure-test-render-worker.mjs
+          node --check tools/test-storey-tiling.mjs
+
+      - name: Verify render artifact fidelity and storey tiling
+        run: |
+          node tools/pressure-test-render-worker.mjs
+          node tools/test-storey-tiling.mjs

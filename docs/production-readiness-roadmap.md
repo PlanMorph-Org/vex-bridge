@@ -57,7 +57,10 @@ large implementation begins.
   Azure tenancy/storage/queue/region policy, SSO/SCIM provider, privacy and
   telemetry policy, data retention/residency, and pilot firms.
 - Repair release prerequisites: signed Windows packages, notarized macOS
-  packages, WebView2 bootstrap on Windows, release provenance/SBOM, and a
+  packages, WebView2 bootstrap on Windows (the installer now detects an
+  existing Evergreen Runtime and, when the release pipeline stages Microsoft's
+  official bootstrapper, provisions it silently — see
+  `docs/early-access-distribution.md`), release provenance/SBOM, and a
   staged canary-to-stable release process.
 
 **Exit criteria**
@@ -161,7 +164,11 @@ large teams and models.
 large firm.
 
 - Add panic capture, redacted crash artifacts, native error reporting, and
-  support-bundle export that excludes keys, tokens, and home paths.
+  support-bundle export that excludes keys, tokens, and home paths. (Panic
+  capture, redacted crash artifacts under the app data directory, and native
+  failure surfacing in `vex-desktop`/`vex-tray` are implemented — see
+  `crash_report.rs` and `docs/early-access-distribution.md`; support-bundle
+  export remains open.)
 - Provide managed daemon lifecycle appropriate to each OS, including restart
   behavior and installer/uninstaller coverage.
 - Add rollback after a failed update health check, channel persistence, and

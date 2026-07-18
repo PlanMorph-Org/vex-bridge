@@ -20,9 +20,16 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
-const MANIFEST_SCHEMA = 'vex.render-manifest/1';
+const MANIFEST_SCHEMA = 'vex.render-manifest/2';
 const SEMANTIC_INDEX_SCHEMA = 'vex.render-semantic-index/1';
-const TILE_ID = 'full-model';
+const RENDER_POLICY_ID = 'vex.render-policy.storey-first/1';
+const TILE_STRATEGY = 'storey-first';
+const UNASSIGNED_TILE_ID = 'unassigned';
+// web-ifc entity type identifiers used to resolve storey membership directly
+// from the IFC spatial hierarchy rather than inferring it from geometry.
+const IFC_REL_AGGREGATES = 160246688;
+const IFC_BUILDING_STOREY = 3124254112;
+const IFC_REL_CONTAINED_IN_SPATIAL_STRUCTURE = 3242617779;
 const GLB_MAGIC = 0x46546c67;
 const GLB_VERSION = 2;
 const GLB_JSON = 0x4e4f534a;
@@ -218,20 +225,19 @@ function normalizedColor(color) {
   return [0.72, 0.72, 0.72, 1];
 }
 
-function transformGeometry(vertices, indices, matrix, vertexBase, bounds, color) {
+function transformPlacement(vertices, indices, matrix, color) {
   if (vertices.length % 6 !== 0 || indices.length % 3 !== 0) {
     throw new Error('web-ifc returned malformed geometry buffers');
   }
   const vertexCount = vertices.length / 6;
-  if (vertexBase + vertexCount > 0xffffffff) {
-    throw new Error('model exceeds the GLB unsigned-32-bit vertex limit');
-  }
 
   const positions = new Float32Array(vertexCount * 3);
   const normals = new Float32Array(vertexCount * 3);
   const colors = new Float32Array(vertexCount * 4);
   const normalMatrix = normalTransform(matrix);
   const [red, green, blue, alpha] = normalizedColor(color);
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     const source = vertex * 6;
     const target = vertex * 3;
@@ -244,12 +250,12 @@ function transformGeometry(vertices, indices, matrix, vertexBase, bounds, color)
     positions[target] = tx;
     positions[target + 1] = ty;
     positions[target + 2] = tz;
-    bounds.min[0] = Math.min(bounds.min[0], tx);
-    bounds.min[1] = Math.min(bounds.min[1], ty);
-    bounds.min[2] = Math.min(bounds.min[2], tz);
-    bounds.max[0] = Math.max(bounds.max[0], tx);
-    bounds.max[1] = Math.max(bounds.max[1], ty);
-    bounds.max[2] = Math.max(bounds.max[2], tz);
+    min[0] = Math.min(min[0], tx);
+    min[1] = Math.min(min[1], ty);
+    min[2] = Math.min(min[2], tz);
+    max[0] = Math.max(max[0], tx);
+    max[1] = Math.max(max[1], ty);
+    max[2] = Math.max(max[2], tz);
 
     const nx = numberOrThrow(vertices[source + 3], 'normal x');
     const ny = numberOrThrow(vertices[source + 4], 'normal y');
@@ -271,15 +277,201 @@ function transformGeometry(vertices, indices, matrix, vertexBase, bounds, color)
     colors[colorOffset + 3] = alpha;
   }
 
-  const outputIndices = new Uint32Array(indices.length);
+  const localIndices = new Uint32Array(indices.length);
   for (let index = 0; index < indices.length; index += 1) {
     const localIndex = indices[index];
     if (!Number.isInteger(localIndex) || localIndex < 0 || localIndex >= vertexCount) {
       throw new Error('web-ifc returned an out-of-range geometry index');
     }
-    outputIndices[index] = vertexBase + localIndex;
+    localIndices[index] = localIndex;
   }
-  return { positions, normals, colors, indices: outputIndices };
+  return { positions, normals, colors, indices: localIndices, vertexCount, min, max };
+}
+
+function handleExpressId(value) {
+  if (typeof value === 'number' && Number.isInteger(value)) return value;
+  if (value && typeof value.value === 'number' && Number.isInteger(value.value)) {
+    return value.value;
+  }
+  return undefined;
+}
+
+function handleExpressIds(value) {
+  const ids = [];
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const id = handleExpressId(item);
+      if (id !== undefined) ids.push(id);
+    }
+  } else {
+    const id = handleExpressId(value);
+    if (id !== undefined) ids.push(id);
+  }
+  return ids;
+}
+
+function collectTypeIds(api, modelId, type) {
+  const ids = [];
+  const vector = api.GetLineIDsWithType(modelId, type);
+  const size = vector.size();
+  for (let index = 0; index < size; index += 1) ids.push(vector.get(index));
+  return ids;
+}
+
+function readGlobalId(api, modelId, expressId) {
+  try {
+    const line = api.GetLine(modelId, expressId, false);
+    if (typeof line?.GlobalId?.value === 'string' && line.GlobalId.value.trim()) {
+      return line.GlobalId.value;
+    }
+  } catch {
+    // Some geometry-bearing entities have no ordinary IFC line metadata.
+  }
+  return null;
+}
+
+/**
+ * Resolve storey membership directly from the IFC spatial hierarchy.
+ *
+ * Membership is derived only from `IfcRelContainedInSpatialStructure` (which
+ * element sits in which spatial node) and `IfcRelAggregates` (how spatial
+ * nodes and assemblies decompose). Storey ownership is never inferred from Z
+ * bounds, so a tall element that spans several storeys still belongs to its
+ * single explicit containment storey.
+ */
+function buildSpatialResolver(api, modelId) {
+  const storeyIds = new Set(collectTypeIds(api, modelId, IFC_BUILDING_STOREY));
+
+  // element (or assembly) express id -> spatial structure express id
+  const containedIn = new Map();
+  for (const relId of collectTypeIds(api, modelId, IFC_REL_CONTAINED_IN_SPATIAL_STRUCTURE)) {
+    let rel;
+    try {
+      rel = api.GetLine(modelId, relId, false);
+    } catch {
+      continue;
+    }
+    const structure = handleExpressId(rel?.RelatingStructure);
+    if (structure === undefined) continue;
+    for (const elementId of handleExpressIds(rel?.RelatedElements)) {
+      if (!containedIn.has(elementId)) containedIn.set(elementId, structure);
+    }
+  }
+
+  // child express id -> aggregating parent express id (spatial decomposition
+  // such as storey -> space, and element decomposition such as assembly -> part)
+  const aggregateParent = new Map();
+  for (const relId of collectTypeIds(api, modelId, IFC_REL_AGGREGATES)) {
+    let rel;
+    try {
+      rel = api.GetLine(modelId, relId, false);
+    } catch {
+      continue;
+    }
+    const parent = handleExpressId(rel?.RelatingObject);
+    if (parent === undefined) continue;
+    for (const childId of handleExpressIds(rel?.RelatedObjects)) {
+      if (!aggregateParent.has(childId)) aggregateParent.set(childId, parent);
+    }
+  }
+
+  // Walk aggregation upward from a spatial node until a storey is reached.
+  const resolveStorey = (nodeId) => {
+    const visited = new Set();
+    let current = nodeId;
+    while (current !== undefined && !visited.has(current)) {
+      visited.add(current);
+      if (storeyIds.has(current)) return current;
+      current = aggregateParent.get(current);
+    }
+    return undefined;
+  };
+
+  // Resolve an element to its containing storey. Explicit spatial containment
+  // wins; if the element is only a part of an assembly, follow the aggregation
+  // chain to the containing parent.
+  const resolveElementStorey = (elementId) => {
+    const visited = new Set();
+    let current = elementId;
+    while (current !== undefined && !visited.has(current)) {
+      visited.add(current);
+      const structure = containedIn.get(current);
+      if (structure !== undefined) return resolveStorey(structure);
+      current = aggregateParent.get(current);
+    }
+    return undefined;
+  };
+
+  const storeyMeta = new Map();
+  for (const storeyId of storeyIds) {
+    const globalId = readGlobalId(api, modelId, storeyId);
+    // Stable identity for the tile id: GlobalId when present, otherwise the
+    // express id, so ordering and tile names never depend on iteration order.
+    const key = globalId ?? `express-${storeyId}`;
+    storeyMeta.set(storeyId, { expressId: storeyId, globalId, key });
+  }
+
+  return { resolveElementStorey, storeyMeta };
+}
+
+// Deterministic element order within a tile: stable GlobalId first, then the
+// numeric express id as a tie-breaker for elements lacking a GlobalId.
+function compareElements(a, b) {
+  const ga = a.globalId ?? '';
+  const gb = b.globalId ?? '';
+  if (ga !== gb) return ga < gb ? -1 : 1;
+  return a.expressId - b.expressId;
+}
+
+/**
+ * Assemble a single storey tile: concatenate its elements' placements into one
+ * GLB buffer, rebasing indices per tile, and emit tile-local semantic entries
+ * whose triangle ranges reference this tile's own mesh.
+ */
+function assembleTile(tileId, elements) {
+  const chunks = [];
+  const entries = [];
+  const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+  const totals = { vertexCount: 0, indexCount: 0, triangleCount: 0, placedGeometryCount: 0 };
+  for (const element of elements) {
+    const triangleStart = totals.triangleCount;
+    for (const placement of element.placements) {
+      if (totals.vertexCount + placement.vertexCount > 0xffffffff) {
+        throw new Error('tile exceeds the GLB unsigned-32-bit vertex limit');
+      }
+      const rebased = new Uint32Array(placement.indices.length);
+      for (let index = 0; index < placement.indices.length; index += 1) {
+        rebased[index] = totals.vertexCount + placement.indices[index];
+      }
+      chunks.push({
+        positions: placement.positions,
+        normals: placement.normals,
+        colors: placement.colors,
+        indices: rebased,
+      });
+      for (let axis = 0; axis < 3; axis += 1) {
+        bounds.min[axis] = Math.min(bounds.min[axis], placement.min[axis]);
+        bounds.max[axis] = Math.max(bounds.max[axis], placement.max[axis]);
+      }
+      totals.vertexCount += placement.vertexCount;
+      totals.indexCount += placement.indices.length;
+      totals.triangleCount += placement.indices.length / 3;
+      totals.placedGeometryCount += 1;
+    }
+    entries.push({
+      express_id: element.expressId,
+      global_id: element.globalId,
+      triangle_ranges: totals.triangleCount === triangleStart
+        ? []
+        : [{ first_triangle: triangleStart, triangle_count: totals.triangleCount - triangleStart }],
+    });
+  }
+  if (!totals.vertexCount) {
+    bounds.min = [0, 0, 0];
+    bounds.max = [0, 0, 0];
+  }
+  const glb = buildGlb(chunks, totals, bounds);
+  return { tileId, glb, entries, bounds, totals };
 }
 
 function concatenate(TypedArray, chunks, property, totalLength) {
@@ -460,10 +652,10 @@ async function run(options) {
     modelId = api.OpenModel(sourceBytes, { COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true });
     const openedAt = performance.now();
 
-    const chunks = [];
-    const entries = [];
-    const bounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
-    const totals = { vertexCount: 0, indexCount: 0, triangleCount: 0, placedGeometryCount: 0 };
+    // Storey membership is resolved from the IFC spatial hierarchy before any
+    // geometry is grouped, never from geometry Z bounds.
+    const spatial = buildSpatialResolver(api, modelId);
+    const elementRecords = [];
     const flatMeshes = api.LoadAllGeometry(modelId);
     try {
       for (let meshIndex = 0; meshIndex < flatMeshes.size(); meshIndex += 1) {
@@ -473,17 +665,8 @@ async function run(options) {
           if (!Number.isInteger(expressId) || expressId < 0) {
             throw new Error('web-ifc returned an invalid product express ID');
           }
-          let globalId = null;
-          try {
-            const line = api.GetLine(modelId, expressId, false);
-            if (typeof line?.GlobalId?.value === 'string' && line.GlobalId.value.trim()) {
-              globalId = line.GlobalId.value;
-            }
-          } catch {
-            // Some geometry-bearing entities have no ordinary IFC line metadata.
-          }
 
-          const triangleStart = totals.triangleCount;
+          const placementData = [];
           const placements = mesh.geometries;
           try {
             for (let placementIndex = 0; placementIndex < placements.size(); placementIndex += 1) {
@@ -493,19 +676,13 @@ async function run(options) {
                 geometry = api.GetGeometry(modelId, placement.geometryExpressID);
                 const vertices = api.GetVertexArray(geometry.GetVertexData(), geometry.GetVertexDataSize());
                 const indices = api.GetIndexArray(geometry.GetIndexData(), geometry.GetIndexDataSize());
-                const chunk = transformGeometry(
+                const chunk = transformPlacement(
                   vertices,
                   indices,
                   matrixValues(placement.flatTransformation),
-                  totals.vertexCount,
-                  bounds,
                   placement.color,
                 );
-                chunks.push(chunk);
-                totals.vertexCount += chunk.positions.length / 3;
-                totals.indexCount += chunk.indices.length;
-                totals.triangleCount += chunk.indices.length / 3;
-                totals.placedGeometryCount += 1;
+                if (chunk.indices.length > 0) placementData.push(chunk);
               } finally {
                 deleteWebIfcObject(geometry);
                 deleteWebIfcObject(placement);
@@ -514,12 +691,25 @@ async function run(options) {
           } finally {
             deleteWebIfcObject(placements);
           }
-          entries.push({
-            express_id: expressId,
-            global_id: globalId,
-            triangle_ranges: totals.triangleCount === triangleStart
-              ? []
-              : [{ first_triangle: triangleStart, triangle_count: totals.triangleCount - triangleStart }],
+
+          // Spatial-structure nodes (sites, storeys, spaces) and other
+          // metadata-only products carry no geometry; they never become a
+          // tile or a semantic entry.
+          if (placementData.length === 0) continue;
+
+          const globalId = readGlobalId(api, modelId, expressId);
+          const storeyExpressId = spatial.resolveElementStorey(expressId);
+          const storey = storeyExpressId === undefined
+            ? undefined
+            : spatial.storeyMeta.get(storeyExpressId);
+          elementRecords.push({
+            expressId,
+            globalId,
+            placements: placementData,
+            // Elements with no explicit storey containment fall into a single
+            // deterministic `unassigned` tile that sorts after every storey.
+            tileId: storey ? `storey-${storey.key}` : UNASSIGNED_TILE_ID,
+            tileSortKey: storey ? storey.key : '\uffff',
           });
         } finally {
           deleteWebIfcObject(mesh);
@@ -530,33 +720,94 @@ async function run(options) {
     }
     const geometryAt = performance.now();
 
-    if (!totals.vertexCount) {
-      bounds.min = [0, 0, 0];
-      bounds.max = [0, 0, 0];
+    // Group geometry-bearing elements into one tile per containing storey plus
+    // the unassigned tile, then order both tiles and their entries by stable
+    // storey/GlobalId identity so the artifact is deterministic.
+    const tileGroups = new Map();
+    for (const record of elementRecords) {
+      let group = tileGroups.get(record.tileId);
+      if (!group) {
+        group = { tileId: record.tileId, sortKey: record.tileSortKey, elements: [] };
+        tileGroups.set(record.tileId, group);
+      }
+      group.elements.push(record);
     }
-    const glb = buildGlb(chunks, totals, bounds);
-    const semanticIndex = {
-      schema: SEMANTIC_INDEX_SCHEMA,
-      tile_id: TILE_ID,
-      coordinate_system: 'web-ifc-y-up',
-      triangle_indexing: 'GLB mesh 0 primitive 0; each range is expressed as triangle (not index) offsets.',
-      entries,
-    };
-    const semanticBytes = Buffer.from(JSON.stringify(semanticIndex), 'utf8');
+    const orderedGroups = Array.from(tileGroups.values()).sort((a, b) => {
+      if (a.sortKey !== b.sortKey) return a.sortKey < b.sortKey ? -1 : 1;
+      return a.tileId < b.tileId ? -1 : a.tileId > b.tileId ? 1 : 0;
+    });
+    for (const group of orderedGroups) group.elements.sort(compareElements);
+
+    const assembledTiles = orderedGroups.map(group => assembleTile(group.tileId, group.elements));
+    // A model with no geometry (or no spatial hierarchy and no geometry) still
+    // publishes one valid, empty unassigned tile.
+    if (assembledTiles.length === 0) {
+      assembledTiles.push(assembleTile(UNASSIGNED_TILE_ID, []));
+    }
+
+    // Content-address every tile GLB and its tile-local semantic index.
+    const objectBytesByHash = new Map();
+    const manifestTiles = assembledTiles.map(tile => {
+      const semanticIndex = {
+        schema: SEMANTIC_INDEX_SCHEMA,
+        tile_id: tile.tileId,
+        coordinate_system: 'web-ifc-y-up',
+        triangle_indexing: 'GLB mesh 0 primitive 0; each range is expressed as triangle (not index) offsets.',
+        entries: tile.entries,
+      };
+      const semanticBytes = Buffer.from(JSON.stringify(semanticIndex), 'utf8');
+      const glbHash = sha256(tile.glb);
+      const semanticHash = sha256(semanticBytes);
+      objectBytesByHash.set(glbHash, tile.glb);
+      objectBytesByHash.set(semanticHash, semanticBytes);
+      tile.glbHash = glbHash;
+      tile.semanticHash = semanticHash;
+      tile.semanticBytes = semanticBytes;
+      return {
+        tile_id: tile.tileId,
+        lod: 0,
+        bounds: tile.bounds,
+        geometric_error: 0,
+        artifact: resource(glbHash, tile.glb.length, 'model/gltf-binary'),
+        semantic_index: {
+          schema: SEMANTIC_INDEX_SCHEMA,
+          entry_count: tile.entries.length,
+          artifact: resource(semanticHash, semanticBytes.length, 'application/json'),
+        },
+      };
+    });
     const encodedAt = performance.now();
-    const glbHash = sha256(glb);
-    const semanticHash = sha256(semanticBytes);
+
     const { path: objectsPath, created: objectDirectoryCreated } = await prepareObjectDirectory(options.out);
     state.objectDirectoryCreated = objectDirectoryCreated;
-    await writeNewFileAtomically(objectsPath, glbHash, glb, state);
-    await writeNewFileAtomically(objectsPath, semanticHash, semanticBytes, state);
+    // Written in sorted hash order and de-duplicated so identical tile content
+    // is stored exactly once under its content address.
+    for (const hash of Array.from(objectBytesByHash.keys()).sort()) {
+      await writeNewFileAtomically(objectsPath, hash, objectBytesByHash.get(hash), state);
+    }
 
+    // The policy identity hashes only renderer configuration (not per-model
+    // tiles) so the same policy yields the same identity across models, while
+    // a configuration change produces a distinct, non-colliding identity.
+    const renderPolicyHash = sha256(Buffer.from(JSON.stringify({
+      id: RENDER_POLICY_ID,
+      manifest_schema: MANIFEST_SCHEMA,
+      semantic_index_schema: SEMANTIC_INDEX_SCHEMA,
+      tile_strategy: TILE_STRATEGY,
+      spatial_subdivision: false,
+      lod_levels: 1,
+      coordinate_system: 'web-ifc-y-up',
+    }), 'utf8'));
     const artifactId = sha256(Buffer.from(JSON.stringify({
       schema: MANIFEST_SCHEMA,
       project_id: options.projectId,
       commit_hash: options.commit,
-      tile: glbHash,
-      semantic_index: semanticHash,
+      render_policy: { id: RENDER_POLICY_ID, hash: renderPolicyHash },
+      tiles: assembledTiles.map(tile => ({
+        tile_id: tile.tileId,
+        tile: tile.glbHash,
+        semantic_index: tile.semanticHash,
+      })),
     }), 'utf8'));
     const manifest = {
       schema: MANIFEST_SCHEMA,
@@ -564,22 +815,25 @@ async function run(options) {
       commit_hash: options.commit,
       artifact_id: artifactId,
       generated_at: new Date().toISOString(),
-      tiles: [{
-        tile_id: TILE_ID,
-        lod: 0,
-        bounds,
-        geometric_error: 0,
-        artifact: resource(glbHash, glb.length, 'model/gltf-binary'),
-      }],
-      semantic_index: {
-        schema: SEMANTIC_INDEX_SCHEMA,
-        entry_count: entries.length,
-        artifact: resource(semanticHash, semanticBytes.length, 'application/json'),
-      },
+      render_policy: { id: RENDER_POLICY_ID, hash: renderPolicyHash },
+      tiles: manifestTiles,
     };
     await writeNewFileAtomically(options.out, 'manifest.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'), state);
     const writtenAt = performance.now();
     completed = true;
+
+    let vertexCount = 0;
+    let triangleCount = 0;
+    let placedGeometryCount = 0;
+    let productCount = 0;
+    let outputBytes = 0;
+    for (const tile of assembledTiles) {
+      vertexCount += tile.totals.vertexCount;
+      triangleCount += tile.totals.triangleCount;
+      placedGeometryCount += tile.totals.placedGeometryCount;
+      productCount += tile.entries.length;
+      outputBytes += tile.glb.length + tile.semanticBytes.length;
+    }
 
     const memory = process.memoryUsage();
     return {
@@ -588,13 +842,20 @@ async function run(options) {
       project_id: options.projectId,
       commit_hash: options.commit,
       input_bytes: inputStat.size,
-      output_bytes: glb.length + semanticBytes.length,
-      tile_count: 1,
-      product_count: entries.length,
-      placed_geometry_count: totals.placedGeometryCount,
-      vertex_count: totals.vertexCount,
-      triangle_count: totals.triangleCount,
-      artifacts: { glb_sha256: glbHash, semantic_index_sha256: semanticHash },
+      output_bytes: outputBytes,
+      tile_count: assembledTiles.length,
+      product_count: productCount,
+      placed_geometry_count: placedGeometryCount,
+      vertex_count: vertexCount,
+      triangle_count: triangleCount,
+      tiles: assembledTiles.map(tile => ({
+        tile_id: tile.tileId,
+        entry_count: tile.entries.length,
+        vertex_count: tile.totals.vertexCount,
+        triangle_count: tile.totals.triangleCount,
+        glb_sha256: tile.glbHash,
+        semantic_index_sha256: tile.semanticHash,
+      })),
       timings_ms: {
         import_module: Math.round(importedAt - startedAt),
         initialize: Math.round(initializedAt - importedAt),

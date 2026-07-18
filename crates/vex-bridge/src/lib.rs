@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod crash_report;
 pub mod daemon_lock;
 #[cfg(any(feature = "tray", feature = "desktop"))]
 pub mod daemon_supervisor;
