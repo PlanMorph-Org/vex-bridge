@@ -480,7 +480,7 @@ pub enum RenderArtifactStatus {
         total_tiles: Option<u32>,
     },
     Ready {
-        manifest: RenderArtifactManifest,
+        manifest: Box<RenderArtifactManifest>,
     },
     Failed {
         message: String,

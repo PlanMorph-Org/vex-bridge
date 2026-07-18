@@ -1481,7 +1481,9 @@ async fn handle_project_render_status(
     require_token(&headers, &state.access_token)?;
     require_full_commit_hash(&commit)?;
     let status = match read_render_manifest(&state, &project_id, &commit).await? {
-        Some(manifest) => proto::RenderArtifactStatus::Ready { manifest },
+        Some(manifest) => proto::RenderArtifactStatus::Ready {
+            manifest: Box::new(manifest),
+        },
         None => match state
             .state
             .read()
@@ -1609,6 +1611,9 @@ async fn handle_project_render_object(
     Ok(response)
 }
 
+// Axum handlers return `Response` errors directly so callers can use `?`
+// without repeatedly translating a validation failure into an HTTP response.
+#[allow(clippy::result_large_err)]
 fn require_full_commit_hash(commit: &str) -> Result<(), Response> {
     if is_full_commit_hash(commit) {
         Ok(())

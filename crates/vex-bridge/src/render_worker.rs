@@ -133,16 +133,16 @@ async fn generate_artifact(
             ));
         }
         let runtime = ensure_runtime(project_dir)?;
-        let output = run_node_worker(
+        let output = run_node_worker(WorkerInvocation {
             node_bin,
-            &runtime.worker,
-            &ifc_path,
-            &staging,
+            worker: &runtime.worker,
+            ifc_path: &ifc_path,
+            out: &staging,
             project_id,
             commit_hash,
-            &runtime.web_ifc_api,
-            &runtime.wasm_dir,
-        )
+            web_ifc_api: &runtime.web_ifc_api,
+            wasm_dir: &runtime.wasm_dir,
+        })
         .await?;
         info!(
             project_id,
@@ -201,36 +201,39 @@ fn write_runtime_file(path: &Path, contents: &[u8]) -> BridgeResult<()> {
     Ok(())
 }
 
-async fn run_node_worker(
-    node_bin: &str,
-    worker: &Path,
-    ifc_path: &Path,
-    out: &Path,
-    project_id: &str,
-    commit_hash: &str,
-    web_ifc_api: &Path,
-    wasm_dir: &Path,
-) -> BridgeResult<String> {
-    let mut command = Command::new(node_bin);
+struct WorkerInvocation<'a> {
+    node_bin: &'a str,
+    worker: &'a Path,
+    ifc_path: &'a Path,
+    out: &'a Path,
+    project_id: &'a str,
+    commit_hash: &'a str,
+    web_ifc_api: &'a Path,
+    wasm_dir: &'a Path,
+}
+
+async fn run_node_worker(invocation: WorkerInvocation<'_>) -> BridgeResult<String> {
+    let mut command = Command::new(invocation.node_bin);
     command
-        .arg(worker)
+        .arg(invocation.worker)
         .arg("--ifc")
-        .arg(ifc_path)
+        .arg(invocation.ifc_path)
         .arg("--out")
-        .arg(out)
+        .arg(invocation.out)
         .arg("--project-id")
-        .arg(project_id)
+        .arg(invocation.project_id)
         .arg("--commit")
-        .arg(commit_hash)
+        .arg(invocation.commit_hash)
         .arg("--web-ifc-api")
-        .arg(web_ifc_api)
+        .arg(invocation.web_ifc_api)
         .arg("--wasm-dir")
-        .arg(wasm_dir)
+        .arg(invocation.wasm_dir)
         .kill_on_drop(true);
     let child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             BridgeError::Config(format!(
-                "render worker requires Node.js `{node_bin}`, but it was not found"
+                "render worker requires Node.js `{}`, but it was not found",
+                invocation.node_bin
             ))
         } else {
             BridgeError::Io(error)
