@@ -112,6 +112,12 @@ or from the native `vex-tray` menu.
 | GET    | `/v1/projects/:id/changes?from=&to=` | yes | Selected visual diff for 2D/3D views |
 | POST   | `/v1/repo/register` | yes  | Map an Architur project to a local inbox |
 | POST   | `/v1/repo/push`     | yes  | Push the project's committed changes to the cloud |
+| GET    | `/v1/federations`   | yes  | List saved coordination sets (summaries) |
+| POST   | `/v1/federations`   | yes  | Create a federation from local projects + commits |
+| GET    | `/v1/federations/:id` | yes | Full federation record with member transforms |
+| PATCH  | `/v1/federations/:id` | yes | Rename and/or replace the member set     |
+| DELETE | `/v1/federations/:id` | yes | Delete a federation                      |
+| GET    | `/v1/federations/:id/snapshot` | yes | Resolved members + per-member artifact status |
 
 The filesystem watcher imports and commits each IFC export locally as soon as it
 settles in a configured inbox, but **pushing to the cloud is user-determined**
@@ -121,6 +127,60 @@ only when the user presses **Push** in the desktop app (or calls
 binary owns IFC metadata extraction, import, semantic diffing, and history. New
 inbox registrations are activated immediately in the running daemon, so the
 first-run UI does not need to ask users to restart.
+
+## Federations (local-first model coordination)
+
+Each discipline model (architecture, structure, MEP, …) stays an **independent
+local project** with its own history — federations never merge or re-author
+them. A *federation* is a small, saved coordination set that records, for each
+participating discipline:
+
+- the **local project id** it draws from (never a remote URL or file path),
+- an **immutable full commit hash** (64 hex characters) pinning the exact
+  version — supplied explicitly, or resolved once from that project's local
+  `HEAD` at create/update time and then frozen,
+- a **display name** and optional **discipline** tag,
+- a **4×4 affine placement transform** into the federation's shared coordinate
+  space (finite, invertible, no perspective), and
+- a **default visibility** flag.
+
+Typical workflow:
+
+1. Register and commit each discipline model as its own project (the normal
+   inbox/watch flow above).
+2. `POST /v1/federations` with a name and one member per discipline. Omit a
+   member's `commit_hash` to pin its current local `HEAD`, or pass an explicit
+   hash to pin a specific historical version. The daemon validates every member
+   (project exists locally, the commit is in that project's history, the
+   transform is a valid affine map) and assigns stable `federation_id` and
+   `member_id` values.
+3. `GET /v1/federations/:id/snapshot` returns the resolved set: each member's
+   **exact, immutable commit identity** plus a compact artifact-status hint
+   (`unavailable`, `not_requested`, `queued`, `building`, `ready`, `failed`).
+   A viewer uses this to load every discipline **independently** through the
+   existing per-project render/IFC endpoints and place it with the member's
+   transform. The snapshot is best-effort: if a source project is temporarily
+   unavailable, that member degrades to `unavailable` rather than failing the
+   whole request.
+4. `PATCH /v1/federations/:id` renames the set and/or replaces its members.
+   Supplying an existing `member_id` preserves that member's identity while
+   updating its fields; omitting it mints a new member. Replacing the member
+   list is the only way to add or remove members, so **removals are always
+   explicit** — there are no silent dangling references.
+
+**No semantic-merge guarantee.** A federation is a *placement overlay* over
+independent models: it pins which exact commit of each project participates and
+where it sits, and nothing more. It does not merge geometry, reconcile
+IDs/GlobalIds, resolve clashes, or produce a single authoring model. Any
+cross-model interpretation (clash detection, quantity takeoff, coordination
+review) is left to the consumer and must not assume the members were merged.
+
+Because a federation pins exact commits of local projects, a source project that
+still backs a federation **cannot be deleted** — `DELETE /v1/projects/:id`
+returns `409 Conflict` (`project_referenced_by_federation`). Remove the project
+from (or delete) the referencing federations first. This keeps a coordination
+set from ever pointing at a project that no longer exists.
+
 
 ## Build & run
 

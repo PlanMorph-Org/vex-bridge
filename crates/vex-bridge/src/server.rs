@@ -22,7 +22,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -46,6 +46,10 @@ pub struct AppState {
     pub access_token: Arc<String>,
     pub started_at: Instant,
     pub watchers: Arc<RwLock<Vec<WatchPipeline>>>,
+    /// Serializes project deletion with federation membership writes. These
+    /// operations span both config and durable state, so neither lock alone can
+    /// prevent a saved federation from acquiring a dangling source project.
+    pub federation_project_lock: Arc<Mutex<()>>,
     /// Notified when the daemon should shut down gracefully (e.g. a desktop
     /// client detected a version mismatch and requested a clean restart).
     pub shutdown: Arc<tokio::sync::Notify>,
@@ -310,6 +314,20 @@ pub fn router(state: AppState) -> Router {
             post(handle_project_inbox_upload),
         )
         .route("/v1/projects/:project_id", delete(handle_delete_project))
+        .route(
+            "/v1/federations",
+            get(handle_list_federations).post(handle_create_federation),
+        )
+        .route(
+            "/v1/federations/:federation_id",
+            get(handle_get_federation)
+                .patch(handle_update_federation)
+                .delete(handle_delete_federation),
+        )
+        .route(
+            "/v1/federations/:federation_id/snapshot",
+            get(handle_federation_snapshot),
+        )
         .route("/v1/repo/push", post(handle_repo_push))
         .route("/v1/repo/register", post(handle_repo_register))
         .route("/v1/daemon/shutdown", post(handle_daemon_shutdown))
@@ -439,12 +457,24 @@ fn classify_error(
     status: StatusCode,
     error: &BridgeError,
 ) -> (&'static str, Option<&'static str>, bool) {
-    if status == StatusCode::CONFLICT && matches!(error, BridgeError::Config(_)) {
-        return (
-            "project_id_conflict",
-            Some("Choose a different project id or retry with allow_replace=true."),
-            false,
-        );
+    if status == StatusCode::CONFLICT {
+        if let BridgeError::Config(message) = error {
+            // A project that still backs a federation cannot be deleted; this is
+            // distinct from a project-id remap conflict and needs its own code
+            // and hint so the UI guides the operator to the federations.
+            if message.contains("referenced by") && message.contains("federation") {
+                return (
+                    "project_referenced_by_federation",
+                    Some("Remove this project from its federations (or delete them) before deleting the project."),
+                    false,
+                );
+            }
+            return (
+                "project_id_conflict",
+                Some("Choose a different project id or retry with allow_replace=true."),
+                false,
+            );
+        }
     }
     match error {
         BridgeError::NotPaired => (
@@ -1880,6 +1910,30 @@ async fn handle_delete_project(
         ));
     }
 
+    // Serialize this state/config mutation with federation create and update.
+    // A source-membership check outside this gate could race a federation write
+    // that successfully resolved the project just before deletion.
+    let _federation_project_guard = state.federation_project_lock.lock().await;
+    // A project that participates in one or more federations must not be
+    // deleted out from under those coordination sets: doing so would leave
+    // silent dangling references to a project that no longer exists. Require
+    // the operator to remove the project from (or delete) the referencing
+    // federations first.
+    let referencing = {
+        let daemon_state = state.state.read().await;
+        daemon_state.federations_referencing_project(&project_id)
+    };
+    if !referencing.is_empty() {
+        return Err(err_response(
+            StatusCode::CONFLICT,
+            BridgeError::Config(format!(
+                "project `{project_id}` is referenced by {} federation(s): {}. Remove it from those federations (or delete them) first.",
+                referencing.len(),
+                referencing.join(", ")
+            )),
+        ));
+    }
+
     let entry = {
         let mut cfg = state.config.write().await;
         let Some(entry) = cfg.remove_watch(&project_id) else {
@@ -1913,6 +1967,534 @@ async fn handle_delete_project(
         resulting_folder,
         policy_error,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Federations: token-gated CRUD + snapshot for local-first coordination sets.
+//
+// A federation is a derived, saved set of exact discipline-model commit
+// references plus placement transforms over *independent* local projects. It
+// never merges models and makes no semantic-merge guarantee. All routes are
+// token-gated exactly like the other `/v1` endpoints, and every identifier is
+// validated against a safe character set so it can never encode a path.
+// ---------------------------------------------------------------------------
+
+/// Why a requested member commit could not be pinned. Kept separate from the
+/// HTTP layer so the resolution logic is unit-testable without a live engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommitResolveError {
+    /// An explicit hash was supplied but is not a complete 64 hex commit.
+    InvalidHash(String),
+    /// The supplied (complete) hash is not present in the project's history.
+    NotInHistory(String),
+    /// HEAD was requested but the source project has no commits to pin.
+    NoCommits,
+}
+
+/// Resolve the immutable commit a member should pin, given the source project's
+/// commit history (newest first). An explicit hash must be complete and present
+/// in history; otherwise the project's HEAD (the newest commit) is pinned. The
+/// returned hash is always the exact string recorded in history, so the stored
+/// member identity matches the engine's canonical hash.
+fn resolve_member_commit(
+    commits: &[proto::CommitSummary],
+    explicit: Option<&str>,
+) -> Result<String, CommitResolveError> {
+    match explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(hash) => {
+            if !proto::is_full_commit_hash(hash) {
+                return Err(CommitResolveError::InvalidHash(hash.to_string()));
+            }
+            commits
+                .iter()
+                .find(|commit| commit.commit.eq_ignore_ascii_case(hash))
+                .map(|commit| commit.commit.clone())
+                .ok_or_else(|| CommitResolveError::NotInHistory(hash.to_string()))
+        }
+        None => commits
+            .first()
+            .map(|commit| commit.commit.clone())
+            .ok_or(CommitResolveError::NoCommits),
+    }
+}
+
+fn unknown_federation_response(federation_id: &str) -> Response {
+    err_response(
+        StatusCode::NOT_FOUND,
+        BridgeError::Config(format!("unknown federation `{federation_id}`")),
+    )
+}
+
+fn unknown_source_project_response(project_id: &str) -> Response {
+    err_response(
+        StatusCode::NOT_FOUND,
+        BridgeError::Config(format!(
+            "unknown source project `{project_id}`; register it locally before referencing it in a federation"
+        )),
+    )
+}
+
+fn federation_bad_request(message: impl Into<String>) -> Response {
+    err_response(StatusCode::BAD_REQUEST, BridgeError::Config(message.into()))
+}
+
+fn federation_validation_response(error: proto::FederationValidationError) -> Response {
+    federation_bad_request(format!("invalid federation: {error}"))
+}
+
+fn commit_resolve_response(project_id: &str, error: CommitResolveError) -> Response {
+    let message = match error {
+        CommitResolveError::InvalidHash(hash) => format!(
+            "member commit `{hash}` for project `{project_id}` must be a complete 64 hex character commit hash"
+        ),
+        CommitResolveError::NotInHistory(hash) => format!(
+            "commit `{hash}` is not in the history of project `{project_id}`"
+        ),
+        CommitResolveError::NoCommits => format!(
+            "source project `{project_id}` has no commits to pin; import and commit a model first"
+        ),
+    };
+    federation_bad_request(message)
+}
+
+/// Fetch a source project's commit history for federation resolution. Returns
+/// an error response when the project is not configured locally; an empty list
+/// when it is configured but has no local vex repo yet.
+async fn source_project_commits(
+    cfg: &Config,
+    project_id: &str,
+) -> Result<Vec<proto::CommitSummary>, Response> {
+    let entry = find_watch_entry(cfg, project_id)
+        .ok_or_else(|| unknown_source_project_response(project_id))?;
+    let dir = PathBuf::from(&entry.path);
+    if !is_local_vex_repo(&dir) {
+        return Ok(Vec::new());
+    }
+    let log = vex_cli::log_json(&cfg.vex_bin, &dir)
+        .await
+        .map_err(|error| err_response(StatusCode::BAD_GATEWAY, error))?;
+    Ok(commits_from_log(log))
+}
+
+/// Load and cache a project's commit history within a single request so a
+/// federation that references the same project several times issues one engine
+/// call, not one per member.
+async fn cached_source_commits(
+    cfg: &Config,
+    cache: &mut HashMap<String, Vec<proto::CommitSummary>>,
+    project_id: &str,
+) -> Result<Vec<proto::CommitSummary>, Response> {
+    if let Some(commits) = cache.get(project_id) {
+        return Ok(commits.clone());
+    }
+    let commits = source_project_commits(cfg, project_id).await?;
+    cache.insert(project_id.to_string(), commits.clone());
+    Ok(commits)
+}
+
+fn normalized_discipline(discipline: Option<&String>) -> Option<String> {
+    discipline
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn handle_list_federations(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<proto::FederationSummary>>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let daemon_state = state.state.read().await;
+    let summaries = daemon_state
+        .federations()
+        .iter()
+        .map(proto::Federation::summary)
+        .collect();
+    Ok(Json(summaries))
+}
+
+async fn handle_get_federation(
+    headers: HeaderMap,
+    AxumPath(federation_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<proto::Federation>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let federation = state
+        .state
+        .read()
+        .await
+        .federation(&federation_id)
+        .ok_or_else(|| unknown_federation_response(&federation_id))?;
+    Ok(Json(federation))
+}
+
+async fn handle_create_federation(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(req): Json<proto::CreateFederationRequest>,
+) -> Result<Json<proto::Federation>, Response> {
+    require_token(&headers, &state.access_token)?;
+    if req.name.trim().is_empty() {
+        return Err(federation_bad_request("federation name must not be empty"));
+    }
+    if req.members.is_empty() {
+        return Err(federation_bad_request(
+            "a federation must have at least one member",
+        ));
+    }
+    if req.members.len() > proto::Federation::MAX_MEMBERS {
+        return Err(federation_bad_request(format!(
+            "a federation may have at most {} members",
+            proto::Federation::MAX_MEMBERS
+        )));
+    }
+
+    let cfg = state.config.read().await.clone();
+    let mut commit_cache: HashMap<String, Vec<proto::CommitSummary>> = HashMap::new();
+    let mut members = Vec::with_capacity(req.members.len());
+    for input in &req.members {
+        let source = input.source_project_id.trim();
+        validate_project_id(source).map_err(federation_bad_request)?;
+        let commits = cached_source_commits(&cfg, &mut commit_cache, source).await?;
+        let commit = resolve_member_commit(&commits, input.commit_hash.as_deref())
+            .map_err(|error| commit_resolve_response(source, error))?;
+        members.push(proto::FederationMember {
+            member_id: format!("mem-{}", Uuid::now_v7().simple()),
+            source_project_id: source.to_string(),
+            commit_hash: commit,
+            display_name: input.display_name.trim().to_string(),
+            discipline: normalized_discipline(input.discipline.as_ref()),
+            transform: input.transform.unwrap_or_default(),
+            visible: input.visible.unwrap_or(true),
+        });
+    }
+
+    let now = now_unix();
+    let federation = proto::Federation {
+        schema: proto::schema::FEDERATION.to_string(),
+        federation_id: format!("fed-{}", Uuid::now_v7().simple()),
+        name: req.name.trim().to_string(),
+        created_at_unix: now,
+        updated_at_unix: now,
+        members,
+    };
+    federation
+        .validate()
+        .map_err(federation_validation_response)?;
+
+    // The source projects may have been deleted while commit histories were
+    // being resolved. Recheck under the mutation gate before persisting.
+    let _federation_project_guard = state.federation_project_lock.lock().await;
+    {
+        let cfg = state.config.read().await;
+        for member in &federation.members {
+            if find_watch_entry(&cfg, &member.source_project_id).is_none() {
+                return Err(unknown_project_response(&member.source_project_id));
+            }
+        }
+    }
+    {
+        let mut daemon_state = state.state.write().await;
+        if !daemon_state.insert_federation(federation.clone()) {
+            return Err(err_response(
+                StatusCode::CONFLICT,
+                BridgeError::Config(format!(
+                    "the maximum number of federations ({}) has been reached",
+                    crate::state::State::MAX_FEDERATIONS
+                )),
+            ));
+        }
+        daemon_state
+            .save(&state.paths)
+            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    }
+    info!(federation_id = %federation.federation_id, members = federation.members.len(), "created federation");
+    Ok(Json(federation))
+}
+
+async fn handle_update_federation(
+    headers: HeaderMap,
+    AxumPath(federation_id): AxumPath<String>,
+    State(state): State<AppState>,
+    Json(req): Json<proto::UpdateFederationRequest>,
+) -> Result<Json<proto::Federation>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let members_replaced = req.members.is_some();
+    let mut federation = state
+        .state
+        .read()
+        .await
+        .federation(&federation_id)
+        .ok_or_else(|| unknown_federation_response(&federation_id))?;
+
+    if let Some(name) = req.name.as_ref() {
+        if name.trim().is_empty() {
+            return Err(federation_bad_request("federation name must not be empty"));
+        }
+        federation.name = name.trim().to_string();
+    }
+
+    if let Some(inputs) = req.members.as_ref() {
+        if inputs.is_empty() {
+            return Err(federation_bad_request(
+                "a federation must have at least one member",
+            ));
+        }
+        if inputs.len() > proto::Federation::MAX_MEMBERS {
+            return Err(federation_bad_request(format!(
+                "a federation may have at most {} members",
+                proto::Federation::MAX_MEMBERS
+            )));
+        }
+        let cfg = state.config.read().await.clone();
+        let existing_ids: HashSet<String> = federation
+            .members
+            .iter()
+            .map(|member| member.member_id.clone())
+            .collect();
+        let mut commit_cache: HashMap<String, Vec<proto::CommitSummary>> = HashMap::new();
+        let mut used_ids: HashSet<String> = HashSet::new();
+        let mut new_members = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let source = input.source_project_id.trim();
+            validate_project_id(source).map_err(federation_bad_request)?;
+            let commits = cached_source_commits(&cfg, &mut commit_cache, source).await?;
+            let commit = resolve_member_commit(&commits, input.commit_hash.as_deref())
+                .map_err(|error| commit_resolve_response(source, error))?;
+            // A supplied member_id must reference an existing member so the
+            // stable identity is preserved; an unknown or repeated id is a
+            // client error, never a silently minted new member.
+            let member_id = match input
+                .member_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(id) => {
+                    if !existing_ids.contains(id) {
+                        return Err(federation_bad_request(format!(
+                            "member_id `{id}` does not exist in federation `{federation_id}`"
+                        )));
+                    }
+                    if !used_ids.insert(id.to_string()) {
+                        return Err(federation_bad_request(format!(
+                            "member_id `{id}` is repeated in the update"
+                        )));
+                    }
+                    id.to_string()
+                }
+                None => format!("mem-{}", Uuid::now_v7().simple()),
+            };
+            new_members.push(proto::FederationMember {
+                member_id,
+                source_project_id: source.to_string(),
+                commit_hash: commit,
+                display_name: input.display_name.trim().to_string(),
+                discipline: normalized_discipline(input.discipline.as_ref()),
+                transform: input.transform.unwrap_or_default(),
+                visible: input.visible.unwrap_or(true),
+            });
+        }
+        federation.members = new_members;
+    }
+
+    federation.updated_at_unix = now_unix();
+    federation
+        .validate()
+        .map_err(federation_validation_response)?;
+
+    // The source projects may have been deleted while commit histories were
+    // being resolved. Recheck under the mutation gate before persisting.
+    let _federation_project_guard = state.federation_project_lock.lock().await;
+    if members_replaced {
+        let cfg = state.config.read().await;
+        for member in &federation.members {
+            if find_watch_entry(&cfg, &member.source_project_id).is_none() {
+                return Err(unknown_project_response(&member.source_project_id));
+            }
+        }
+    }
+    {
+        let mut daemon_state = state.state.write().await;
+        if !daemon_state.replace_federation(federation.clone()) {
+            return Err(unknown_federation_response(&federation_id));
+        }
+        daemon_state
+            .save(&state.paths)
+            .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    }
+    info!(federation_id = %federation.federation_id, members = federation.members.len(), "updated federation");
+    Ok(Json(federation))
+}
+
+async fn handle_delete_federation(
+    headers: HeaderMap,
+    AxumPath(federation_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<proto::DeleteFederationResponse>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let removed = {
+        let mut daemon_state = state.state.write().await;
+        let removed = daemon_state.remove_federation(&federation_id);
+        if removed {
+            daemon_state
+                .save(&state.paths)
+                .map_err(|error| err_response(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        }
+        removed
+    };
+    if !removed {
+        return Err(unknown_federation_response(&federation_id));
+    }
+    info!(federation_id = %federation_id, "deleted federation");
+    Ok(Json(proto::DeleteFederationResponse {
+        federation_id,
+        removed,
+    }))
+}
+
+/// Resolve a federation to an immutable snapshot: each member's exact commit
+/// identity plus its current artifact status. The dashboard uses this to load
+/// every discipline independently (via the existing per-project render/IFC
+/// endpoints) with no semantic merge.
+async fn handle_federation_snapshot(
+    headers: HeaderMap,
+    AxumPath(federation_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Json<proto::FederationSnapshot>, Response> {
+    require_token(&headers, &state.access_token)?;
+    let federation = state
+        .state
+        .read()
+        .await
+        .federation(&federation_id)
+        .ok_or_else(|| unknown_federation_response(&federation_id))?;
+
+    let cfg = state.config.read().await.clone();
+    // Cache per project: `None` means the project is not configured locally,
+    // `Some(commits)` its (possibly empty) history.
+    let mut cache: HashMap<String, Option<Vec<proto::CommitSummary>>> = HashMap::new();
+    let mut members = Vec::with_capacity(federation.members.len());
+    for member in &federation.members {
+        let commits = match cache.get(&member.source_project_id) {
+            Some(cached) => cached.clone(),
+            None => {
+                let probe = snapshot_source_commits(&cfg, &member.source_project_id).await;
+                cache.insert(member.source_project_id.clone(), probe.clone());
+                probe
+            }
+        };
+        let project_available = commits.is_some();
+        let commit_available = commits
+            .as_ref()
+            .map(|commits| {
+                commits
+                    .iter()
+                    .any(|commit| commit.commit.eq_ignore_ascii_case(&member.commit_hash))
+            })
+            .unwrap_or(false);
+        let render_status = if project_available && commit_available {
+            federation_member_render_status(
+                &state,
+                &cfg,
+                &member.source_project_id,
+                &member.commit_hash,
+            )
+            .await
+        } else {
+            proto::FederationRenderStatus::Unavailable
+        };
+        members.push(proto::FederationSnapshotMember {
+            member_id: member.member_id.clone(),
+            source_project_id: member.source_project_id.clone(),
+            commit_hash: member.commit_hash.clone(),
+            display_name: member.display_name.clone(),
+            discipline: member.discipline.clone(),
+            transform: member.transform,
+            visible: member.visible,
+            project_available,
+            commit_available,
+            render_status,
+        });
+    }
+
+    Ok(Json(proto::FederationSnapshot {
+        schema: proto::schema::FEDERATION_SNAPSHOT.to_string(),
+        federation_id: federation.federation_id,
+        name: federation.name,
+        created_at_unix: federation.created_at_unix,
+        updated_at_unix: federation.updated_at_unix,
+        members,
+    }))
+}
+
+/// Best-effort commit probe for a snapshot. Returns `None` when the project is
+/// not configured locally, otherwise its history (empty when it has no local
+/// repo yet, or when the engine call fails — a snapshot must degrade to
+/// "unavailable" for that member rather than failing the whole request).
+async fn snapshot_source_commits(
+    cfg: &Config,
+    project_id: &str,
+) -> Option<Vec<proto::CommitSummary>> {
+    let entry = find_watch_entry(cfg, project_id)?;
+    let dir = PathBuf::from(&entry.path);
+    if !is_local_vex_repo(&dir) {
+        return Some(Vec::new());
+    }
+    match vex_cli::log_json(&cfg.vex_bin, &dir).await {
+        Ok(log) => Some(commits_from_log(log)),
+        Err(_) => Some(Vec::new()),
+    }
+}
+
+/// Compact render-status hint for a federation member. A validated manifest on
+/// disk is the only signal that reports `Ready`; otherwise the durable job
+/// state is projected, and a stale `Ready` job without a manifest degrades to
+/// `NotRequested` so a viewer falls back to the canonical IFC.
+async fn federation_member_render_status(
+    state: &AppState,
+    cfg: &Config,
+    project_id: &str,
+    commit: &str,
+) -> proto::FederationRenderStatus {
+    if federation_render_manifest_present(cfg, project_id, commit).await {
+        return proto::FederationRenderStatus::Ready;
+    }
+    match state
+        .state
+        .read()
+        .await
+        .render_artifact_status(project_id, commit)
+    {
+        Some(crate::state::RenderArtifactJobStatus::Queued) => {
+            proto::FederationRenderStatus::Queued
+        }
+        Some(crate::state::RenderArtifactJobStatus::Building) => {
+            proto::FederationRenderStatus::Building
+        }
+        Some(crate::state::RenderArtifactJobStatus::Failed { .. }) => {
+            proto::FederationRenderStatus::Failed
+        }
+        // A ready job without a validated manifest is not truly ready.
+        Some(crate::state::RenderArtifactJobStatus::Ready) | None => {
+            proto::FederationRenderStatus::NotRequested
+        }
+    }
+}
+
+async fn federation_render_manifest_present(cfg: &Config, project_id: &str, commit: &str) -> bool {
+    let Some(entry) = find_watch_entry(cfg, project_id) else {
+        return false;
+    };
+    let manifest = PathBuf::from(entry.path)
+        .join(".vex")
+        .join("cache")
+        .join("render")
+        .join(commit)
+        .join("manifest.validated.json");
+    tokio::fs::metadata(&manifest)
+        .await
+        .map(|meta| meta.is_file())
+        .unwrap_or(false)
 }
 
 async fn handle_repo_push(
@@ -3461,5 +4043,459 @@ mod tests {
         let out = redact(&text, token);
         assert!(!out.contains(token));
         assert!(out.contains("[redacted-token]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Federation resolution: pure, engine-free unit tests.
+    // -----------------------------------------------------------------------
+
+    fn commit(hash: &str) -> proto::CommitSummary {
+        proto::CommitSummary {
+            commit: hash.to_string(),
+            author: "Author".into(),
+            email: "author@example.com".into(),
+            timestamp: 0,
+            message: "commit".into(),
+            parents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_member_commit_pins_head_when_no_hash_is_given() {
+        // Newest-first history: HEAD is the first entry, and that exact string
+        // is what gets pinned.
+        let head = "a".repeat(64);
+        let older = "b".repeat(64);
+        let commits = vec![commit(&head), commit(&older)];
+        assert_eq!(resolve_member_commit(&commits, None).unwrap(), head);
+    }
+
+    #[test]
+    fn resolve_member_commit_accepts_an_explicit_hash_in_history() {
+        let head = "a".repeat(64);
+        let older = "b".repeat(64);
+        let commits = vec![commit(&head), commit(&older)];
+        // A case-insensitive match resolves to the canonical stored hash.
+        assert_eq!(
+            resolve_member_commit(&commits, Some(&older.to_uppercase())).unwrap(),
+            older
+        );
+    }
+
+    #[test]
+    fn resolve_member_commit_rejects_a_non_full_hash() {
+        let commits = vec![commit(&"a".repeat(64))];
+        let short = "abc123";
+        assert_eq!(
+            resolve_member_commit(&commits, Some(short)),
+            Err(CommitResolveError::InvalidHash(short.to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_member_commit_rejects_a_hash_absent_from_history() {
+        let commits = vec![commit(&"a".repeat(64))];
+        let ghost = "c".repeat(64);
+        assert_eq!(
+            resolve_member_commit(&commits, Some(&ghost)),
+            Err(CommitResolveError::NotInHistory(ghost))
+        );
+    }
+
+    #[test]
+    fn resolve_member_commit_reports_no_commits_to_pin() {
+        assert_eq!(
+            resolve_member_commit(&[], None),
+            Err(CommitResolveError::NoCommits)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Federation HTTP routes: end-to-end over a real localhost listener.
+    // These never invoke the vex engine — every path here is reachable with
+    // list/get/delete, deletion-safety, input validation, and best-effort
+    // snapshot, none of which shell out.
+    // -----------------------------------------------------------------------
+
+    const TEST_TOKEN: &str = "federation-test-token";
+
+    fn test_paths() -> (Paths, PathBuf) {
+        let root = std::env::temp_dir().join(format!("vex-bridge-fed-test-{}", Uuid::now_v7()));
+        let config_dir = root.join("config");
+        let data_dir = root.join("data");
+        let paths = Paths {
+            config_file: config_dir.join("config.toml"),
+            access_token_file: config_dir.join("access-token"),
+            state_file: data_dir.join("state.json"),
+            log_file: data_dir.join("bridge.log"),
+            daemon_lock_file: data_dir.join("daemon.lock"),
+            config_dir,
+            data_dir,
+        };
+        (paths, root)
+    }
+
+    fn watch_entry(project_id: &str, path: &Path) -> crate::config::WatchEntry {
+        crate::config::WatchEntry {
+            project_id: project_id.to_string(),
+            cloud_project_id: None,
+            path: path.to_string_lossy().into_owned(),
+            include: vec!["*.ifc".to_string()],
+            ifc_project_guid: None,
+            project_name: None,
+        }
+    }
+
+    fn seeded_federation(
+        id: &str,
+        name: &str,
+        source: &str,
+        commit_hash: &str,
+    ) -> proto::Federation {
+        proto::Federation {
+            schema: proto::schema::FEDERATION.to_string(),
+            federation_id: id.to_string(),
+            name: name.to_string(),
+            created_at_unix: 100,
+            updated_at_unix: 100,
+            members: vec![proto::FederationMember {
+                member_id: format!("mem-{source}"),
+                source_project_id: source.to_string(),
+                commit_hash: commit_hash.to_string(),
+                display_name: format!("{source} model"),
+                discipline: Some("architecture".to_string()),
+                transform: proto::FederationTransform::identity(),
+                visible: true,
+            }],
+        }
+    }
+
+    struct TestServer {
+        base: String,
+        client: reqwest::Client,
+        root: PathBuf,
+    }
+
+    impl TestServer {
+        async fn start(config: Config, state: DaemonState) -> Self {
+            let (paths, root) = test_paths();
+            paths.ensure_dirs().expect("create test dirs");
+            let app = AppState {
+                config: Arc::new(RwLock::new(config)),
+                state: Arc::new(RwLock::new(state)),
+                paths: Arc::new(paths),
+                access_token: Arc::new(TEST_TOKEN.to_string()),
+                started_at: Instant::now(),
+                watchers: Arc::new(RwLock::new(Vec::new())),
+                federation_project_lock: Arc::new(Mutex::new(())),
+                shutdown: Arc::new(tokio::sync::Notify::new()),
+                update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            };
+            let listener = bind(0).await.expect("bind ephemeral port");
+            let addr = listener.local_addr().expect("local addr");
+            tokio::spawn(async move {
+                let _ = serve(app, listener).await;
+            });
+            Self {
+                base: format!("http://{addr}"),
+                client: reqwest::Client::new(),
+                root,
+            }
+        }
+
+        fn get(&self, path: &str) -> reqwest::RequestBuilder {
+            self.client
+                .get(format!("{}{path}", self.base))
+                .header("X-Vex-Bridge-Token", TEST_TOKEN)
+        }
+
+        fn post(&self, path: &str) -> reqwest::RequestBuilder {
+            self.client
+                .post(format!("{}{path}", self.base))
+                .header("X-Vex-Bridge-Token", TEST_TOKEN)
+        }
+
+        fn patch(&self, path: &str) -> reqwest::RequestBuilder {
+            self.client
+                .patch(format!("{}{path}", self.base))
+                .header("X-Vex-Bridge-Token", TEST_TOKEN)
+        }
+
+        fn delete(&self, path: &str) -> reqwest::RequestBuilder {
+            self.client
+                .delete(format!("{}{path}", self.base))
+                .header("X-Vex-Bridge-Token", TEST_TOKEN)
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn federation_routes_reject_a_missing_or_wrong_token() {
+        let server = TestServer::start(Config::default(), DaemonState::default()).await;
+        // No token at all.
+        let unauth = server
+            .client
+            .get(format!("{}/v1/federations", server.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
+        // Wrong token.
+        let wrong = server
+            .client
+            .get(format!("{}/v1/federations", server.base))
+            .header("X-Vex-Bridge-Token", "nope")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+        // Correct token is accepted.
+        let ok = server.get("/v1/federations").send().await.unwrap();
+        assert_eq!(ok.status(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn federation_list_get_and_delete_round_trip() {
+        let mut state = DaemonState::default();
+        state.insert_federation(seeded_federation(
+            "fed-1",
+            "Tower A",
+            "arch",
+            &"a".repeat(64),
+        ));
+        state.insert_federation(seeded_federation(
+            "fed-2",
+            "Tower B",
+            "struct",
+            &"b".repeat(64),
+        ));
+        let server = TestServer::start(Config::default(), state).await;
+
+        // List is newest-first with accurate summaries.
+        let summaries: Vec<proto::FederationSummary> = server
+            .get("/v1/federations")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let ids: Vec<&str> = summaries
+            .iter()
+            .map(|summary| summary.federation_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["fed-2", "fed-1"]);
+        assert_eq!(summaries[0].member_count, 1);
+        assert_eq!(summaries[0].visible_member_count, 1);
+
+        // Fetch one full federation, including its exact commit identity.
+        let federation: proto::Federation = server
+            .get("/v1/federations/fed-1")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(federation.members[0].commit_hash, "a".repeat(64));
+        assert_eq!(federation.members[0].source_project_id, "arch");
+
+        // Delete it, then confirm it is gone.
+        let deleted: proto::DeleteFederationResponse = server
+            .delete("/v1/federations/fed-1")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(deleted.removed);
+        let after = server.get("/v1/federations/fed-1").send().await.unwrap();
+        assert_eq!(after.status(), reqwest::StatusCode::NOT_FOUND);
+        let remaining: Vec<proto::FederationSummary> = server
+            .get("/v1/federations")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_unknown_or_unsafe_federation_id_is_not_found() {
+        let server = TestServer::start(Config::default(), DaemonState::default()).await;
+        // A plausible-but-absent id.
+        let missing = server
+            .get("/v1/federations/fed-ghost")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+        // A traversal-shaped id is treated as an opaque lookup key, never a
+        // path: it simply does not match any stored federation.
+        let traversal = server
+            .get("/v1/federations/..%2f..%2fsecret")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            traversal.status() == reqwest::StatusCode::NOT_FOUND
+                || traversal.status() == reqwest::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn create_federation_rejects_empty_name_or_members() {
+        let server = TestServer::start(Config::default(), DaemonState::default()).await;
+
+        let empty_name = server
+            .post("/v1/federations")
+            .json(&serde_json::json!({ "name": "   ", "members": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(empty_name.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let no_members = server
+            .post("/v1/federations")
+            .json(&serde_json::json!({ "name": "Coordination", "members": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_members.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_federation_referencing_an_unknown_project_is_not_found() {
+        let server = TestServer::start(Config::default(), DaemonState::default()).await;
+        let response = server
+            .post("/v1/federations")
+            .json(&serde_json::json!({
+                "name": "Coordination",
+                "members": [{
+                    "source_project_id": "not-registered",
+                    "display_name": "Architecture"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_federation_with_a_hash_absent_from_history_is_bad_request() {
+        // A project is configured locally but is not a vex repo yet, so its
+        // history is empty. An explicit hash therefore cannot be in history and
+        // create must fail with 400 — no engine call is needed to prove this.
+        let (_paths, root) = test_paths();
+        let project_dir = root.join("arch-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut config = Config::default();
+        config.watch.push(watch_entry("arch", &project_dir));
+        let server = TestServer::start(config, DaemonState::default()).await;
+
+        let response = server
+            .post("/v1/federations")
+            .json(&serde_json::json!({
+                "name": "Coordination",
+                "members": [{
+                    "source_project_id": "arch",
+                    "commit_hash": "a".repeat(64),
+                    "display_name": "Architecture"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_project_referenced_by_a_federation_conflicts() {
+        let (_paths, root) = test_paths();
+        let project_dir = root.join("arch-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut config = Config::default();
+        config.watch.push(watch_entry("arch", &project_dir));
+        let mut state = DaemonState::default();
+        state.insert_federation(seeded_federation("fed-1", "Tower", "arch", &"a".repeat(64)));
+        let server = TestServer::start(config, state).await;
+
+        let response = server
+            .delete("/v1/projects/arch")
+            .json(&serde_json::json!({ "deletion_policy": "keep_folder" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        let body: proto::ApiError = response.json().await.unwrap();
+        assert_eq!(
+            body.code.as_deref(),
+            Some("project_referenced_by_federation")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_degrades_when_the_source_project_is_missing() {
+        let mut state = DaemonState::default();
+        state.insert_federation(seeded_federation("fed-1", "Tower", "arch", &"a".repeat(64)));
+        let server = TestServer::start(Config::default(), state).await;
+
+        let snapshot: proto::FederationSnapshot = server
+            .get("/v1/federations/fed-1/snapshot")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(snapshot.federation_id, "fed-1");
+        assert_eq!(snapshot.members.len(), 1);
+        let member = &snapshot.members[0];
+        // The pinned identity is preserved exactly even when unresolved.
+        assert_eq!(member.commit_hash, "a".repeat(64));
+        assert!(!member.project_available);
+        assert!(!member.commit_available);
+        assert_eq!(
+            member.render_status,
+            proto::FederationRenderStatus::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn update_federation_renames_without_touching_members() {
+        let mut state = DaemonState::default();
+        state.insert_federation(seeded_federation(
+            "fed-1",
+            "Old Name",
+            "arch",
+            &"a".repeat(64),
+        ));
+        let server = TestServer::start(Config::default(), state).await;
+
+        let updated: proto::Federation = server
+            .patch("/v1/federations/fed-1")
+            .json(&serde_json::json!({ "name": "New Name" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "New Name");
+        // The member set — and its exact commit identity — is untouched.
+        assert_eq!(updated.members.len(), 1);
+        assert_eq!(updated.members[0].commit_hash, "a".repeat(64));
+        assert!(updated.updated_at_unix >= updated.created_at_unix);
     }
 }

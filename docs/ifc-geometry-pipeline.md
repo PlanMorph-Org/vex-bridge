@@ -582,3 +582,44 @@ safely re-queued; `ready`, `failed`, and `superseded` jobs keep their durable
 outcome and are not resurrected. The HTTP status endpoint is unchanged: it maps
 `superseded` to `not_requested` because no artifact will ever be produced for
 an obsolete commit, so clients transparently fall back to the canonical IFC.
+
+## Federated discipline models
+
+An IFC import always creates one semantic project history. Adding a structural
+or MEP export to an existing architectural project is therefore **not** an
+append operation: importing it there would replace the staged semantic model
+for the next commit. Keep each discipline in its own local project and combine
+them through a saved federation instead.
+
+A federation is a durable, local coordination definition. Each member pins:
+
+- a local `source_project_id`;
+- a complete 64-character commit hash;
+- a stable member id, optional discipline label, and visibility flag; and
+- an explicitly verified, finite, invertible row-major 4x4 affine transform.
+
+The dashboard resolves `GET /v1/federations/:id/snapshot`, then loads every
+available member independently through the existing artifact-first project
+endpoints. A missing local project or evicted commit degrades only that member;
+it never blocks the other discipline models. Member identity namespaces tile
+records, semantic indexes, selection, LOD groups, cancellation, and cache
+accounting, so colliding Express IDs, GlobalIds, or storey tile ids from
+different source projects cannot be confused.
+
+The world transform is deliberately:
+
+```text
+federation position = member transform × Y-up-to-Z-up rotation × local geometry
+```
+
+Both artifact output and raw IFC fallback use web-ifc coordinate-to-origin
+normalization, so an artifact failure does not move a member. The system does
+not infer coordination from bounds, GlobalIds, or source coordinates, and it
+does not auto-align models: artifact coordinate metadata does not yet carry
+enough validated units/origin provenance for that. Users must verify and supply
+member transforms until a future manifest contract provides those fields.
+
+Federation is a placement overlay, not an IFC or semantic merge. It makes no
+cross-project diff, quantity, clash, or authoring claim. Deleting a local
+project referenced by a saved federation is rejected until the member is
+explicitly removed or the federation is deleted.

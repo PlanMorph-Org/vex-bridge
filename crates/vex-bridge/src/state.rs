@@ -31,6 +31,13 @@ pub struct State {
     /// it is using the IFC fallback while an artifact is unavailable.
     #[serde(default)]
     pub render_artifacts: Vec<RenderArtifactJob>,
+    /// Saved local-first coordination sets. A federation is a *derived* view
+    /// over independent projects: it pins each member to an exact commit and a
+    /// placement transform but never merges the underlying models. Persisted so
+    /// the set (and its stable ids) survive restarts. Old state files that
+    /// predate federations load with an empty list via `serde(default)`.
+    #[serde(default)]
+    pub federations: Vec<proto::Federation>,
 }
 
 /// One queued push awaiting a successful sync. A `vex push` advances the
@@ -476,6 +483,76 @@ impl State {
             .map(|job| job.commit_hash.clone())
             .collect()
     }
+
+    // ---- Federations (local-first coordination sets) ----
+
+    /// Hard ceiling on stored federations, so a pathological client cannot grow
+    /// state without bound. Federations are user-curated coordination sets, so
+    /// this is far above any realistic count.
+    pub const MAX_FEDERATIONS: usize = 256;
+
+    /// All federations, newest first (creation order is preserved on disk; this
+    /// reverses it for display).
+    pub fn federations(&self) -> Vec<proto::Federation> {
+        self.federations.iter().rev().cloned().collect()
+    }
+
+    pub fn federation(&self, federation_id: &str) -> Option<proto::Federation> {
+        self.federations
+            .iter()
+            .find(|federation| federation.federation_id == federation_id)
+            .cloned()
+    }
+
+    /// Insert a validated federation. Returns `false` when the durable ceiling
+    /// has already been reached, so the caller can reject the request rather
+    /// than silently evict an existing set.
+    pub fn insert_federation(&mut self, federation: proto::Federation) -> bool {
+        if self.federations.len() >= Self::MAX_FEDERATIONS {
+            return false;
+        }
+        self.federations.push(federation);
+        true
+    }
+
+    /// Replace an existing federation in place, preserving its position.
+    /// Returns `false` when no federation with that id exists.
+    pub fn replace_federation(&mut self, federation: proto::Federation) -> bool {
+        if let Some(slot) = self
+            .federations
+            .iter_mut()
+            .find(|existing| existing.federation_id == federation.federation_id)
+        {
+            *slot = federation;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a federation by id. Returns `true` when one was removed.
+    pub fn remove_federation(&mut self, federation_id: &str) -> bool {
+        let before = self.federations.len();
+        self.federations
+            .retain(|federation| federation.federation_id != federation_id);
+        self.federations.len() != before
+    }
+
+    /// Ids of federations that reference `project_id` in any member. Used to
+    /// keep project deletion safe: a referenced project must not be removed out
+    /// from under a coordination set, or the set would silently dangle.
+    pub fn federations_referencing_project(&self, project_id: &str) -> Vec<String> {
+        self.federations
+            .iter()
+            .filter(|federation| {
+                federation
+                    .members
+                    .iter()
+                    .any(|member| member.source_project_id == project_id)
+            })
+            .map(|federation| federation.federation_id.clone())
+            .collect()
+    }
 }
 
 pub fn now_unix() -> i64 {
@@ -798,5 +875,109 @@ mod tests {
         )
         .unwrap();
         assert_eq!(state.pending_push_count(), 0);
+    }
+
+    fn sample_federation(id: &str, source: &str, commit: &str) -> proto::Federation {
+        proto::Federation {
+            schema: proto::schema::FEDERATION.to_string(),
+            federation_id: id.to_string(),
+            name: format!("Federation {id}"),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            members: vec![proto::FederationMember {
+                member_id: format!("mem-{source}"),
+                source_project_id: source.to_string(),
+                commit_hash: commit.to_string(),
+                display_name: "Model".to_string(),
+                discipline: None,
+                transform: proto::FederationTransform::identity(),
+                visible: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn legacy_state_without_federations_loads_empty() {
+        // State files written before federations existed must still load, with
+        // an empty federation list rather than a hard parse failure.
+        let state: State = serde_json::from_str(
+            r#"{"pairing":{"status":"unpaired"},"seen_ifc_hashes":[],"recent_activity":[]}"#,
+        )
+        .unwrap();
+        assert!(state.federations().is_empty());
+    }
+
+    #[test]
+    fn federation_crud_round_trips_and_reports_newest_first() {
+        let mut state = State::default();
+        assert!(state.insert_federation(sample_federation("fed-1", "arch", &"a".repeat(64))));
+        assert!(state.insert_federation(sample_federation("fed-2", "struct", &"b".repeat(64))));
+
+        // Listing is newest-first; lookup by id returns the stored record.
+        let ids: Vec<String> = state
+            .federations()
+            .into_iter()
+            .map(|federation| federation.federation_id)
+            .collect();
+        assert_eq!(ids, vec!["fed-2".to_string(), "fed-1".to_string()]);
+        assert!(state.federation("fed-1").is_some());
+        assert!(state.federation("missing").is_none());
+
+        // Replace preserves position and updates fields; a missing id is a
+        // no-op that reports false.
+        let mut updated = sample_federation("fed-1", "arch", &"c".repeat(64));
+        updated.name = "Renamed".to_string();
+        assert!(state.replace_federation(updated));
+        assert_eq!(state.federation("fed-1").unwrap().name, "Renamed");
+        assert!(!state.replace_federation(sample_federation("ghost", "x", &"d".repeat(64))));
+
+        // Round-trip through serde preserves the set.
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.federations().len(), 2);
+
+        // Removal is explicit and reports whether anything was removed.
+        assert!(state.remove_federation("fed-1"));
+        assert!(!state.remove_federation("fed-1"));
+        assert_eq!(state.federations().len(), 1);
+    }
+
+    #[test]
+    fn insert_federation_respects_the_durable_ceiling() {
+        let mut state = State::default();
+        for index in 0..State::MAX_FEDERATIONS {
+            assert!(state.insert_federation(sample_federation(
+                &format!("fed-{index}"),
+                "arch",
+                &"a".repeat(64),
+            )));
+        }
+        // Once the ceiling is reached, further inserts are rejected rather than
+        // silently evicting an existing coordination set.
+        assert!(!state.insert_federation(sample_federation("overflow", "arch", &"a".repeat(64))));
+        assert_eq!(state.federations().len(), State::MAX_FEDERATIONS);
+    }
+
+    #[test]
+    fn federations_referencing_project_finds_every_dependent_set() {
+        let mut state = State::default();
+        state.insert_federation(sample_federation("fed-1", "arch", &"a".repeat(64)));
+        // A federation with two members, one of which references "arch".
+        let mut multi = sample_federation("fed-2", "struct", &"b".repeat(64));
+        multi.members.push(proto::FederationMember {
+            member_id: "mem-arch2".to_string(),
+            source_project_id: "arch".to_string(),
+            commit_hash: "e".repeat(64),
+            display_name: "Arch v2".to_string(),
+            discipline: None,
+            transform: proto::FederationTransform::identity(),
+            visible: true,
+        });
+        state.insert_federation(multi);
+
+        let mut referencing = state.federations_referencing_project("arch");
+        referencing.sort();
+        assert_eq!(referencing, vec!["fed-1".to_string(), "fed-2".to_string()]);
+        assert!(state.federations_referencing_project("mep").is_empty());
     }
 }

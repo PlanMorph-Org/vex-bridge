@@ -50,6 +50,19 @@ pub mod schema {
     /// Semantic lookup index associated with a render-artifact manifest.
     pub const RENDER_SEMANTIC_INDEX: &str = "vex.render-semantic-index/1";
 
+    /// Durable, versioned local-first federation coordination-set model.
+    ///
+    /// A federation is a *derived, saved* set of exact discipline-model commit
+    /// references plus placement transforms. It is deliberately not a merged
+    /// authoring model, so the schema is versioned independently of the
+    /// per-discipline project history it references.
+    pub const FEDERATION: &str = "vex.federation/1";
+
+    /// Resolved federation snapshot: exact, immutable member commit identities
+    /// plus per-member artifact status, so a viewer can load each discipline
+    /// independently without any semantic merge.
+    pub const FEDERATION_SNAPSHOT: &str = "vex.federation-snapshot/1";
+
     /// Split a `name/major` schema tag into `(name, major)`.
     ///
     /// `"vex.visual-diff/1"` → `Some(("vex.visual-diff", 1))`.
@@ -960,6 +973,469 @@ pub struct ApiError {
     pub correlation_id: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Federation: local-first, derived model-coordination sets.
+//
+// A federation binds several *independent* local discipline projects together
+// as a saved coordination set. Each member is an immutable reference to an
+// exact commit of a source project plus the affine transform that positions it
+// in the federation's shared coordinate space. Federations never merge the
+// underlying models and make **no semantic-merge guarantee**: they are purely a
+// placement-and-versioning overlay so a viewer can load each discipline
+// independently at its pinned commit. No member ever references a remote URL or
+// an arbitrary filesystem path — only a local project id and a commit hash.
+// ---------------------------------------------------------------------------
+
+/// A 4x4, row-major affine coordinate transform applied to a discipline model
+/// as it is placed into a federation's shared coordinate space.
+///
+/// The transform is affine only: the bottom row must equal `[0, 0, 0, 1]` so it
+/// carries no perspective component, and its upper-left 3x3 linear block must
+/// be invertible so a placement can be inverted (for example to map a picked
+/// federation-space point back into a member model). Every entry must be
+/// finite.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FederationTransform {
+    /// Row-major 4x4 matrix. `rows[3]` (the bottom row) must equal
+    /// `[0.0, 0.0, 0.0, 1.0]`.
+    pub rows: [[f64; 4]; 4],
+}
+
+impl Default for FederationTransform {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl FederationTransform {
+    /// Tolerance for the affine bottom-row check.
+    const PERSPECTIVE_EPSILON: f64 = 1e-9;
+    /// A linear block whose determinant magnitude is at or below this is
+    /// treated as singular (non-invertible).
+    const DETERMINANT_EPSILON: f64 = 1e-9;
+
+    /// The identity placement: no translation, rotation, scale, or shear.
+    pub const fn identity() -> Self {
+        Self {
+            rows: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    fn all_finite(&self) -> bool {
+        self.rows.iter().flatten().all(|value| value.is_finite())
+    }
+
+    fn has_affine_bottom_row(&self) -> bool {
+        let [a, b, c, d] = self.rows[3];
+        a.abs() <= Self::PERSPECTIVE_EPSILON
+            && b.abs() <= Self::PERSPECTIVE_EPSILON
+            && c.abs() <= Self::PERSPECTIVE_EPSILON
+            && (d - 1.0).abs() <= Self::PERSPECTIVE_EPSILON
+    }
+
+    /// Determinant of the upper-left 3x3 linear block.
+    fn linear_determinant(&self) -> f64 {
+        let m = &self.rows;
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    }
+
+    /// True when the transform is a finite, invertible affine map with no
+    /// perspective component.
+    pub fn is_valid_affine(&self) -> bool {
+        if !self.all_finite() || !self.has_affine_bottom_row() {
+            return false;
+        }
+        let determinant = self.linear_determinant();
+        determinant.is_finite() && determinant.abs() > Self::DETERMINANT_EPSILON
+    }
+}
+
+/// One discipline model placed in a federation.
+///
+/// A member is an immutable reference to an exact commit of an independent local
+/// project plus the transform that positions it. `member_id` is stable across
+/// federation updates so a viewer can track a member's identity over time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FederationMember {
+    /// Stable, daemon-generated identity, unique within the federation.
+    pub member_id: String,
+    /// Local project id this member draws from. Never a remote URL or path.
+    pub source_project_id: String,
+    /// Immutable, complete (64 hex character) commit hash pinned for this
+    /// member. Resolved from the source project HEAD only at create/update.
+    pub commit_hash: String,
+    /// Human-facing label shown in coordination UIs.
+    pub display_name: String,
+    /// Optional discipline tag (for example `architecture`, `structure`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discipline: Option<String>,
+    /// Placement transform into the federation's shared coordinate space.
+    #[serde(default)]
+    pub transform: FederationTransform,
+    /// Whether the member is shown by default when the federation loads.
+    pub visible: bool,
+}
+
+/// A derived, saved coordination set of exact discipline-model commits and
+/// their placement transforms.
+///
+/// A federation is **not** a merged authoring model and provides no
+/// semantic-merge guarantee; it only records which exact commit of each source
+/// project participates and where it is placed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Federation {
+    /// Model schema tag. Old records without this field default to the current
+    /// version on read so already-persisted federations stay loadable.
+    #[serde(default = "default_federation_schema")]
+    pub schema: String,
+    /// Stable, daemon-generated federation identity.
+    pub federation_id: String,
+    pub name: String,
+    pub created_at_unix: i64,
+    pub updated_at_unix: i64,
+    pub members: Vec<FederationMember>,
+}
+
+fn default_federation_schema() -> String {
+    schema::FEDERATION.to_string()
+}
+
+impl Federation {
+    /// Maximum members in a single federation. Keeps a federation — and any
+    /// snapshot derived from it — bounded regardless of client input.
+    pub const MAX_MEMBERS: usize = 64;
+    /// Maximum length (in characters) of a federation or member display name.
+    pub const MAX_NAME_LEN: usize = 200;
+    /// Maximum length (in characters) of an optional discipline tag.
+    pub const MAX_DISCIPLINE_LEN: usize = 80;
+    /// Maximum length of a daemon-issued or client-supplied identifier.
+    pub const MAX_ID_LEN: usize = 120;
+
+    /// Reject a structurally invalid or unsafe federation before it is
+    /// persisted or served. This validates the model envelope only; it does
+    /// not (and cannot) check that a source project still exists locally or
+    /// that a commit is in its history — those are the server's semantic
+    /// checks, performed against live repository state.
+    pub fn validate(&self) -> Result<(), FederationValidationError> {
+        if !schema::is_compatible(&self.schema, schema::FEDERATION) {
+            return Err(FederationValidationError::IncompatibleSchema {
+                expected: schema::FEDERATION,
+                actual: self.schema.clone(),
+            });
+        }
+        if !is_safe_identifier(&self.federation_id) {
+            return Err(FederationValidationError::UnsafeId {
+                field: "federation_id",
+            });
+        }
+        validate_safe_name("name", &self.name, Self::MAX_NAME_LEN)?;
+
+        if self.members.is_empty() {
+            return Err(FederationValidationError::NoMembers);
+        }
+        if self.members.len() > Self::MAX_MEMBERS {
+            return Err(FederationValidationError::TooManyMembers {
+                max: Self::MAX_MEMBERS,
+            });
+        }
+
+        let mut member_ids = std::collections::HashSet::with_capacity(self.members.len());
+        let mut source_commits = std::collections::HashSet::with_capacity(self.members.len());
+        for member in &self.members {
+            if !is_safe_identifier(&member.member_id) {
+                return Err(FederationValidationError::UnsafeId { field: "member_id" });
+            }
+            if !member_ids.insert(member.member_id.as_str()) {
+                return Err(FederationValidationError::DuplicateMemberId(
+                    member.member_id.clone(),
+                ));
+            }
+            if !is_safe_identifier(&member.source_project_id) {
+                return Err(FederationValidationError::UnsafeId {
+                    field: "source_project_id",
+                });
+            }
+            if !is_full_commit_hash(&member.commit_hash) {
+                return Err(FederationValidationError::InvalidCommitHash {
+                    member_id: member.member_id.clone(),
+                });
+            }
+            validate_safe_name("display_name", &member.display_name, Self::MAX_NAME_LEN)?;
+            if let Some(discipline) = member.discipline.as_deref() {
+                validate_safe_name("discipline", discipline, Self::MAX_DISCIPLINE_LEN)?;
+            }
+            if !member.transform.is_valid_affine() {
+                return Err(FederationValidationError::InvalidTransform {
+                    member_id: member.member_id.clone(),
+                });
+            }
+            if !source_commits.insert((
+                member.source_project_id.as_str(),
+                member.commit_hash.as_str(),
+            )) {
+                return Err(FederationValidationError::DuplicateSourceCommit {
+                    source_project_id: member.source_project_id.clone(),
+                    commit_hash: member.commit_hash.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Compact, list-friendly projection of this federation.
+    pub fn summary(&self) -> FederationSummary {
+        FederationSummary {
+            federation_id: self.federation_id.clone(),
+            name: self.name.clone(),
+            member_count: self.members.len(),
+            visible_member_count: self.members.iter().filter(|member| member.visible).count(),
+            created_at_unix: self.created_at_unix,
+            updated_at_unix: self.updated_at_unix,
+        }
+    }
+}
+
+/// True when `value` is a complete, lowercase-or-uppercase 64 hex character
+/// commit hash. Federations only ever pin complete commit hashes; a branch
+/// name, abbreviated hash, or `HEAD` is never accepted as a member identity.
+pub fn is_full_commit_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Identifier safety shared by federation, member, and source-project ids:
+/// non-empty, bounded length, and restricted to ASCII alphanumerics plus `-`
+/// and `_`, so an id can never encode a path traversal or shell metacharacter.
+fn is_safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= Federation::MAX_ID_LEN
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+/// A user-facing name is safe when it is non-empty after trimming, is within
+/// its length bound, and contains no control characters (which would let a
+/// crafted value smuggle newlines or terminal escapes into logs and UIs).
+fn validate_safe_name(
+    field: &'static str,
+    value: &str,
+    max: usize,
+) -> Result<(), FederationValidationError> {
+    if value.trim().is_empty() {
+        return Err(FederationValidationError::MissingField(field));
+    }
+    if value.chars().count() > max {
+        return Err(FederationValidationError::TextTooLong { field, max });
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return Err(FederationValidationError::UnsafeText { field });
+    }
+    Ok(())
+}
+
+/// Structural / safety validation failure for a [`Federation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FederationValidationError {
+    IncompatibleSchema {
+        expected: &'static str,
+        actual: String,
+    },
+    MissingField(&'static str),
+    UnsafeText {
+        field: &'static str,
+    },
+    TextTooLong {
+        field: &'static str,
+        max: usize,
+    },
+    UnsafeId {
+        field: &'static str,
+    },
+    NoMembers,
+    TooManyMembers {
+        max: usize,
+    },
+    InvalidCommitHash {
+        member_id: String,
+    },
+    InvalidTransform {
+        member_id: String,
+    },
+    DuplicateMemberId(String),
+    DuplicateSourceCommit {
+        source_project_id: String,
+        commit_hash: String,
+    },
+}
+
+impl std::fmt::Display for FederationValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompatibleSchema { expected, actual } => write!(
+                f,
+                "federation schema {actual:?} is not compatible with {expected:?}"
+            ),
+            Self::MissingField(field) => write!(f, "{field} must not be empty"),
+            Self::UnsafeText { field } => {
+                write!(f, "{field} must not contain control characters")
+            }
+            Self::TextTooLong { field, max } => {
+                write!(f, "{field} is too long (max {max} characters)")
+            }
+            Self::UnsafeId { field } => write!(
+                f,
+                "{field} may only contain ASCII letters, numbers, '-' or '_'"
+            ),
+            Self::NoMembers => write!(f, "a federation must have at least one member"),
+            Self::TooManyMembers { max } => {
+                write!(f, "a federation may have at most {max} members")
+            }
+            Self::InvalidCommitHash { member_id } => write!(
+                f,
+                "member {member_id:?} must pin a complete 64 hex character commit hash"
+            ),
+            Self::InvalidTransform { member_id } => write!(
+                f,
+                "member {member_id:?} has a non-finite, singular, or perspective transform"
+            ),
+            Self::DuplicateMemberId(member_id) => {
+                write!(f, "member_id {member_id:?} is duplicated")
+            }
+            Self::DuplicateSourceCommit {
+                source_project_id,
+                commit_hash,
+            } => write!(
+                f,
+                "source project {source_project_id:?} commit {commit_hash:?} appears more than once"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FederationValidationError {}
+
+/// Input describing one member when creating or updating a federation.
+///
+/// The daemon owns identity assignment and never accepts object paths or remote
+/// URLs. `member_id` is optional: on update, supplying an existing id preserves
+/// that member's stable identity while replacing its fields; omitting it mints a
+/// new member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationMemberInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_id: Option<String>,
+    pub source_project_id: String,
+    /// Explicit immutable commit hash. When omitted, the daemon resolves the
+    /// source project's current HEAD once, at create/update time, and pins it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_hash: Option<String>,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discipline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<FederationTransform>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+}
+
+/// `POST /v1/federations` — create a new coordination set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateFederationRequest {
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<FederationMemberInput>,
+}
+
+/// `PATCH /v1/federations/:federation_id` — rename and/or replace the member
+/// set. When `members` is present it fully replaces the current set: this is
+/// the only way to add or remove members, so a removal is always explicit and
+/// never silent. When `members` is absent, only the name (if given) changes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateFederationRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<FederationMemberInput>>,
+}
+
+/// Compact federation row for `GET /v1/federations`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FederationSummary {
+    pub federation_id: String,
+    pub name: String,
+    pub member_count: usize,
+    pub visible_member_count: usize,
+    pub created_at_unix: i64,
+    pub updated_at_unix: i64,
+}
+
+/// `DELETE /v1/federations/:federation_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteFederationResponse {
+    pub federation_id: String,
+    pub removed: bool,
+}
+
+/// Per-member artifact resolution status in a federation snapshot.
+///
+/// This is a compact hint so a viewer can render a loading state; the exact,
+/// authoritative artifact status is always available from the per-project
+/// render endpoints using the member's `source_project_id` and `commit_hash`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "render")]
+pub enum FederationRenderStatus {
+    /// The source project is no longer configured locally, or the pinned commit
+    /// is not present in its history — nothing can be resolved for this member.
+    Unavailable,
+    /// The commit is present but no derived render artifact was requested; a
+    /// viewer should fall back to the canonical IFC endpoint.
+    NotRequested,
+    Queued,
+    Building,
+    Ready,
+    Failed,
+}
+
+/// One resolved member in a [`FederationSnapshot`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FederationSnapshotMember {
+    pub member_id: String,
+    pub source_project_id: String,
+    pub commit_hash: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discipline: Option<String>,
+    pub transform: FederationTransform,
+    pub visible: bool,
+    /// The source project is still configured locally.
+    pub project_available: bool,
+    /// The pinned commit is present in the source project's history.
+    pub commit_available: bool,
+    #[serde(flatten)]
+    pub render_status: FederationRenderStatus,
+}
+
+/// `GET /v1/federations/:federation_id/snapshot` — the resolved coordination
+/// set. Returns each member's exact, immutable commit identity plus its current
+/// artifact status so a viewer can load every discipline independently. This is
+/// a placement overlay only and performs no semantic merge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FederationSnapshot {
+    pub schema: String,
+    pub federation_id: String,
+    pub name: String,
+    pub created_at_unix: i64,
+    pub updated_at_unix: i64,
+    pub members: Vec<FederationSnapshotMember>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1246,5 +1722,266 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ---- Federation model ----
+
+    fn federation_member(source: &str, commit: &str) -> FederationMember {
+        FederationMember {
+            member_id: format!("mem-{source}"),
+            source_project_id: source.to_string(),
+            commit_hash: commit.to_string(),
+            display_name: "Architecture".to_string(),
+            discipline: Some("architecture".to_string()),
+            transform: FederationTransform::identity(),
+            visible: true,
+        }
+    }
+
+    fn federation() -> Federation {
+        Federation {
+            schema: schema::FEDERATION.to_string(),
+            federation_id: "fed-001".to_string(),
+            name: "Tower coordination".to_string(),
+            created_at_unix: 1_700_000_000,
+            updated_at_unix: 1_700_000_000,
+            members: vec![
+                federation_member("arch", &"a".repeat(64)),
+                federation_member("struct", &"b".repeat(64)),
+            ],
+        }
+    }
+
+    #[test]
+    fn identity_transform_is_a_valid_affine() {
+        assert!(FederationTransform::identity().is_valid_affine());
+        assert_eq!(
+            FederationTransform::default(),
+            FederationTransform::identity()
+        );
+    }
+
+    #[test]
+    fn transform_rejects_perspective_non_finite_and_singular() {
+        // A non-[0,0,0,1] bottom row is a perspective transform: rejected.
+        let mut perspective = FederationTransform::identity();
+        perspective.rows[3] = [0.1, 0.0, 0.0, 1.0];
+        assert!(!perspective.is_valid_affine());
+
+        // Any non-finite entry is rejected.
+        let mut non_finite = FederationTransform::identity();
+        non_finite.rows[0][3] = f64::NAN;
+        assert!(!non_finite.is_valid_affine());
+        non_finite.rows[0][3] = f64::INFINITY;
+        assert!(!non_finite.is_valid_affine());
+
+        // A singular linear block (zero column) is not invertible: rejected.
+        let mut singular = FederationTransform::identity();
+        singular.rows[0][0] = 0.0;
+        singular.rows[1][0] = 0.0;
+        singular.rows[2][0] = 0.0;
+        assert!(!singular.is_valid_affine());
+    }
+
+    #[test]
+    fn transform_accepts_translation_rotation_and_scale() {
+        // A translation + 90° rotation about Z + uniform scale is invertible.
+        let transform = FederationTransform {
+            rows: [
+                [0.0, -2.0, 0.0, 10.0],
+                [2.0, 0.0, 0.0, -5.0],
+                [0.0, 0.0, 2.0, 3.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        };
+        assert!(transform.is_valid_affine());
+    }
+
+    #[test]
+    fn valid_federation_passes_validation_and_summarizes() {
+        let federation = federation();
+        assert!(federation.validate().is_ok());
+        let summary = federation.summary();
+        assert_eq!(summary.member_count, 2);
+        assert_eq!(summary.visible_member_count, 2);
+        assert_eq!(summary.federation_id, "fed-001");
+    }
+
+    #[test]
+    fn federation_round_trips_and_defaults_schema() {
+        let federation = federation();
+        let value = serde_json::to_value(&federation).unwrap();
+        assert_eq!(value["schema"], schema::FEDERATION);
+        let decoded: Federation = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, federation);
+
+        // A record persisted before the schema field existed still loads,
+        // defaulting to the current federation schema.
+        let legacy = json!({
+            "federation_id": "fed-legacy",
+            "name": "Legacy",
+            "created_at_unix": 1,
+            "updated_at_unix": 2,
+            "members": [{
+                "member_id": "mem-1",
+                "source_project_id": "arch",
+                "commit_hash": "a".repeat(64),
+                "display_name": "Arch",
+                "visible": true
+            }]
+        });
+        let decoded: Federation = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.schema, schema::FEDERATION);
+        // A member without an explicit transform defaults to identity.
+        assert_eq!(
+            decoded.members[0].transform,
+            FederationTransform::identity()
+        );
+    }
+
+    #[test]
+    fn federation_rejects_incompatible_schema() {
+        let mut federation = federation();
+        federation.schema = "vex.federation/2".to_string();
+        assert!(matches!(
+            federation.validate(),
+            Err(FederationValidationError::IncompatibleSchema { .. })
+        ));
+    }
+
+    #[test]
+    fn federation_requires_at_least_one_member_and_bounds_the_maximum() {
+        let mut empty = federation();
+        empty.members.clear();
+        assert_eq!(empty.validate(), Err(FederationValidationError::NoMembers));
+
+        let mut too_many = federation();
+        too_many.members = (0..(Federation::MAX_MEMBERS + 1))
+            .map(|index| {
+                let mut member = federation_member(&format!("p{index}"), &"c".repeat(64));
+                member.member_id = format!("mem-{index}");
+                member
+            })
+            .collect();
+        assert!(matches!(
+            too_many.validate(),
+            Err(FederationValidationError::TooManyMembers { .. })
+        ));
+    }
+
+    #[test]
+    fn federation_rejects_duplicate_member_id() {
+        let mut federation = federation();
+        federation.members[1].member_id = federation.members[0].member_id.clone();
+        assert!(matches!(
+            federation.validate(),
+            Err(FederationValidationError::DuplicateMemberId(_))
+        ));
+    }
+
+    #[test]
+    fn federation_rejects_duplicate_source_commit_pair() {
+        // Two members may share a source project only at distinct commits.
+        let commit = "a".repeat(64);
+        let mut federation = federation();
+        federation.members[0].source_project_id = "arch".to_string();
+        federation.members[0].commit_hash = commit.clone();
+        federation.members[1].source_project_id = "arch".to_string();
+        federation.members[1].commit_hash = commit;
+        assert!(matches!(
+            federation.validate(),
+            Err(FederationValidationError::DuplicateSourceCommit { .. })
+        ));
+    }
+
+    #[test]
+    fn federation_rejects_partial_or_non_hex_commit() {
+        let mut short = federation();
+        short.members[0].commit_hash = "abc".to_string();
+        assert!(matches!(
+            short.validate(),
+            Err(FederationValidationError::InvalidCommitHash { .. })
+        ));
+
+        let mut non_hex = federation();
+        non_hex.members[0].commit_hash = "g".repeat(64);
+        assert!(matches!(
+            non_hex.validate(),
+            Err(FederationValidationError::InvalidCommitHash { .. })
+        ));
+    }
+
+    #[test]
+    fn federation_rejects_unsafe_names_and_ids() {
+        // Control characters in a name could smuggle log/terminal escapes.
+        let mut bad_name = federation();
+        bad_name.name = "line1\nline2".to_string();
+        assert!(matches!(
+            bad_name.validate(),
+            Err(FederationValidationError::UnsafeText { field: "name" })
+        ));
+
+        let mut empty_name = federation();
+        empty_name.name = "   ".to_string();
+        assert!(matches!(
+            empty_name.validate(),
+            Err(FederationValidationError::MissingField("name"))
+        ));
+
+        let mut long_name = federation();
+        long_name.name = "x".repeat(Federation::MAX_NAME_LEN + 1);
+        assert!(matches!(
+            long_name.validate(),
+            Err(FederationValidationError::TextTooLong { field: "name", .. })
+        ));
+
+        // A traversal-style id is rejected before it can ever reach a filename.
+        let mut traversal = federation();
+        traversal.federation_id = "../../etc/passwd".to_string();
+        assert!(matches!(
+            traversal.validate(),
+            Err(FederationValidationError::UnsafeId {
+                field: "federation_id"
+            })
+        ));
+
+        let mut bad_source = federation();
+        bad_source.members[0].source_project_id = "arch/../secret".to_string();
+        assert!(matches!(
+            bad_source.validate(),
+            Err(FederationValidationError::UnsafeId {
+                field: "source_project_id"
+            })
+        ));
+    }
+
+    #[test]
+    fn federation_rejects_invalid_member_transform() {
+        let mut federation = federation();
+        federation.members[0].transform.rows[3] = [0.0, 0.0, 0.0, 0.0];
+        assert!(matches!(
+            federation.validate(),
+            Err(FederationValidationError::InvalidTransform { .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_member_flattens_render_status() {
+        let member = FederationSnapshotMember {
+            member_id: "mem-1".to_string(),
+            source_project_id: "arch".to_string(),
+            commit_hash: "a".repeat(64),
+            display_name: "Arch".to_string(),
+            discipline: None,
+            transform: FederationTransform::identity(),
+            visible: true,
+            project_available: true,
+            commit_available: true,
+            render_status: FederationRenderStatus::Ready,
+        };
+        let value = serde_json::to_value(&member).unwrap();
+        assert_eq!(value["render"], "ready");
+        let decoded: FederationSnapshotMember = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, member);
     }
 }

@@ -776,6 +776,121 @@ button.primary:hover:not(:disabled) { background: var(--accent-strong); border-c
   .statusbar { gap: 8px; }
   .statusbar #sbActivity { display: none; }
 }
+
+/* ---- Federation workspace ------------------------------------------------
+   A deliberately separate coordination surface. It never shares a scene,
+   renderer, or model state with the single-project viewer, so opening or
+   closing it can never alter single-project rendering. Hidden until activated
+   by the Federation button or the ?federation= URL parameter. */
+#fedWorkspace {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  grid-template-rows: 44px minmax(0, 1fr);
+  background: var(--bg);
+  color: var(--text);
+}
+#fedWorkspace[hidden] { display: none; }
+.fed-topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.fed-topbar .fed-title { font-weight: 700; letter-spacing: .015em; white-space: nowrap; }
+.fed-topbar .fed-sub { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fed-topbar .fed-spacer { flex: 1; }
+.fed-topbar select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  max-width: 280px;
+}
+.fed-topbar button { min-height: 28px; padding: 4px 10px; font-size: 12px; }
+.fed-main {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr);
+  gap: 1px;
+  background: var(--line);
+}
+.fed-side {
+  background: var(--panel);
+  min-width: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+.fed-disciplines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  max-height: 118px;
+  overflow: auto;
+}
+.fed-disciplines:empty { display: none; }
+.fed-chip {
+  font-size: 11px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fed-chip[aria-pressed="true"] { color: var(--text); border-color: var(--accent); background: var(--panel-raised); }
+.fed-chip[data-off="true"] { opacity: .5; text-decoration: line-through; }
+.fed-members { overflow: auto; }
+.fed-members:empty::after {
+  content: attr(data-empty);
+  display: block;
+  padding: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.fed-member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.fed-member.isolated { background: var(--panel-2); }
+.fed-member .fed-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; background: var(--subtle); flex: none; }
+.fed-member .fed-dot.loading { background: var(--amber); }
+.fed-member .fed-dot.ok { background: var(--green); }
+.fed-member .fed-dot.failed { background: var(--red); }
+.fed-member .fed-dot.empty { background: var(--subtle); }
+.fed-member .fed-mbody { min-width: 0; }
+.fed-member .fed-mtitle { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fed-member .fed-mmeta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fed-member .fed-mdisc { font-size: 11px; color: var(--subtle); }
+.fed-member .fed-mactions { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+.fed-member .fed-mactions label { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); cursor: pointer; }
+.fed-member .fed-iso {
+  font-size: 11px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+.fed-member .fed-iso[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.fed-view { position: relative; background: #111313; min-width: 0; min-height: 0; }
+.view-grid.dim-3d #fedPlanPane { display: none; }
+.view-grid.dim-2d #fedModelPane { display: none; }
 </style>
 </head>
 <body>
@@ -790,6 +905,7 @@ button.primary:hover:not(:disabled) { background: var(--accent-strong); border-c
     <button id="pairButton">Pair Device</button>
     <button id="setupButton">Add Inbox</button>
     <button id="syncButton" title="Push committed changes to the cloud">Push</button>
+    <button id="federationButton" type="button" title="Open the multi-model federation coordination view">Federation</button>
     <button class="primary" id="refreshButton">Refresh</button>
     <button class="settings-button" id="settingsButton" type="button" aria-controls="settingsPanel" aria-expanded="false" title="Workspace display settings">⚙</button>
   </div>
@@ -889,6 +1005,59 @@ button.primary:hover:not(:disabled) { background: var(--accent-strong); border-c
     <button class="sb-action" id="sbRepair" type="button" title="Restart the Vex background daemon">Repair</button>
   </footer>
 </div>
+<section id="fedWorkspace" hidden aria-label="Federation coordination workspace">
+  <div class="fed-topbar">
+    <span class="fed-title">Federation</span>
+    <select id="fedSelect" title="Choose a federation set" aria-label="Federation set">
+      <option value="">Loading federations…</option>
+    </select>
+    <span id="fedSub" class="fed-sub"></span>
+    <div class="fed-spacer"></div>
+    <div class="view-toggle" id="fedDimToggle">
+      <button type="button" data-dim="split" class="active" title="Show plan and model">Split</button>
+      <button type="button" data-dim="3d">3D</button>
+      <button type="button" data-dim="2d">2D</button>
+    </div>
+    <button class="tool-btn" id="fedFitButton" type="button" title="Fit all loaded members (F)">Fit</button>
+    <button class="tool-btn" id="fedReloadButton" type="button" title="Reload this federation set">Reload</button>
+    <button id="fedCloseButton" type="button" title="Return to the single-project workspace">Exit federation</button>
+  </div>
+  <div class="fed-main">
+    <aside class="fed-side">
+      <div class="panel-head"><div class="panel-title">Members</div><div id="fedMemberCount" class="row-meta"></div></div>
+      <div class="fed-disciplines" id="fedDisciplines"></div>
+      <div class="fed-members" id="fedMembers" data-empty="No federation set selected."></div>
+    </aside>
+    <div class="fed-view">
+      <div class="view-grid" id="fedViewGrid">
+        <div class="view-pane" id="fedPlanPane">
+          <header><span>2D Plan (shared)</span><span id="fedPlanMeta"></span></header>
+          <canvas id="fedPlanCanvas"></canvas>
+          <div class="view-status" id="fedPlanStatus" role="status" aria-live="polite"></div>
+        </div>
+        <div class="view-pane" id="fedModelPane">
+          <header><span>3D Federation</span><span id="fedModelMeta"></span></header>
+          <canvas id="fedModelCanvas"></canvas>
+          <div class="orbit-hint" id="fedOrbitHint">Drag to orbit · scroll to zoom · right-drag to pan</div>
+          <div class="viewer-toolbar" id="fedToolbar">
+            <button class="tool-btn" data-act="fit" title="Fit to loaded members (F)">Fit</button>
+            <span class="sep"></span>
+            <button class="tool-btn" data-act="view-iso" title="Isometric view">Iso</button>
+            <button class="tool-btn" data-act="view-top" title="Top view">Top</button>
+            <button class="tool-btn" data-act="view-front" title="Front view">Front</button>
+            <button class="tool-btn" data-act="view-right" title="Right view">Right</button>
+          </div>
+          <div class="props-panel" id="fedPropsPanel">
+            <button class="tool-btn close" data-act="fed-props-close" type="button">Close</button>
+            <h4 id="fedPropsTitle">Element</h4>
+            <div id="fedPropsBody"></div>
+          </div>
+          <div class="view-status" id="fedModelStatus" role="status" aria-live="polite"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
 <section class="settings-panel" id="settingsPanel" aria-labelledby="settingsTitle" hidden>
   <h2 id="settingsTitle">Workspace display</h2>
   <p>Saved on this device. Rendering changes apply immediately.</p>
@@ -2079,6 +2248,9 @@ function formatSerValue(value) {
 }
 
 function drawChanges(changes) {
+  // While the federation workspace is active the single-project viewer has
+  // released its resources; the 15s refresh loop must not re-render behind it.
+  if (fedActive) return;
   if (ifcViewer) ifcViewer.load(changes, currentViewMode);
 }
 
@@ -4164,6 +4336,1637 @@ function elementType(element) { return element.type_name || element.type || 'IFC
 function formatTime(seconds) { return seconds ? new Date(seconds * 1000).toLocaleString() : 'not caught yet'; }
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 
+/* ===========================================================================
+   Federation workspace
+   ---------------------------------------------------------------------------
+   A self-contained multi-model coordination viewer. It shares NONE of its
+   scene, renderer, cameras, or load state with the single-project RealIfcViewer
+   above; it is only ever created/activated through the Federation button or the
+   ?federation=<id> URL parameter, so the single-project path is untouched when
+   federation is inactive.
+
+   API contract this UI consumes (added by the local federation backend). The
+   shapes below follow existing repo conventions (snake_case JSON, versioned
+   `schema` envelopes, `*_unix` timestamps) and are read defensively — missing
+   endpoints degrade to a clear empty state rather than failing.
+
+     GET /v1/federations
+       -> { "schema":"vex.federations/1",
+            "federations":[ { "federation_id":str, "name":str,
+                              "member_count":int?, "updated_at_unix":int? } ] }
+          (a bare array, and `id` in place of `federation_id`, are also accepted)
+
+     GET /v1/federations/:federation_id
+       -> { "schema":"vex.federation/1", "federation_id":str, "name":str,
+            "members":[ FederationMember ] }
+          (a bare array of members is also accepted)
+
+     FederationMember := {
+        "member_id":  str,               // stable within the federation
+        "project_id": str,               // required
+        "commit_hash":str,               // required; full 64-hex preferred
+        "project_name": str?,            // display name
+        "discipline": str?,              // freeform grouping label
+        "visible": bool?,                // default true
+        "transform": {                   // optional; identity if absent
+           // preferred: column-major (three.js convention) 4x4 affine
+           "matrix": [f64; 16],
+           // OR decomposed, applied AFTER the Y-up->Z-up orientation:
+           "translation": [f64; 3],
+           "rotation_deg": [f64; 3],     // XYZ euler degrees
+           "quaternion":   [f64; 4],     // x,y,z,w (wins over rotation_deg)
+           "scale": f64 | [f64; 3]
+        }
+     }
+       Aliases accepted: commit / latest_commit for commit_hash; id for
+       member_id; name for project_name.
+
+   Member GEOMETRY is never fetched from a member-supplied URL. It is loaded
+   only from the existing, same-origin per-project bridge endpoints, keyed by
+   (project_id, commit_hash):
+     GET /v1/projects/:project_id/render/:commit_hash/status   (artifact)
+     manifest resource URIs (validated same-origin)            (artifact tiles)
+     GET /v1/projects/:project_id/ifc/:commit_hash             (raw IFC fallback)
+
+   Federation renders geometry only. It makes no cross-project semantic-diff or
+   model-merge claims.
+   =========================================================================== */
+
+const FED_UP_AXIS_FIX = Math.PI / 2;
+const FED_RX = new THREE.Matrix4().makeRotationX(FED_UP_AXIS_FIX);
+const FED_DEG = Math.PI / 180;
+
+let fedViewer = null;
+let fedActive = false;
+let fedList = [];
+let fedListLoaded = false;
+let fedCurrentId = null;
+let fedSelectSeq = 0;
+
+function fedAbortError() { return new DOMException('Federation load superseded', 'AbortError'); }
+
+function fedIsFullCommitHash(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value);
+}
+
+// Resolve an artifact/object URI against this bridge only. A member descriptor
+// can never point geometry loads at an external origin.
+function fedSameOriginUrl(uri) {
+  if (!uri || typeof uri !== 'string') throw new Error('missing artifact resource URI');
+  const url = new URL(uri, window.location.origin);
+  if (url.origin !== window.location.origin) throw new Error('artifact resource must use this bridge');
+  return url.href;
+}
+
+function fedFiniteNumber(value) { return Number.isFinite(value) ? value : 0; }
+
+// Normalize a member transform into a THREE.Matrix4. The local federation API
+// supplies `rows` as a validated row-major matrix; Three.js stores matrices
+// column-major, so transpose it deliberately. Malformed transforms are
+// rejected rather than silently treated as identity, which could put an
+// incorrectly registered discipline model in the wrong place.
+function fedNormalizeTransform(t) {
+  if (!t || typeof t !== 'object') return new THREE.Matrix4();
+  const m = new THREE.Matrix4();
+  if (Array.isArray(t.rows) && t.rows.length === 4
+    && t.rows.every(row => Array.isArray(row) && row.length === 4 && row.every(Number.isFinite))) {
+    const rows = t.rows;
+    m.set(
+      rows[0][0], rows[0][1], rows[0][2], rows[0][3],
+      rows[1][0], rows[1][1], rows[1][2], rows[1][3],
+      rows[2][0], rows[2][1], rows[2][2], rows[2][3],
+      rows[3][0], rows[3][1], rows[3][2], rows[3][3]
+    );
+  } else if (Array.isArray(t.matrix) && t.matrix.length === 16 && t.matrix.every(Number.isFinite)) {
+    m.fromArray(t.matrix);
+  } else if ('rows' in t || 'matrix' in t) {
+    return null;
+  } else {
+    const tr = Array.isArray(t.translation) && t.translation.length === 3 ? t.translation : [0, 0, 0];
+    const pos = new THREE.Vector3(fedFiniteNumber(tr[0]), fedFiniteNumber(tr[1]), fedFiniteNumber(tr[2]));
+    const quat = new THREE.Quaternion();
+    if (Array.isArray(t.quaternion) && t.quaternion.length === 4 && t.quaternion.every(Number.isFinite)) {
+      quat.set(t.quaternion[0], t.quaternion[1], t.quaternion[2], t.quaternion[3]);
+      if (quat.lengthSq() > 0) quat.normalize(); else quat.identity();
+    } else if (Array.isArray(t.rotation_deg) && t.rotation_deg.length === 3 && t.rotation_deg.every(Number.isFinite)) {
+      quat.setFromEuler(new THREE.Euler(t.rotation_deg[0] * FED_DEG, t.rotation_deg[1] * FED_DEG, t.rotation_deg[2] * FED_DEG, 'XYZ'));
+    }
+    const scale = new THREE.Vector3(1, 1, 1);
+    if (typeof t.scale === 'number' && Number.isFinite(t.scale) && t.scale !== 0) scale.setScalar(t.scale);
+    else if (Array.isArray(t.scale) && t.scale.length === 3 && t.scale.every(Number.isFinite)) {
+      scale.set(t.scale[0] || 1, t.scale[1] || 1, t.scale[2] || 1);
+    }
+    m.compose(pos, quat, scale);
+  }
+  return m.elements.every(Number.isFinite) ? m : null;
+}
+
+function fedNormalizeMember(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const projectId = raw.source_project_id || raw.project_id || raw.projectId;
+  const commit = raw.commit_hash || raw.commit || raw.latest_commit;
+  if (typeof projectId !== 'string' || !projectId) return null;
+  if (typeof commit !== 'string' || !commit) return null;
+  const memberId = String(raw.member_id || raw.id || (projectId + ':' + commit));
+  const name = raw.display_name || raw.name || raw.project_name || projectId;
+  const discipline = (typeof raw.discipline === 'string' && raw.discipline.trim()) ? raw.discipline.trim() : 'Uncategorized';
+  const transform = fedNormalizeTransform(raw.transform);
+  if (!transform) return null;
+  return {
+    memberId,
+    projectId,
+    commit,
+    name: String(name),
+    discipline,
+    transform,
+    visible: raw.visible !== false
+  };
+}
+
+// Build a standalone selection-overlay geometry from a source geometry's
+// indexed triangle ranges. Standalone so disposing a selection never touches
+// the GPU buffers shared by its source tile.
+function fedBuildSelectionGeometry(sourceGeometry, ranges) {
+  const sourceIndex = sourceGeometry && sourceGeometry.getIndex && sourceGeometry.getIndex();
+  const sourcePositions = sourceGeometry && sourceGeometry.getAttribute && sourceGeometry.getAttribute('position');
+  if (!sourceIndex || !sourcePositions || !Array.isArray(ranges) || !ranges.length) return null;
+  let total = 0;
+  for (const range of ranges) {
+    if (Number.isFinite(range.first_triangle) && Number.isFinite(range.triangle_count)) total += range.triangle_count * 3;
+  }
+  if (!total) return null;
+  const positions = new Float32Array(total * 3);
+  let cursor = 0;
+  for (const range of ranges) {
+    if (!Number.isFinite(range.first_triangle) || !Number.isFinite(range.triangle_count)) continue;
+    const start = range.first_triangle * 3;
+    const count = range.triangle_count * 3;
+    for (let offset = 0; offset < count; offset += 1) {
+      const vertex = sourceIndex.array[start + offset];
+      positions[cursor * 3] = sourcePositions.getX(vertex);
+      positions[cursor * 3 + 1] = sourcePositions.getY(vertex);
+      positions[cursor * 3 + 2] = sourcePositions.getZ(vertex);
+      cursor += 1;
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  return geometry;
+}
+
+function fedFindIndexedMesh(object) {
+  if (!object) return null;
+  let found = null;
+  object.traverse(item => {
+    if (found) return;
+    if (item.isMesh && item.geometry && item.geometry.getIndex && item.geometry.getIndex()) found = item;
+  });
+  return found;
+}
+
+// One federation member: its own transform/orientation groups, abort signal,
+// artifact tile bookkeeping, raw-IFC fallback, semantic index(es), selection,
+// and disposal. Nothing here reaches outside this member except the shared
+// scheduler/eviction budget owned by the viewer.
+class FederationMember {
+  constructor(descriptor, viewer) {
+    this.viewer = viewer;
+    this.id = descriptor.memberId;
+    this.projectId = descriptor.projectId;
+    this.commit = descriptor.commit;
+    this.name = descriptor.name;
+    this.discipline = descriptor.discipline;
+    this.transform = descriptor.transform;
+    this.userVisible = descriptor.visible !== false;
+    this.status = 'pending';
+    this.message = 'Queued';
+    this.kind = null;
+    this.disposed = false;
+    this.abort = null;
+    this.startToken = 0;
+    // Outer group carries the world affine transform (matrixAutoUpdate off so
+    // the exact matrix from the descriptor is used verbatim). Inner group
+    // carries the Y-up -> Z-up orientation. Geometry lives under the inner
+    // group, so world = transform * orientation * local — i.e. the affine
+    // transform is applied AFTER coordinate orientation.
+    this.group = new THREE.Group();
+    this.group.name = 'fed-member ' + this.id;
+    this.group.matrixAutoUpdate = false;
+    this.group.matrix.copy(this.transform);
+    this.group.userData.vexMemberId = this.id;
+    this.orientGroup = new THREE.Group();
+    this.orientGroup.rotation.x = FED_UP_AXIS_FIX;
+    this.orientGroup.userData.vexMemberId = this.id;
+    this.group.add(this.orientGroup);
+    this.group.updateMatrixWorld(true);
+    this.worldMatrix = this.transform.clone().multiply(FED_RX);
+    // Artifact bookkeeping (scoped to this member; never shared).
+    this.manifest = null;
+    this.tileDescriptors = new Map();
+    this.tileRecords = new Map();
+    this.tileLoading = new Set();
+    this.semanticIndexes = new Map();
+    this.semanticIndexGlobal = null;
+    this.groups = new Map();
+    this.residentBytes = 0;
+    this.baseTileId = null;
+    this.selectedId = null;
+    this.selectedGroupId = null;
+    this.pendingSelection = null;
+    this.selectionOverlay = null;
+    // Raw IFC fallback ownership.
+    this.ifcLoader = null;
+    this.ifcModel = null;
+  }
+
+  groupIdOf(tile) {
+    if (!tile) return null;
+    return (typeof tile.group === 'string' && tile.group) ? tile.group : tile.tile_id;
+  }
+
+  usesTileLocalIndex() {
+    return !!this.manifest && !(this.manifest.semantic_index && this.manifest.semantic_index.artifact);
+  }
+
+  semanticIndexResource(tile) {
+    if (this.manifest && this.manifest.semantic_index && this.manifest.semantic_index.artifact) return this.manifest.semantic_index.artifact;
+    if (tile && tile.semantic_index && tile.semantic_index.artifact) return tile.semantic_index.artifact;
+    return null;
+  }
+
+  registerTiles(tiles) {
+    for (const tile of tiles || []) {
+      if (!tile || !tile.tile_id) continue;
+      this.tileDescriptors.set(tile.tile_id, tile);
+      const groupId = this.groupIdOf(tile);
+      let group = this.groups.get(groupId);
+      if (!group) { group = {id: groupId, exact: null, coarse: null}; this.groups.set(groupId, group); }
+      if (Number(tile.lod) > 0) {
+        if (!group.coarse || Number(tile.geometric_error) > Number(group.coarse.geometric_error)) group.coarse = tile;
+      } else {
+        group.exact = tile;
+      }
+    }
+  }
+
+  effectiveVisible() {
+    if (!this.userVisible) return false;
+    if (this.viewer.hiddenDisciplines.has(this.discipline)) return false;
+    if (this.viewer.isolatedMemberId && this.viewer.isolatedMemberId !== this.id) return false;
+    return true;
+  }
+
+  applyVisibility() {
+    const visible = this.effectiveVisible();
+    this.group.visible = visible;
+    if (visible && this.kind === 'artifact') this.refreshVisibility();
+  }
+
+  worldCenter(bounds) {
+    return new THREE.Vector3(
+      (bounds.min[0] + bounds.max[0]) / 2,
+      (bounds.min[1] + bounds.max[1]) / 2,
+      (bounds.min[2] + bounds.max[2]) / 2
+    ).applyMatrix4(this.worldMatrix);
+  }
+
+  groupBounds(group) {
+    const source = (group && group.exact) || (group && group.coarse);
+    const bounds = source && source.bounds;
+    if (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max)
+      || !bounds.min.every(Number.isFinite) || !bounds.max.every(Number.isFinite)) return null;
+    const box = new THREE.Box3();
+    for (const x of [bounds.min[0], bounds.max[0]]) {
+      for (const y of [bounds.min[1], bounds.max[1]]) {
+        for (const z of [bounds.min[2], bounds.max[2]]) {
+          box.expandByPoint(new THREE.Vector3(x, y, z).applyMatrix4(this.worldMatrix));
+        }
+      }
+    }
+    if (box.isEmpty()) return null;
+    return {center: box.getCenter(new THREE.Vector3()), radius: 0.5 * box.getSize(new THREE.Vector3()).length()};
+  }
+
+  groupNearCamera(group) {
+    const info = this.groupBounds(group);
+    if (!info) return false;
+    const distance = info.center.distanceTo(this.viewer.modelCamera.position);
+    if (!(distance > 0)) return true;
+    return (info.radius / distance) > this.viewer.exactLodRatio;
+  }
+
+  groupDesiresExact(groupId) {
+    const group = this.groups.get(groupId);
+    if (!group || !group.coarse) return true;
+    if (!group.exact) return false;
+    if (this.selectedGroupId === groupId) return true;
+    return this.groupNearCamera(group);
+  }
+
+  preferredGroupTileId(groupId) {
+    const group = this.groups.get(groupId);
+    if (!group) return groupId;
+    const exactId = group.exact && group.exact.tile_id;
+    const coarseId = group.coarse && group.coarse.tile_id;
+    return this.groupDesiresExact(groupId) ? (exactId || coarseId) : (coarseId || exactId);
+  }
+
+  visibleGroupTileId(groupId) {
+    const group = this.groups.get(groupId);
+    if (!group) return groupId;
+    const exactId = group.exact && group.exact.tile_id;
+    const coarseId = group.coarse && group.coarse.tile_id;
+    const desiresExact = this.groupDesiresExact(groupId);
+    const preferred = desiresExact ? (exactId || coarseId) : (coarseId || exactId);
+    const other = desiresExact ? coarseId : exactId;
+    if (preferred && this.tileRecords.has(preferred)) return preferred;
+    if (other && this.tileRecords.has(other)) return other;
+    return preferred;
+  }
+
+  tileWanted(tileId) {
+    if (!this.effectiveVisible()) return false;
+    const tile = this.tileDescriptors.get(tileId);
+    if (!tile) return false;
+    return this.preferredGroupTileId(this.groupIdOf(tile)) === tileId;
+  }
+
+  tileVisible(tileId) {
+    if (!tileId) return true;
+    const tile = this.tileDescriptors.get(tileId);
+    const groupId = tile ? this.groupIdOf(tile) : tileId;
+    return this.visibleGroupTileId(groupId) === tileId;
+  }
+
+  refreshVisibility() {
+    for (const child of this.orientGroup.children) {
+      const tileId = child.userData && child.userData.vexTileId;
+      if (!tileId) continue;
+      child.visible = this.tileVisible(tileId);
+    }
+  }
+
+  pendingTileCandidates() {
+    const out = [];
+    if (this.kind !== 'artifact' || !this.effectiveVisible()) return out;
+    for (const tile of this.tileDescriptors.values()) {
+      const tileId = tile.tile_id;
+      if (!tileId || this.tileRecords.has(tileId) || this.tileLoading.has(tileId)) continue;
+      if (!this.tileWanted(tileId)) continue;
+      out.push(tile);
+    }
+    return out;
+  }
+
+  worldBoundsFromManifest() {
+    if (this.kind !== 'artifact' || !this.manifest) return null;
+    const box = new THREE.Box3();
+    for (const tile of this.manifest.tiles || []) {
+      const bounds = tile && tile.bounds;
+      if (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max)
+        || !bounds.min.every(Number.isFinite) || !bounds.max.every(Number.isFinite)) continue;
+      for (const x of [bounds.min[0], bounds.max[0]]) {
+        for (const y of [bounds.min[1], bounds.max[1]]) {
+          for (const z of [bounds.min[2], bounds.max[2]]) {
+            box.expandByPoint(new THREE.Vector3(x, y, z).applyMatrix4(this.worldMatrix));
+          }
+        }
+      }
+    }
+    return box.isEmpty() ? null : box;
+  }
+
+  worldBounds() {
+    const fromManifest = this.worldBoundsFromManifest();
+    if (fromManifest && !fromManifest.isEmpty()) return fromManifest;
+    if (this.orientGroup.children.length) {
+      this.group.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(this.group);
+      if (!box.isEmpty()) return box;
+    }
+    return null;
+  }
+
+  setSemanticIndex(tile, index) {
+    if (!index) return;
+    const tileId = tile && tile.tile_id;
+    if (tileId) this.semanticIndexes.set(tileId, index);
+    this.semanticIndexGlobal = index;
+  }
+
+  async loadTileScene(tile, signal, token) {
+    const buffer = await this.viewer.fetchResource(tile.artifact, signal);
+    if (this.disposed || token !== this.viewer.loadToken) throw fedAbortError();
+    const scene = await new Promise((resolve, reject) => {
+      this.viewer.gltfLoader.parse(buffer, '', gltf => resolve(gltf.scene || new THREE.Group()), reject);
+    });
+    if (this.disposed || token !== this.viewer.loadToken) { this.viewer.disposeObject(scene); throw fedAbortError(); }
+    scene.name = 'fed ' + this.id + ' tile ' + tile.tile_id;
+    scene.userData.vexTileId = tile.tile_id;
+    scene.userData.vexMemberId = this.id;
+    return scene;
+  }
+
+  async fetchSemanticIndexForTile(tile, signal) {
+    const resource = this.semanticIndexResource(tile);
+    if (!resource) return null;
+    const buffer = await this.viewer.fetchResource(resource, signal);
+    return JSON.parse(new TextDecoder().decode(buffer));
+  }
+
+  async makeIfcLoader() {
+    const loader = new IFCLoader();
+    loader.ifcManager.setWasmPath('/assets/viewer/web-ifc/');
+    try {
+      await loader.ifcManager.useWebWorkers(true, '/assets/viewer/web-ifc-three/IFCWorker.js');
+    } catch (error) {
+      console.warn('Federation IFC web worker unavailable; parsing on the main thread', error);
+    }
+    if (loader.ifcManager.applyWebIfcConfig) {
+      // Render artifacts are generated with origin normalization enabled.
+      // Keep the IFC fallback on the identical local-coordinate convention so
+      // the same verified member transform lands both representations together.
+      await loader.ifcManager.applyWebIfcConfig({COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true});
+    }
+    this.ifcLoader = loader;
+    return loader;
+  }
+
+  async start(token) {
+    this.startToken = token;
+    this.status = 'starting';
+    this.message = 'Checking render artifact…';
+    this.viewer.renderMemberList();
+    try {
+      let handled = false;
+      if (fedIsFullCommitHash(this.commit)) {
+        try {
+          handled = await this.startArtifact(token);
+        } catch (error) {
+          if (error && error.name === 'AbortError') return;
+          console.warn('Federation member ' + this.id + ' artifact load failed:', error);
+          handled = false;
+        }
+      }
+      if (this.disposed || token !== this.viewer.loadToken) return;
+      if (!handled) {
+        const reason = fedIsFullCommitHash(this.commit)
+          ? 'Render artifact unavailable; raw IFC fallback…'
+          : 'Abbreviated commit; raw IFC fallback…';
+        await this.startIfcFallback(token, reason);
+      }
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+      if (this.disposed || token !== this.viewer.loadToken) return;
+      this.setFailed(error && error.message);
+      return;
+    }
+    if (this.disposed || token !== this.viewer.loadToken) return;
+    this.viewer.onMemberStartupSettled(this);
+  }
+
+  async startArtifact(token) {
+    const controller = new AbortController();
+    this.abort = controller;
+    const statusUrl = '/v1/projects/' + encodeURIComponent(this.projectId) + '/render/' + encodeURIComponent(this.commit) + '/status';
+    const response = await fetch(statusUrl, {headers, signal: controller.signal});
+    if (!response.ok) return false;
+    const status = await response.json();
+    if (this.disposed || token !== this.viewer.loadToken) throw fedAbortError();
+    if (!status || status.status !== 'ready' || !status.manifest) return false;
+    const manifest = status.manifest;
+    if (status.commit_hash !== this.commit || manifest.commit_hash !== this.commit || manifest.project_id !== this.projectId) return false;
+    const tiles = (manifest.tiles || []).filter(tile => tile && tile.artifact && /gltf-binary/i.test(tile.artifact.content_type || ''));
+    if (!tiles.length) return false;
+    tiles.sort((a, b) => (b.lod - a.lod) || (b.geometric_error - a.geometric_error) || (a.tile_id < b.tile_id ? -1 : a.tile_id > b.tile_id ? 1 : 0));
+    this.manifest = manifest;
+    this.kind = 'artifact';
+    this.registerTiles(tiles);
+    this.baseTileId = tiles[0].tile_id;
+    const firstScene = await this.loadTileScene(tiles[0], controller.signal, token);
+    if (this.disposed || token !== this.viewer.loadToken) { this.viewer.disposeObject(firstScene); throw fedAbortError(); }
+    const bytes = Number(tiles[0].artifact && tiles[0].artifact.byte_length) || 0;
+    this.viewer.reclaimForTile(bytes, this, tiles[0].tile_id);
+    firstScene.visible = this.effectiveVisible() && this.tileVisible(tiles[0].tile_id);
+    this.orientGroup.add(firstScene);
+    this.viewer.applyMaterialQuality(firstScene);
+    this.tileRecords.set(tiles[0].tile_id, {scene: firstScene, bytes, lastUsedAt: performance.now()});
+    this.residentBytes += bytes;
+    this.viewer.residentBytes += bytes;
+    this.applyVisibility();
+    this.fetchSemanticIndexForTile(tiles[0], controller.signal)
+      .then(index => { if (!this.disposed && token === this.viewer.loadToken) this.setSemanticIndex(tiles[0], index); })
+      .catch(() => {});
+    this.setReady();
+    return true;
+  }
+
+  async startIfcFallback(token, reason) {
+    this.kind = null;
+    this.status = 'starting';
+    this.message = reason || 'Loading raw IFC…';
+    this.viewer.renderMemberList();
+    const controller = new AbortController();
+    this.abort = controller;
+    const url = '/v1/projects/' + encodeURIComponent(this.projectId) + '/ifc/' + encodeURIComponent(this.commit);
+    const response = await fetch(url, {headers, signal: controller.signal});
+    if (!response.ok) throw new Error(url + ' -> ' + response.status);
+    const buffer = await response.arrayBuffer();
+    if (this.disposed || token !== this.viewer.loadToken) throw fedAbortError();
+    const loader = await this.makeIfcLoader();
+    if (this.disposed || token !== this.viewer.loadToken) throw fedAbortError();
+    const model = await loader.parse(buffer);
+    if (this.disposed || token !== this.viewer.loadToken) { this.releaseIfc(model); throw fedAbortError(); }
+    this.ifcModel = model;
+    this.kind = 'ifc';
+    model.userData.vexMemberId = this.id;
+    this.orientGroup.add(model);
+    this.viewer.applyMaterialQuality(model);
+    this.applyVisibility();
+    this.status = 'ok';
+    this.message = 'raw IFC fallback';
+    this.viewer.renderMemberList();
+  }
+
+  setReady() {
+    this.status = 'ok';
+    const total = (this.manifest && this.manifest.tiles) ? this.manifest.tiles.length : this.tileRecords.size;
+    this.message = 'artifact · ' + this.tileRecords.size + '/' + total + ' tiles';
+    this.viewer.renderMemberList();
+  }
+
+  setFailed(message) {
+    this.status = 'failed';
+    this.message = message ? ('failed: ' + message) : 'failed to load';
+    this.viewer.renderMemberList();
+    this.viewer.updateMeta();
+  }
+
+  async commitTile(tile, token) {
+    if (this.disposed || token !== this.viewer.loadToken || !this.abort) return;
+    const signal = this.abort.signal;
+    const scenePromise = this.loadTileScene(tile, signal, token);
+    const indexPromise = this.fetchSemanticIndexForTile(tile, signal);
+    let scene;
+    let index;
+    try {
+      [scene, index] = await Promise.all([scenePromise, indexPromise]);
+    } catch (error) {
+      scenePromise.then(loaded => this.viewer.disposeObject(loaded)).catch(() => {});
+      if (error && error.name === 'AbortError') return;
+      if (this.disposed || token !== this.viewer.loadToken) return;
+      console.warn('Federation member ' + this.id + ' tile failed:', error);
+      this.message = 'artifact · ' + this.tileRecords.size + ' tiles (some unavailable)';
+      this.viewer.renderMemberList();
+      return;
+    }
+    if (this.disposed || token !== this.viewer.loadToken) { this.viewer.disposeObject(scene); return; }
+    const bytes = Number(tile.artifact && tile.artifact.byte_length) || 0;
+    this.viewer.reclaimForTile(bytes, this, tile.tile_id);
+    scene.visible = this.effectiveVisible() && this.tileVisible(tile.tile_id);
+    this.orientGroup.add(scene);
+    this.viewer.applyMaterialQuality(scene);
+    this.tileRecords.set(tile.tile_id, {scene, bytes, lastUsedAt: performance.now()});
+    this.setSemanticIndex(tile, index);
+    this.residentBytes += bytes;
+    this.viewer.residentBytes += bytes;
+    this.refreshVisibility();
+    this.maybeFinalizeSelection();
+    this.setReady();
+    this.viewer.updateMeta();
+  }
+
+  addOverlayFor(sourceMesh, ranges) {
+    this.clearSelectionOverlay();
+    const geometry = fedBuildSelectionGeometry(sourceMesh && sourceMesh.geometry, ranges);
+    if (!geometry) return;
+    const overlay = new THREE.Mesh(geometry, this.viewer.selectionMaterial);
+    overlay.renderOrder = 2;
+    overlay.userData.vexFedOverlay = true;
+    this.orientGroup.updateMatrixWorld(true);
+    sourceMesh.updateMatrixWorld(true);
+    const relative = new THREE.Matrix4().copy(this.orientGroup.matrixWorld).invert().multiply(sourceMesh.matrixWorld);
+    overlay.matrixAutoUpdate = false;
+    overlay.matrix.copy(relative);
+    this.orientGroup.add(overlay);
+    this.selectionOverlay = overlay;
+    this.viewer.selectionOwner = this;
+  }
+
+  clearSelectionOverlay() {
+    if (this.selectionOverlay) {
+      if (this.selectionOverlay.parent) this.selectionOverlay.parent.remove(this.selectionOverlay);
+      if (this.selectionOverlay.userData && this.selectionOverlay.userData.vexFedOverlay && this.selectionOverlay.geometry) {
+        this.selectionOverlay.geometry.dispose();
+      }
+      this.selectionOverlay = null;
+    }
+    this.selectedId = null;
+    this.selectedGroupId = null;
+    this.pendingSelection = null;
+  }
+
+  resolveArtifactHit(hit) {
+    let tileId = null;
+    for (let object = hit.object; object; object = object.parent) {
+      if (object.userData && object.userData.vexTileId) { tileId = object.userData.vexTileId; break; }
+    }
+    let index;
+    if (this.usesTileLocalIndex()) {
+      if (!tileId) return false;
+      index = this.semanticIndexes.get(tileId);
+      if (!index) return false;
+    } else {
+      index = this.semanticIndexGlobal;
+    }
+    if (!index || !Array.isArray(index.entries)) return false;
+    if (tileId) { const record = this.tileRecords.get(tileId); if (record) record.lastUsedAt = performance.now(); }
+    const entry = index.entries.find(candidate => (candidate.triangle_ranges || []).some(range =>
+      Number.isFinite(range.first_triangle) && Number.isFinite(range.triangle_count)
+      && hit.faceIndex >= range.first_triangle && hit.faceIndex < range.first_triangle + range.triangle_count));
+    if (!entry) return false;
+    this.viewer.clearSelection();
+    this.viewer.selectionOwner = this;
+    this.selectedId = Number.isFinite(entry.express_id) ? entry.express_id : null;
+    const tile = tileId ? this.tileDescriptors.get(tileId) : null;
+    const groupId = tile ? this.groupIdOf(tile) : (tileId || null);
+    this.selectedGroupId = groupId;
+    const group = groupId ? this.groups.get(groupId) : null;
+    const isCoarseHit = tile ? Number(tile.lod) > 0 : false;
+    if (isCoarseHit && group && group.exact) {
+      this.pendingSelection = {
+        groupId,
+        expressId: Number.isFinite(entry.express_id) ? entry.express_id : null,
+        globalId: entry.global_id || null
+      };
+      this.viewer.showSelectionProps(this, entry.global_id || null, Number.isFinite(entry.express_id) ? entry.express_id : 'artifact', null);
+      const finalized = this.maybeFinalizeSelection();
+      this.refreshVisibility();
+      if (!finalized) this.viewer.scheduleTiles();
+      return true;
+    }
+    const range = (entry.triangle_ranges || []).find(candidate =>
+      hit.faceIndex >= candidate.first_triangle && hit.faceIndex < candidate.first_triangle + candidate.triangle_count);
+    this.addOverlayFor(hit.object, range ? [range] : []);
+    this.viewer.showSelectionProps(this, entry.global_id || null, Number.isFinite(entry.express_id) ? entry.express_id : 'artifact', null);
+    return true;
+  }
+
+  maybeFinalizeSelection() {
+    const pending = this.pendingSelection;
+    if (!pending) return false;
+    const group = this.groups.get(pending.groupId);
+    const exactTile = group && group.exact;
+    if (!exactTile) { this.pendingSelection = null; return true; }
+    const record = this.tileRecords.get(exactTile.tile_id);
+    const exactIndex = this.usesTileLocalIndex() ? this.semanticIndexes.get(exactTile.tile_id) : this.semanticIndexGlobal;
+    if (!record || !record.scene || !exactIndex || !Array.isArray(exactIndex.entries)) return false;
+    const entry = exactIndex.entries.find(candidate =>
+      (pending.expressId !== null && candidate.express_id === pending.expressId)
+      || (pending.globalId && candidate.global_id === pending.globalId));
+    if (!entry) { this.pendingSelection = null; return true; }
+    const mesh = fedFindIndexedMesh(record.scene);
+    if (!mesh) { this.pendingSelection = null; return true; }
+    record.lastUsedAt = performance.now();
+    this.addOverlayFor(mesh, entry.triangle_ranges || []);
+    this.pendingSelection = null;
+    return true;
+  }
+
+  resolveIfcHit(hit) {
+    if (!this.ifcModel) return false;
+    let expressId;
+    try {
+      expressId = this.ifcModel.getExpressId(hit.object.geometry, hit.faceIndex);
+    } catch (_) {
+      return false;
+    }
+    if (!Number.isFinite(expressId)) return false;
+    this.viewer.clearSelection();
+    this.viewer.selectionOwner = this;
+    this.selectedId = expressId;
+    try {
+      const subset = this.ifcModel.createSubset({
+        ids: [expressId],
+        material: this.viewer.selectionMaterialStd,
+        scene: this.orientGroup,
+        removePrevious: true,
+        customID: 'fed-sel-' + this.id
+      });
+      this.selectionOverlay = subset;
+    } catch (error) {
+      console.warn('Federation IFC subset failed:', error);
+    }
+    this.ifcModel.getItemProperties(expressId, true)
+      .then(props => {
+        if (this.disposed) return;
+        const gid = props && (props.GlobalId && (props.GlobalId.value || props.GlobalId));
+        this.viewer.showSelectionProps(this, (typeof gid === 'string' ? gid : null), expressId, props);
+      })
+      .catch(() => { if (!this.disposed) this.viewer.showSelectionProps(this, null, expressId, null); });
+    return true;
+  }
+
+  resolveHit(hit) {
+    if (!this.effectiveVisible()) return false;
+    if (this.kind === 'ifc') return this.resolveIfcHit(hit);
+    if (this.kind === 'artifact') {
+      let tileId = null;
+      for (let object = hit.object; object; object = object.parent) {
+        if (object.userData && object.userData.vexTileId) { tileId = object.userData.vexTileId; break; }
+      }
+      if (tileId && !this.tileVisible(tileId)) return false;
+      return this.resolveArtifactHit(hit);
+    }
+    return false;
+  }
+
+  releaseIfc(model) {
+    const target = model || this.ifcModel;
+    try { if (target && typeof target.close === 'function') target.close(); } catch (_) {}
+    try {
+      if (this.ifcLoader && this.ifcLoader.ifcManager && typeof this.ifcLoader.ifcManager.dispose === 'function') {
+        this.ifcLoader.ifcManager.dispose();
+      }
+    } catch (_) {}
+    this.ifcLoader = null;
+  }
+
+  dispose() {
+    this.disposed = true;
+    if (this.abort) { try { this.abort.abort(); } catch (_) {} this.abort = null; }
+    if (this.selectionOverlay && this.selectionOverlay.parent) this.selectionOverlay.parent.remove(this.selectionOverlay);
+    if (this.selectionOverlay && this.selectionOverlay.userData && this.selectionOverlay.userData.vexFedOverlay && this.selectionOverlay.geometry) {
+      this.selectionOverlay.geometry.dispose();
+    }
+    this.selectionOverlay = null;
+    this.viewer.residentBytes = Math.max(0, this.viewer.residentBytes - this.residentBytes);
+    this.residentBytes = 0;
+    if (this.group.parent) this.group.parent.remove(this.group);
+    this.viewer.disposeObject(this.group);
+    this.tileRecords.clear();
+    this.tileDescriptors.clear();
+    this.tileLoading.clear();
+    this.semanticIndexes.clear();
+    this.semanticIndexGlobal = null;
+    this.groups.clear();
+    if (this.ifcModel || this.ifcLoader) this.releaseIfc(this.ifcModel);
+    this.ifcModel = null;
+  }
+}
+
+// The federation viewer: one scene/renderer/camera set, a bounded startup +
+// tile scheduler shared across members, cross-member camera fitting, namespaced
+// selection, and visibility/isolation. It never touches the single-project
+// viewer's state.
+class FederationViewer {
+  constructor(refs) {
+    this.modelCanvas = refs.modelCanvas;
+    this.planCanvas = refs.planCanvas;
+    this.modelStatus = refs.modelStatus;
+    this.planStatus = refs.planStatus;
+    this.modelMeta = refs.modelMeta;
+    this.planMeta = refs.planMeta;
+    this.membersEl = refs.membersEl;
+    this.disciplinesEl = refs.disciplinesEl;
+    this.memberCountEl = refs.memberCountEl;
+    this.members = [];
+    this.membersById = new Map();
+    this.loadToken = 0;
+    this.active = false;
+    this.initialized = false;
+    this.initFailed = false;
+    this.currentName = '';
+    this.hasFitted = false;
+    this.userInteracted = false;
+    this.isolatedMemberId = null;
+    this.hiddenDisciplines = new Set();
+    this.selectionOwner = null;
+    this.animationFrame = null;
+    // Bounded concurrency: at most maxConcurrentStarts members start (status +
+    // coarse tile) at once, and at most maxTileInflight tile fetches run across
+    // ALL members. One slow/failed member can never starve or block others.
+    this.maxConcurrentStarts = 3;
+    this.maxTileInflight = 4;
+    this.startsInflight = 0;
+    this.tileInflight = 0;
+    this.startQueue = [];
+    this.schedulePending = false;
+    // Shared GPU budget across every member's resident tiles.
+    this.residentBytes = 0;
+    this.memoryBudgetBytes = 768 * 1024 * 1024;
+    this.exactLodRatio = 0.3;
+    this.gltfLoader = new GLTFLoader();
+    this.raycaster = new THREE.Raycaster();
+    this.pointer = new THREE.Vector2();
+    this.downAt = null;
+    this.modelBox = null;
+  }
+
+  ensureInit() {
+    if (this.initialized || this.initFailed) return;
+    try {
+      this.scene = new THREE.Scene();
+      const bg = this.colorFromWorkspace('--viewport-bg', '#202c32');
+      this.scene.background = bg;
+      const hemisphere = new THREE.HemisphereLight(0xe8f4ff, 0x52636b, 1.2);
+      const key = new THREE.DirectionalLight(0xfff5e8, 1.5);
+      key.position.set(45, -35, 72);
+      const fill = new THREE.DirectionalLight(0xb8d8ff, 0.5);
+      fill.position.set(-38, 28, 36);
+      this.lighting = {hemisphere, key, fill};
+      this.scene.add(hemisphere, key, key.target, fill, fill.target);
+      this.helpers = new THREE.Group();
+      this.scene.add(this.helpers);
+      this.modelCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000000);
+      this.modelCamera.up.set(0, 0, 1);
+      this.modelCamera.position.set(60, -60, 45);
+      this.planCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000000);
+      this.planCamera.up.set(0, 1, 0);
+      this.modelRenderer = this.makeRenderer(this.modelCanvas);
+      this.planRenderer = this.makeRenderer(this.planCanvas);
+      this.controls = new OrbitControls(this.modelCamera, this.modelCanvas);
+      this.controls.enableDamping = true;
+      this.controls.dampingFactor = 0.08;
+      this.controls.screenSpacePanning = true;
+      this.controls.mouseButtons = {LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN};
+      this.controls.touches = {ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN};
+      if ('zoomToCursor' in this.controls) this.controls.zoomToCursor = true;
+      this.controls.addEventListener('change', () => this.scheduleTiles());
+      this.selectionMaterial = new THREE.MeshBasicMaterial({color: 0x4b8fe3, transparent: true, opacity: 0.72, depthTest: false, side: THREE.DoubleSide});
+      this.selectionMaterial.userData.vexShared = true;
+      this.selectionMaterialStd = new THREE.MeshStandardMaterial({color: 0x4b8fe3, transparent: true, opacity: 0.85, depthTest: false, side: THREE.DoubleSide, roughness: 0.42, metalness: 0});
+      this.selectionMaterialStd.userData.vexShared = true;
+      this.modelCanvas.addEventListener('pointerdown', event => { this.downAt = {x: event.clientX, y: event.clientY}; this.userInteracted = true; });
+      this.modelCanvas.addEventListener('pointerup', event => this.handlePointerUp(event));
+      this.modelCanvas.addEventListener('wheel', () => { this.userInteracted = true; }, {passive: true});
+      if (window.ResizeObserver) {
+        this.resizeObserver = new ResizeObserver(() => this.resize());
+        if (this.modelCanvas.parentElement) this.resizeObserver.observe(this.modelCanvas.parentElement);
+        if (this.planCanvas.parentElement) this.resizeObserver.observe(this.planCanvas.parentElement);
+      }
+      this.initialized = true;
+      this.resize();
+    } catch (error) {
+      this.initFailed = true;
+      console.error('Federation 3D viewer unavailable:', error);
+      this.setStatus('3D preview unavailable on this machine (no WebGL).');
+    }
+  }
+
+  colorFromWorkspace(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    try { return new THREE.Color(value || fallback); } catch (_) { return new THREE.Color(fallback); }
+  }
+
+  makeRenderer(canvas) {
+    const renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: false});
+    if ('outputColorSpace' in renderer && THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
+    else if ('outputEncoding' in renderer && THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+    if (THREE.ACESFilmicToneMapping !== undefined) {
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = document.documentElement.dataset.theme === 'light' ? 0.95 : 1.08;
+    }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(this.colorFromWorkspace('--viewport-bg', '#202c32'), 1);
+    return renderer;
+  }
+
+  setActive(active) {
+    this.active = active;
+    if (active) {
+      this.ensureInit();
+      this.startAnimation();
+    } else {
+      this.stopAnimation();
+    }
+  }
+
+  applyMaterialQuality(object) {
+    if (!object) return;
+    object.traverse(item => {
+      const materials = Array.isArray(item.material) ? item.material : item.material ? [item.material] : [];
+      for (const material of materials) {
+        if (material.userData && material.userData.vexShared) continue;
+        material.toneMapped = !material.isMeshBasicMaterial;
+        if ('roughness' in material && Number.isFinite(material.roughness)) material.roughness = Math.max(0.35, material.roughness);
+        if ('metalness' in material && Number.isFinite(material.metalness)) material.metalness = Math.min(0.35, material.metalness);
+        material.needsUpdate = true;
+      }
+    });
+  }
+
+  disposeObject(object) {
+    if (!object) return;
+    object.traverse(item => {
+      if (item.geometry) item.geometry.dispose();
+      const materials = Array.isArray(item.material) ? item.material : item.material ? [item.material] : [];
+      for (const material of materials) {
+        if (material.userData && material.userData.vexShared) continue;
+        for (const value of Object.values(material)) { if (value && value.isTexture) value.dispose(); }
+        material.dispose();
+      }
+    });
+  }
+
+  async fetchResource(resource, signal) {
+    const url = fedSameOriginUrl(resource && resource.uri);
+    const response = await fetch(url, {headers, signal});
+    if (!response.ok) throw new Error(url + ' -> ' + response.status);
+    return response.arrayBuffer();
+  }
+
+  load(descriptor) {
+    this.ensureInit();
+    if (!this.initialized) { this.showEmpty('3D preview unavailable on this machine (no WebGL).'); return; }
+    this.unload();
+    this.currentName = descriptor.name || '';
+    this.hasFitted = false;
+    this.userInteracted = false;
+    const token = ++this.loadToken;
+    const members = (descriptor.members || []).map(entry => new FederationMember(entry, this));
+    this.members = members;
+    this.membersById = new Map(members.map(member => [member.id, member]));
+    for (const member of members) this.scene.add(member.group);
+    this.renderDisciplines();
+    this.renderMemberList();
+    if (!members.length) { this.showEmpty('This federation set has no members.'); this.updateMeta(); return; }
+    this.setStatus('Loading ' + members.length + ' member' + (members.length === 1 ? '' : 's') + '…');
+    this.startQueue = members.slice();
+    this.pumpStarts();
+    this.updateMeta();
+  }
+
+  unload() {
+    this.loadToken++;
+    this.clearSelection();
+    for (const member of this.members) member.dispose();
+    this.members = [];
+    this.membersById = new Map();
+    this.startQueue = [];
+    this.residentBytes = 0;
+    this.isolatedMemberId = null;
+    this.hiddenDisciplines = new Set();
+    this.modelBox = null;
+    if (this.helpers) {
+      while (this.helpers.children.length) {
+        const child = this.helpers.children.pop();
+        if (child.geometry) child.geometry.dispose();
+        const materials = Array.isArray(child.material) ? child.material : child.material ? [child.material] : [];
+        for (const material of materials) material.dispose();
+      }
+    }
+    this.renderDisciplines();
+    this.renderMemberList();
+    this.updateMeta();
+    this.setStatus('');
+  }
+
+  pumpStarts() {
+    while (this.startsInflight < this.maxConcurrentStarts && this.startQueue.length) {
+      const member = this.startQueue.shift();
+      if (!member || member.disposed) continue;
+      this.startsInflight += 1;
+      member.start(this.loadToken).finally(() => {
+        this.startsInflight -= 1;
+        this.pumpStarts();
+      });
+    }
+  }
+
+  onMemberStartupSettled(member) {
+    this.renderMemberList();
+    if (member.status === 'ok' && member.kind === 'artifact') this.scheduleTiles();
+    this.maybeAutoFit();
+    this.updateMeta();
+    if (this.members.some(m => m.status === 'ok')) this.setStatus('');
+  }
+
+  maybeAutoFit() {
+    if (this.userInteracted) return;
+    this.fitAll();
+  }
+
+  scheduleTiles() {
+    if (!this.active || !this.initialized) return;
+    for (const member of this.members) {
+      if (member.kind === 'artifact' && member.effectiveVisible()) member.refreshVisibility();
+    }
+    if (this.schedulePending) return;
+    this.schedulePending = true;
+    requestAnimationFrame(() => { this.schedulePending = false; this.pumpTiles(); });
+  }
+
+  pumpTiles() {
+    if (!this.active || !this.initialized) return;
+    while (this.tileInflight < this.maxTileInflight) {
+      const next = this.pickNextTile();
+      if (!next) break;
+      const {member, tile} = next;
+      member.tileLoading.add(tile.tile_id);
+      this.tileInflight += 1;
+      member.commitTile(tile, this.loadToken).finally(() => {
+        this.tileInflight -= 1;
+        member.tileLoading.delete(tile.tile_id);
+        this.pumpTiles();
+      });
+    }
+  }
+
+  pickNextTile() {
+    let best = null;
+    let bestPriority = Infinity;
+    for (const member of this.members) {
+      if (member.disposed || member.kind !== 'artifact' || !member.effectiveVisible()) continue;
+      for (const tile of member.pendingTileCandidates()) {
+        const priority = this.tilePriority(member, tile);
+        if (priority < bestPriority) { bestPriority = priority; best = {member, tile}; }
+      }
+    }
+    return best;
+  }
+
+  tilePriority(member, tile) {
+    const groupId = member.groupIdOf(tile);
+    if (member.selectedGroupId && groupId === member.selectedGroupId && Number(tile.lod) === 0) return -1e17;
+    const bounds = tile && tile.bounds;
+    if (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max)) return Number.MAX_SAFE_INTEGER;
+    const center = member.worldCenter(bounds);
+    const isCoarse = Number(tile.lod) > 0;
+    let priority = (isCoarse ? 0 : 1e15) + center.distanceToSquared(this.modelCamera.position);
+    if (this.isolatedMemberId && member.id === this.isolatedMemberId) priority -= 1e12;
+    return priority;
+  }
+
+  reclaimForTile(bytes, protectMember, protectTileId) {
+    if (this.residentBytes + bytes <= this.memoryBudgetBytes) return;
+    const candidates = [];
+    for (const member of this.members) {
+      for (const [tileId, record] of member.tileRecords) {
+        if (member === protectMember && tileId === protectTileId) continue;
+        if (tileId === member.baseTileId) continue;
+        if (member.selectedGroupId && member.groupIdOf(member.tileDescriptors.get(tileId)) === member.selectedGroupId) continue;
+        if (this.isolatedMemberId && member.id === this.isolatedMemberId) continue;
+        candidates.push({member, tileId, record});
+      }
+    }
+    candidates.sort((a, b) => {
+      const av = a.record.scene && a.record.scene.visible ? 1 : 0;
+      const bv = b.record.scene && b.record.scene.visible ? 1 : 0;
+      if (av !== bv) return av - bv;
+      return a.record.lastUsedAt - b.record.lastUsedAt;
+    });
+    for (const candidate of candidates) {
+      if (this.residentBytes + bytes <= this.memoryBudgetBytes) break;
+      const record = candidate.record;
+      if (record.scene && record.scene.parent) record.scene.parent.remove(record.scene);
+      this.disposeObject(record.scene);
+      candidate.member.tileRecords.delete(candidate.tileId);
+      candidate.member.semanticIndexes.delete(candidate.tileId);
+      candidate.member.residentBytes = Math.max(0, candidate.member.residentBytes - record.bytes);
+      this.residentBytes = Math.max(0, this.residentBytes - record.bytes);
+    }
+  }
+
+  fitAll() {
+    if (!this.initialized) return;
+    const box = new THREE.Box3();
+    let any = false;
+    for (const member of this.members) {
+      if (!member.effectiveVisible()) continue;
+      const bounds = member.worldBounds();
+      if (bounds && !bounds.isEmpty()) { box.union(bounds); any = true; }
+    }
+    if (!any) {
+      for (const member of this.members) {
+        const bounds = member.worldBounds();
+        if (bounds && !bounds.isEmpty()) { box.union(bounds); any = true; }
+      }
+    }
+    if (!any) return;
+    this.fitToBox(box);
+  }
+
+  fitToBox(box) {
+    if (!this.initialized || box.isEmpty()) return;
+    this.modelBox = box.clone();
+    this.hasFitted = true;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const diameter = Math.max(size.x, size.y, size.z, 1);
+    const halfExtent = diameter * 0.5;
+    const fov = THREE.MathUtils.degToRad(this.modelCamera.fov);
+    const distance = Math.max(diameter * 1.5, (halfExtent / Math.tan(fov / 2)) * 1.22);
+    const direction = new THREE.Vector3(1, -1, 0.72).normalize();
+    this.modelCamera.up.set(0, 0, 1);
+    this.modelCamera.position.copy(center).addScaledVector(direction, distance);
+    this.modelCamera.near = Math.max(diameter / 10000, 0.001);
+    this.modelCamera.far = Math.max(diameter * 200, 1000);
+    this.modelCamera.lookAt(center);
+    this.modelCamera.updateProjectionMatrix();
+    this.controls.target.copy(center);
+    this.controls.minDistance = Math.max(diameter * 0.025, 0.01);
+    this.controls.maxDistance = diameter * 50;
+    this.controls.update();
+    this.rebuildHelpers(box);
+    this.updatePlanFraming();
+  }
+
+  rebuildHelpers(box) {
+    if (!this.helpers) return;
+    while (this.helpers.children.length) {
+      const child = this.helpers.children.pop();
+      if (child.geometry) child.geometry.dispose();
+      const materials = Array.isArray(child.material) ? child.material : child.material ? [child.material] : [];
+      for (const material of materials) material.dispose();
+    }
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const span = Math.max(size.x, size.y, 1);
+    const ideal = Math.max(span / 7, 0.0001);
+    const exponent = Math.pow(10, Math.floor(Math.log10(ideal)));
+    const fraction = ideal / exponent;
+    const nice = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+    const step = nice * exponent;
+    const gridSize = step * 10;
+    const grid = new THREE.GridHelper(gridSize, 10,
+      this.colorFromWorkspace('--viewport-grid-major', '#6b8a94'),
+      this.colorFromWorkspace('--viewport-grid-minor', '#3e535b'));
+    grid.rotation.x = Math.PI / 2;
+    grid.position.set(center.x, center.y, box.min.z);
+    const materials = Array.isArray(grid.material) ? grid.material : [grid.material];
+    for (const material of materials) { material.transparent = true; material.opacity = 0.32; material.depthWrite = false; }
+    this.helpers.add(grid);
+  }
+
+  updatePlanFraming() {
+    if (!this.modelBox || !this.initialized) return;
+    const center = this.modelBox.getCenter(new THREE.Vector3());
+    const size = this.modelBox.getSize(new THREE.Vector3());
+    const rect = this.planCanvas.getBoundingClientRect();
+    const aspect = rect.width / Math.max(rect.height, 1);
+    const planSize = Math.max(size.x, size.y, 1) * 0.62;
+    this.planCamera.left = -planSize * aspect;
+    this.planCamera.right = planSize * aspect;
+    this.planCamera.top = planSize;
+    this.planCamera.bottom = -planSize;
+    this.planCamera.position.set(center.x, center.y, this.modelBox.max.z + Math.max(size.z, 1) + 10);
+    this.planCamera.lookAt(center.x, center.y, center.z);
+    this.planCamera.updateProjectionMatrix();
+  }
+
+  handlePointerUp(event) {
+    if (!this.active || !this.downAt) { this.downAt = null; return; }
+    const moved = Math.hypot(event.clientX - this.downAt.x, event.clientY - this.downAt.y);
+    this.downAt = null;
+    if (moved > 5) return;
+    const rect = this.modelCanvas.getBoundingClientRect();
+    this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointer, this.modelCamera);
+    const groups = this.members.filter(member => member.effectiveVisible()).map(member => member.group);
+    const hits = this.raycaster.intersectObjects(groups, true);
+    // The bundled Raycaster does not skip hidden sub-trees, so walk hits in
+    // depth order and take the first one whose full ancestor chain is visible
+    // and whose owning member resolves it. This keeps LOD/hidden tiles from
+    // stealing a click from the visible geometry behind them.
+    for (const item of hits) {
+      if (!item.object || !item.object.geometry || !Number.isFinite(item.faceIndex)) continue;
+      if (!this.hitVisible(item.object)) continue;
+      let memberId = null;
+      for (let object = item.object; object; object = object.parent) {
+        if (object.userData && object.userData.vexMemberId) { memberId = object.userData.vexMemberId; break; }
+      }
+      const member = memberId ? this.membersById.get(memberId) : null;
+      if (member && member.resolveHit(item)) return;
+    }
+    this.clearSelection();
+  }
+
+  hitVisible(object) {
+    for (let node = object; node; node = node.parent) {
+      if (node.visible === false) return false;
+    }
+    return true;
+  }
+
+  clearSelection() {
+    if (this.selectionOwner) { this.selectionOwner.clearSelectionOverlay(); this.selectionOwner = null; }
+    const panel = document.getElementById('fedPropsPanel');
+    if (panel) panel.classList.remove('open');
+  }
+
+  showSelectionProps(member, globalId, expressId, props) {
+    const panel = document.getElementById('fedPropsPanel');
+    const title = document.getElementById('fedPropsTitle');
+    const body = document.getElementById('fedPropsBody');
+    if (!panel || !title || !body) return;
+    const name = props && props.Name && (props.Name.value || props.Name);
+    title.textContent = (typeof name === 'string' && name) ? name : ('Element ' + expressId);
+    const rows = [];
+    rows.push(['Member', member.name]);
+    rows.push(['Discipline', member.discipline]);
+    if (globalId) rows.push(['GlobalId', globalId]);
+    rows.push(['Express ID', String(expressId)]);
+    if (props) {
+      const type = props.ObjectType && (props.ObjectType.value || props.ObjectType);
+      if (typeof type === 'string' && type) rows.push(['ObjectType', type]);
+    }
+    body.innerHTML = rows.map(row =>
+      '<div class="prop"><span class="k">' + escapeHtml(row[0]) + '</span><span class="v">' + escapeHtml(row[1]) + '</span></div>').join('');
+    panel.classList.add('open');
+  }
+
+  setMemberVisible(memberId, visible) {
+    const member = this.membersById.get(memberId);
+    if (!member) return;
+    member.userVisible = visible;
+    member.applyVisibility();
+    this.scheduleTiles();
+    this.updateMeta();
+  }
+
+  toggleIsolate(memberId) {
+    this.isolatedMemberId = this.isolatedMemberId === memberId ? null : memberId;
+    for (const member of this.members) member.applyVisibility();
+    this.scheduleTiles();
+    this.renderMemberList();
+    if (this.isolatedMemberId) {
+      const member = this.membersById.get(this.isolatedMemberId);
+      const bounds = member && member.worldBounds();
+      if (bounds && !bounds.isEmpty()) this.fitToBox(bounds); else this.fitAll();
+    } else {
+      this.fitAll();
+    }
+    this.updateMeta();
+  }
+
+  setDisciplineVisible(discipline, visible) {
+    if (visible) this.hiddenDisciplines.delete(discipline);
+    else this.hiddenDisciplines.add(discipline);
+    for (const member of this.members) member.applyVisibility();
+    this.scheduleTiles();
+    this.renderDisciplines();
+    this.renderMemberList();
+    this.updateMeta();
+  }
+
+  disciplines() {
+    const seen = [];
+    for (const member of this.members) if (!seen.includes(member.discipline)) seen.push(member.discipline);
+    return seen;
+  }
+
+  renderDisciplines() {
+    if (!this.disciplinesEl) return;
+    const disciplines = this.disciplines();
+    if (disciplines.length <= 1) { this.disciplinesEl.innerHTML = ''; return; }
+    this.disciplinesEl.innerHTML = disciplines.map(discipline => {
+      const off = this.hiddenDisciplines.has(discipline);
+      return '<button type="button" class="fed-chip" data-disc="' + escapeHtml(discipline)
+        + '" aria-pressed="' + (off ? 'false' : 'true') + '" data-off="' + (off ? 'true' : 'false') + '">'
+        + escapeHtml(discipline) + '</button>';
+    }).join('');
+  }
+
+  renderMemberList() {
+    if (!this.membersEl) return;
+    if (this.memberCountEl) this.memberCountEl.textContent = this.members.length ? (this.members.length + ' loaded') : '';
+    this.membersEl.innerHTML = this.members.map(member => {
+      const state = member.status === 'ok' ? 'ok' : member.status === 'failed' ? 'failed'
+        : (member.status === 'starting' || member.status === 'pending') ? 'loading' : 'empty';
+      const isolated = this.isolatedMemberId === member.id;
+      return '<div class="fed-member' + (isolated ? ' isolated' : '') + '" data-member="' + escapeHtml(member.id) + '">'
+        + '<span class="fed-dot ' + state + '"></span>'
+        + '<div class="fed-mbody">'
+        + '<div class="fed-mtitle">' + escapeHtml(member.name) + '</div>'
+        + '<div class="fed-mdisc">' + escapeHtml(member.discipline) + '</div>'
+        + '<div class="fed-mmeta">' + escapeHtml(member.message) + '</div>'
+        + '</div>'
+        + '<div class="fed-mactions">'
+        + '<label><input type="checkbox" data-act="vis"' + (member.userVisible ? ' checked' : '') + '>Show</label>'
+        + '<button type="button" class="fed-iso" data-act="iso" aria-pressed="' + (isolated ? 'true' : 'false') + '">Isolate</button>'
+        + '</div>'
+        + '</div>';
+    }).join('');
+  }
+
+  updateMeta() {
+    const total = this.members.length;
+    let ready = 0;
+    let failed = 0;
+    let tiles = 0;
+    let tileTotal = 0;
+    for (const member of this.members) {
+      if (member.status === 'ok') ready += 1;
+      if (member.status === 'failed') failed += 1;
+      if (member.kind === 'artifact') {
+        tiles += member.tileRecords.size;
+        tileTotal += (member.manifest && member.manifest.tiles) ? member.manifest.tiles.length : member.tileRecords.size;
+      }
+    }
+    let text = total + ' member' + (total === 1 ? '' : 's') + ' · ' + ready + ' ready';
+    if (failed) text += ' · ' + failed + ' failed';
+    if (tileTotal) text += ' · ' + tiles + '/' + tileTotal + ' tiles';
+    if (this.modelMeta) this.modelMeta.textContent = text;
+    if (this.planMeta) this.planMeta.textContent = 'shared scene · visibility-isolated';
+  }
+
+  setStatus(message) {
+    for (const status of [this.modelStatus, this.planStatus]) {
+      if (!status) continue;
+      status.textContent = message || '';
+      status.dataset.state = message ? 'loading' : '';
+    }
+  }
+
+  showEmpty(message) {
+    for (const status of [this.modelStatus, this.planStatus]) {
+      if (!status) continue;
+      status.textContent = message || '';
+      status.dataset.state = message ? 'empty' : '';
+    }
+  }
+
+  fit() {
+    this.userInteracted = true;
+    this.fitAll();
+  }
+
+  setView(name) {
+    if (!this.initialized || !this.modelBox) { this.userInteracted = true; return; }
+    this.userInteracted = true;
+    const center = this.modelBox.getCenter(new THREE.Vector3());
+    const size = this.modelBox.getSize(new THREE.Vector3());
+    const diameter = Math.max(size.x, size.y, size.z, 1);
+    const distance = diameter * 1.6;
+    const dirs = {
+      iso: new THREE.Vector3(1, -1, 0.72),
+      top: new THREE.Vector3(0, 0, 1),
+      front: new THREE.Vector3(0, -1, 0),
+      right: new THREE.Vector3(1, 0, 0)
+    };
+    const direction = (dirs[name] || dirs.iso).normalize();
+    this.modelCamera.position.copy(center).addScaledVector(direction, distance);
+    this.modelCamera.up.set(0, 0, name === 'top' ? 0 : 1);
+    if (name === 'top') this.modelCamera.up.set(0, 1, 0);
+    this.modelCamera.lookAt(center);
+    this.modelCamera.updateProjectionMatrix();
+    this.controls.target.copy(center);
+    this.controls.update();
+  }
+
+  resize() {
+    if (!this.initialized) return;
+    this.resizeRenderer(this.modelRenderer, this.modelCanvas, this.modelCamera);
+    this.resizeRenderer(this.planRenderer, this.planCanvas, this.planCamera);
+    this.updatePlanFraming();
+  }
+
+  resizeRenderer(renderer, canvas, camera) {
+    if (!renderer) return;
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.floor(rect.width));
+    const height = Math.max(1, Math.floor(rect.height));
+    renderer.setSize(width, height, false);
+    if (camera.isPerspectiveCamera) {
+      camera.aspect = width / Math.max(height, 1);
+      camera.updateProjectionMatrix();
+    }
+  }
+
+  startAnimation() {
+    if (!this.initialized || !this.active || this.animationFrame !== null) return;
+    this.animationFrame = requestAnimationFrame(() => this.animate());
+  }
+
+  stopAnimation() {
+    if (this.animationFrame === null) return;
+    cancelAnimationFrame(this.animationFrame);
+    this.animationFrame = null;
+  }
+
+  animate() {
+    this.animationFrame = null;
+    if (!this.initialized || !this.active) return;
+    this.controls.update();
+    if (this.modelCanvas.offsetParent !== null) this.modelRenderer.render(this.scene, this.modelCamera);
+    if (this.planCanvas.offsetParent !== null) this.planRenderer.render(this.scene, this.planCamera);
+    this.startAnimation();
+  }
+}
+
+function fedSetUrl(id) {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('federation', id || '');
+    history.replaceState(null, '', url);
+  } catch (_) {}
+}
+
+function fedRemoveUrl() {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('federation');
+    history.replaceState(null, '', url);
+  } catch (_) {}
+}
+
+function fedRenderSelect() {
+  const select = document.getElementById('fedSelect');
+  if (!select) return;
+  if (!fedList.length) {
+    select.innerHTML = '<option value="">No federation sets available</option>';
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = fedList.map(entry =>
+    '<option value="' + escapeHtml(entry.id) + '">' + escapeHtml(entry.name)
+    + (Number.isFinite(entry.memberCount) ? (' (' + entry.memberCount + ')') : '') + '</option>').join('');
+  if (fedCurrentId && fedList.some(entry => entry.id === fedCurrentId)) select.value = fedCurrentId;
+}
+
+async function ensureFederationList() {
+  if (fedListLoaded) return;
+  fedListLoaded = true;
+  try {
+    const response = await fetch('/v1/federations', {headers});
+    if (!response.ok) {
+      fedList = [];
+    } else {
+      const body = await response.json();
+      const array = Array.isArray(body) ? body : (body && Array.isArray(body.federations) ? body.federations : []);
+      fedList = array.map(entry => ({
+        id: String(entry.federation_id || entry.id || ''),
+        name: String(entry.name || entry.federation_id || entry.id || 'Federation'),
+        memberCount: Number(entry.member_count)
+      })).filter(entry => entry.id);
+    }
+  } catch (_) {
+    fedList = [];
+  }
+  fedRenderSelect();
+}
+
+async function loadFederationMembers(id) {
+  const response = await fetch('/v1/federations/' + encodeURIComponent(id) + '/snapshot', {headers});
+  if (!response.ok) throw new Error('status ' + response.status);
+  const body = await response.json();
+  const rawMembers = Array.isArray(body) ? body : (body && Array.isArray(body.members) ? body.members : []);
+  return rawMembers.map(fedNormalizeMember).filter(Boolean);
+}
+
+async function selectFederation(id) {
+  fedCurrentId = id;
+  fedSetUrl(id);
+  const select = document.getElementById('fedSelect');
+  if (select && fedList.some(entry => entry.id === id)) select.value = id;
+  if (!fedViewer) return;
+  const seq = ++fedSelectSeq;
+  fedViewer.unload();
+  fedViewer.setStatus('Loading federation set…');
+  try {
+    const members = await loadFederationMembers(id);
+    if (seq !== fedSelectSeq || fedCurrentId !== id) return;
+    const info = fedList.find(entry => entry.id === id);
+    fedViewer.load({id, name: info ? info.name : id, members});
+    const sub = document.getElementById('fedSub');
+    if (sub) sub.textContent = members.length + ' member' + (members.length === 1 ? '' : 's');
+  } catch (error) {
+    if (seq !== fedSelectSeq) return;
+    fedViewer.showEmpty('Federation set unavailable: ' + (error && error.message ? error.message : 'load error'));
+  }
+}
+
+function ensureFederationViewer() {
+  if (fedViewer) return fedViewer;
+  try {
+    fedViewer = new FederationViewer({
+      modelCanvas: document.getElementById('fedModelCanvas'),
+      planCanvas: document.getElementById('fedPlanCanvas'),
+      modelStatus: document.getElementById('fedModelStatus'),
+      planStatus: document.getElementById('fedPlanStatus'),
+      modelMeta: document.getElementById('fedModelMeta'),
+      planMeta: document.getElementById('fedPlanMeta'),
+      membersEl: document.getElementById('fedMembers'),
+      disciplinesEl: document.getElementById('fedDisciplines'),
+      memberCountEl: document.getElementById('fedMemberCount')
+    });
+  } catch (error) {
+    fedViewer = null;
+    console.error('Federation viewer unavailable:', error);
+  }
+  return fedViewer;
+}
+
+async function openFederation(id) {
+  const section = document.getElementById('fedWorkspace');
+  if (!section) return;
+  fedActive = true;
+  section.hidden = false;
+  // Release the single-project viewer's model resources on switch. The periodic
+  // refresh is guarded (drawChanges) so it will not re-render behind the
+  // federation overlay while it is active.
+  if (ifcViewer) ifcViewer.clear('Federation view active — single-project rendering released.');
+  ensureFederationViewer();
+  if (fedViewer) {
+    fedViewer.setActive(true);
+    requestAnimationFrame(() => fedViewer.resize());
+  }
+  await ensureFederationList();
+  const target = (id && fedList.find(entry => entry.id === id)) ? id
+    : (fedCurrentId && fedList.find(entry => entry.id === fedCurrentId)) ? fedCurrentId
+    : (fedList[0] && fedList[0].id) || null;
+  fedSetUrl(target || '');
+  if (target) await selectFederation(target);
+  else if (fedViewer) fedViewer.showEmpty('No federation sets are available from this bridge yet.');
+}
+
+function closeFederation() {
+  const section = document.getElementById('fedWorkspace');
+  fedActive = false;
+  if (section) section.hidden = true;
+  if (fedViewer) { fedViewer.unload(); fedViewer.setActive(false); }
+  fedCurrentId = null;
+  fedRemoveUrl();
+  // Restore the single-project model immediately instead of waiting for the
+  // next periodic refresh.
+  if (typeof latestChanges !== 'undefined' && latestChanges) drawChanges(latestChanges);
+}
+
+function initFederation() {
+  const button = document.getElementById('federationButton');
+  if (button) button.addEventListener('click', () => openFederation(fedCurrentId));
+  const closeButton = document.getElementById('fedCloseButton');
+  if (closeButton) closeButton.addEventListener('click', closeFederation);
+  const select = document.getElementById('fedSelect');
+  if (select) select.addEventListener('change', () => { if (select.value) selectFederation(select.value); });
+  const reload = document.getElementById('fedReloadButton');
+  if (reload) reload.addEventListener('click', () => { if (fedCurrentId) selectFederation(fedCurrentId); });
+  const fitButton = document.getElementById('fedFitButton');
+  if (fitButton) fitButton.addEventListener('click', () => { if (fedViewer) fedViewer.fit(); });
+  const dimToggle = document.getElementById('fedDimToggle');
+  const viewGrid = document.getElementById('fedViewGrid');
+  if (dimToggle && viewGrid) {
+    dimToggle.addEventListener('click', event => {
+      const target = event.target.closest('button[data-dim]');
+      if (!target) return;
+      const dim = target.dataset.dim;
+      viewGrid.classList.toggle('dim-2d', dim === '2d');
+      viewGrid.classList.toggle('dim-3d', dim === '3d');
+      for (const item of dimToggle.querySelectorAll('button')) item.classList.toggle('active', item === target);
+      if (fedViewer) requestAnimationFrame(() => fedViewer.resize());
+    });
+  }
+  const toolbar = document.getElementById('fedToolbar');
+  if (toolbar) toolbar.addEventListener('click', event => {
+    const target = event.target.closest('button[data-act]');
+    if (!target || !fedViewer) return;
+    const act = target.dataset.act;
+    if (act === 'fit') fedViewer.fit();
+    else if (act === 'view-iso') fedViewer.setView('iso');
+    else if (act === 'view-top') fedViewer.setView('top');
+    else if (act === 'view-front') fedViewer.setView('front');
+    else if (act === 'view-right') fedViewer.setView('right');
+  });
+  const propsPanel = document.getElementById('fedPropsPanel');
+  if (propsPanel) propsPanel.addEventListener('click', event => {
+    if (event.target.closest('button[data-act="fed-props-close"]') && fedViewer) fedViewer.clearSelection();
+  });
+  const members = document.getElementById('fedMembers');
+  if (members) {
+    members.addEventListener('change', event => {
+      const checkbox = event.target.closest('input[data-act="vis"]');
+      if (!checkbox || !fedViewer) return;
+      const row = checkbox.closest('.fed-member');
+      if (row && row.dataset.member) fedViewer.setMemberVisible(row.dataset.member, checkbox.checked);
+    });
+    members.addEventListener('click', event => {
+      const isoButton = event.target.closest('button[data-act="iso"]');
+      if (!isoButton || !fedViewer) return;
+      const row = isoButton.closest('.fed-member');
+      if (row && row.dataset.member) fedViewer.toggleIsolate(row.dataset.member);
+    });
+  }
+  const disciplines = document.getElementById('fedDisciplines');
+  if (disciplines) disciplines.addEventListener('click', event => {
+    const chip = event.target.closest('button[data-disc]');
+    if (!chip || !fedViewer) return;
+    const discipline = chip.dataset.disc;
+    const hidden = fedViewer.hiddenDisciplines.has(discipline);
+    fedViewer.setDisciplineVisible(discipline, hidden);
+  });
+  window.addEventListener('keydown', event => {
+    if (!fedActive || !fedViewer) return;
+    const tag = (event.target && event.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (event.key === 'f' || event.key === 'F') fedViewer.fit();
+    else if (event.key === 'Escape') fedViewer.clearSelection();
+  });
+  const requestedFederation = new URLSearchParams(window.location.search).get('federation');
+  if (requestedFederation !== null) openFederation(requestedFederation || null);
+}
+
 try {
   ifcViewer = new RealIfcViewer({
     planCanvas: els.planCanvas,
@@ -4187,6 +5990,7 @@ try {
 refresh();
 loadHealth();
 checkUpdates();
+initFederation();
 setInterval(refresh, 15000);
 setInterval(loadHealth, 60000);
 setInterval(checkUpdates, 1800000);
@@ -4194,3 +5998,114 @@ setInterval(checkUpdates, 1800000);
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_substitutes_token_as_json() {
+        let html = render("abc123");
+        assert!(html.contains("const TOKEN = \"abc123\";"));
+        assert!(!html.contains("__VEX_TOKEN__"));
+    }
+
+    #[test]
+    fn render_escapes_token() {
+        // The token is embedded via serde_json so a quote cannot break out of
+        // the JS string literal.
+        let html = render("a\"b");
+        assert!(html.contains(r#"const TOKEN = "a\"b";"#));
+    }
+
+    #[test]
+    fn single_project_workspace_is_preserved() {
+        let html = render("t");
+        // Core single-project viewer wiring must remain intact.
+        assert!(html.contains("class RealIfcViewer"));
+        assert!(html.contains("id=\"modelCanvas\""));
+        assert!(html.contains("id=\"dimToggle\""));
+        assert!(html.contains("ifcViewer = new RealIfcViewer("));
+    }
+
+    #[test]
+    fn federation_is_opt_in_only() {
+        let html = render("t");
+        // Federation must be reachable only via an explicit control or URL
+        // state, and the workspace starts hidden.
+        assert!(html.contains("id=\"federationButton\""));
+        assert!(html.contains("id=\"fedWorkspace\" hidden"));
+        assert!(html.contains("new URLSearchParams(window.location.search).get('federation')"));
+        // The periodic single-project refresh must bail out while federation
+        // is active so it cannot re-render behind the overlay.
+        assert!(html.contains("if (fedActive) return;"));
+    }
+
+    #[test]
+    fn federation_reuses_same_origin_project_endpoints() {
+        let html = render("t");
+        // Geometry is loaded only from existing per-project bridge endpoints.
+        assert!(html.contains("/render/' + encodeURIComponent(this.commit) + '/status'"));
+        assert!(html.contains("/ifc/' + encodeURIComponent(this.commit)"));
+        // Composition comes from the resolved snapshot, so unavailable members
+        // degrade independently before the viewer starts member loading.
+        assert!(html.contains("fetch('/v1/federations'"));
+        assert!(html.contains("fetch('/v1/federations/' + encodeURIComponent(id) + '/snapshot'"));
+    }
+
+    #[test]
+    fn federation_consumes_the_local_snapshot_contract() {
+        let html = render("t");
+        // The protocol uses source_project_id, display_name, and row-major
+        // transform rows. These checks guard against accidentally reverting to
+        // speculative aliases and misplacing every member transform.
+        assert!(html.contains("raw.source_project_id || raw.project_id"));
+        assert!(html.contains("raw.display_name || raw.name"));
+        assert!(html.contains("Array.isArray(t.rows) && t.rows.length === 4"));
+        assert!(html.contains("m.set("));
+        // Artifact and IFC fallback must share the normalized coordinate basis.
+        assert!(html.contains("COORDINATE_TO_ORIGIN: true, USE_FAST_BOOLS: true"));
+    }
+
+    #[test]
+    fn federation_guards_external_resource_origins() {
+        let html = render("t");
+        // Member-provided artifact URIs are pinned to this bridge's origin.
+        assert!(html.contains("function fedSameOriginUrl"));
+        assert!(html.contains("artifact resource must use this bridge"));
+    }
+
+    #[test]
+    fn federation_applies_orientation_before_transform() {
+        let html = render("t");
+        // orientation (inner) then transform (outer group matrix) => world =
+        // transform * orientation * local.
+        assert!(html.contains("this.orientGroup.rotation.x = FED_UP_AXIS_FIX"));
+        assert!(html.contains("this.worldMatrix = this.transform.clone().multiply(FED_RX)"));
+    }
+
+    #[test]
+    fn federation_bounds_concurrency() {
+        let html = render("t");
+        assert!(html.contains("this.maxConcurrentStarts = 3"));
+        assert!(html.contains("this.maxTileInflight = 4"));
+    }
+
+    #[test]
+    fn federation_clears_failed_switches_and_stops_when_inactive() {
+        let html = render("t");
+        // A failed federation selection cannot leave a previous set visible.
+        assert!(html.contains("fedViewer.unload();\n  fedViewer.setStatus('Loading federation set…');"));
+        // Closing the workspace cancels its render loop instead of retaining a
+        // display-rate callback for the rest of the dashboard session.
+        assert!(html.contains("cancelAnimationFrame(this.animationFrame)"));
+        assert!(html.contains("if (!this.initialized || !this.active) return;"));
+    }
+
+    #[test]
+    fn dashboard_html_has_no_stray_raw_string_terminator() {
+        // Guards against accidentally embedding the Rust raw-string closing
+        // delimiter inside the template.
+        assert_eq!(DASHBOARD_HTML.matches("\"#").count(), 0);
+    }
+}

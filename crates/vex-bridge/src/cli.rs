@@ -156,6 +156,7 @@ fn run_start(paths: Paths) -> BridgeResult<()> {
         access_token: Arc::new(token),
         started_at: Instant::now(),
         watchers: Arc::new(RwLock::new(Vec::new())),
+        federation_project_lock: Arc::new(tokio::sync::Mutex::new(())),
         shutdown: Arc::new(tokio::sync::Notify::new()),
         update_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };

@@ -236,6 +236,13 @@ overclaiming CAD interoperability.
   coordinates, GlobalId preservation, and destination before submission.
 - Implement immutable federation sets composed of named published discipline
   versions and transforms, not a merged authoring model.
+  - Local-first groundwork **landed**: a versioned federation data model,
+    durable storage with stable federation/member ids, strict validation
+    (full commit hashes, invertible affine transforms, bounded member counts,
+    project/commit membership checks), token-gated CRUD/list/snapshot routes
+    under `/v1/federations`, and project-deletion safety. Members currently
+    reference exact commits of **local** projects; binding to cloud-*published*
+    discipline versions remains future cloud work.
 - Implement BCF 3 issue import/export, viewpoints, attachments, selected
   GlobalIds, comments, assignment, and immutable lifecycle events.
 - Implement container approval:
