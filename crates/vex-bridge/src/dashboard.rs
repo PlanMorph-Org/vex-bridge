@@ -6095,7 +6095,9 @@ mod tests {
     fn federation_clears_failed_switches_and_stops_when_inactive() {
         let html = render("t");
         // A failed federation selection cannot leave a previous set visible.
-        assert!(html.contains("fedViewer.unload();\n  fedViewer.setStatus('Loading federation set…');"));
+        assert!(
+            html.contains("fedViewer.unload();\n  fedViewer.setStatus('Loading federation set…');")
+        );
         // Closing the workspace cancels its render loop instead of retaining a
         // display-rate callback for the rest of the dashboard session.
         assert!(html.contains("cancelAnimationFrame(this.animationFrame)"));
