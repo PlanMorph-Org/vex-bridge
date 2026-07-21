@@ -511,7 +511,8 @@ async fn generate_artifact(
     let staging = render_artifact::create_artifact_staging_dir(project_dir, commit_hash)?;
     let ifc_path = staging.join("model.ifc");
     let result = async {
-        let bytes = vex_cli::checkout(vex_bin, project_dir, commit_hash, &ifc_path).await?;
+        let bytes =
+            vex_cli::checkout_for_render(vex_bin, project_dir, commit_hash, &ifc_path).await?;
         if bytes == 0 {
             return Err(BridgeError::Config(
                 "vex checkout returned an empty IFC for render generation".into(),

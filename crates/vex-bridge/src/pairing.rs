@@ -6,8 +6,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::Duration;
-use tracing::warn;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::errors::{BridgeError, BridgeResult};
@@ -83,6 +84,17 @@ const PROJECTS_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const PROJECTS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROJECTS_MAX_ATTEMPTS: u8 = 3;
 
+fn projects_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(PROJECTS_CONNECT_TIMEOUT)
+            .timeout(PROJECTS_REQUEST_TIMEOUT)
+            .build()
+            .expect("cloud-project HTTP client configuration is valid")
+    })
+}
+
 async fn projects_with_signing(
     cfg: &Config,
     key_id: &str,
@@ -104,10 +116,8 @@ async fn projects_with_signing(
         cfg.api_base.trim_end_matches('/')
     );
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(PROJECTS_CONNECT_TIMEOUT)
-        .timeout(PROJECTS_REQUEST_TIMEOUT)
-        .build()?;
+    let client = projects_client();
+    let started_at = Instant::now();
 
     for attempt in 1..=PROJECTS_MAX_ATTEMPTS {
         let response = client
@@ -129,7 +139,7 @@ async fn projects_with_signing(
                                 "expected a project list: {error}"
                             ))
                         })?;
-                return Ok(projects
+                let projects: Vec<_> = projects
                     .into_iter()
                     .map(|project| vex_bridge_protocol::CloudProject {
                         id: project.id,
@@ -140,7 +150,14 @@ async fn projects_with_signing(
                         default_branch: project.default_branch,
                         has_commits: project.has_commits,
                     })
-                    .collect());
+                    .collect();
+                info!(
+                    attempt,
+                    project_count = projects.len(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "fetched cloud projects"
+                );
+                return Ok(projects);
             }
             Ok(response)
                 if response.status() == StatusCode::UNAUTHORIZED

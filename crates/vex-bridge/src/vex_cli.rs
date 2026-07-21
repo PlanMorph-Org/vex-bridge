@@ -6,10 +6,11 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use tokio::process::Command;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::errors::{BridgeError, BridgeResult};
 use crate::ifc::IfcIntake;
@@ -22,15 +23,64 @@ use vex_bridge_protocol::schema;
 /// periodic `log`/`changes` polling, surfacing as a 502. Serialise every
 /// repo-scoped invocation (any call with a working directory) per canonical
 /// path so concurrent calls queue instead of racing the lock.
-fn repo_lock(dir: &Path) -> Arc<AsyncMutex<()>> {
-    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+struct RepoLock {
+    gate: Arc<Semaphore>,
+    foreground_waiters: AtomicUsize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RepoPriority {
+    Foreground,
+    Background,
+}
+
+impl RepoLock {
+    async fn acquire(&self, priority: RepoPriority) -> OwnedSemaphorePermit {
+        if priority == RepoPriority::Foreground {
+            self.foreground_waiters.fetch_add(1, Ordering::SeqCst);
+            let permit = self
+                .gate
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("repository lock semaphore is never closed");
+            self.foreground_waiters.fetch_sub(1, Ordering::SeqCst);
+            return permit;
+        }
+
+        loop {
+            if self.foreground_waiters.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                continue;
+            }
+            let permit = self
+                .gate
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("repository lock semaphore is never closed");
+            if self.foreground_waiters.load(Ordering::SeqCst) == 0 {
+                return permit;
+            }
+            drop(permit);
+        }
+    }
+}
+
+fn repo_lock(dir: &Path) -> Arc<RepoLock> {
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<RepoLock>>>> = OnceLock::new();
     let key = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let mut map = LOCKS
         .get_or_init(|| StdMutex::new(HashMap::new()))
         .lock()
         .expect("repo lock map poisoned");
     map.entry(key)
-        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .or_insert_with(|| {
+            Arc::new(RepoLock {
+                gate: Arc::new(Semaphore::new(1)),
+                foreground_waiters: AtomicUsize::new(0),
+            })
+        })
         .clone()
 }
 
@@ -67,7 +117,12 @@ impl VexRun {
     }
 }
 
-pub async fn run<I, S>(bin: &str, cwd: Option<&Path>, args: I) -> BridgeResult<VexRun>
+async fn run_with_priority<I, S>(
+    bin: &str,
+    cwd: Option<&Path>,
+    args: I,
+    priority: RepoPriority,
+) -> BridgeResult<VexRun>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -87,7 +142,7 @@ where
     // unserialised.
     let lock = cwd.map(repo_lock);
     let _guard = match lock.as_ref() {
-        Some(l) => Some(l.lock().await),
+        Some(lock) => Some(lock.acquire(priority).await),
         None => None,
     };
 
@@ -103,6 +158,14 @@ where
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
+}
+
+pub async fn run<I, S>(bin: &str, cwd: Option<&Path>, args: I) -> BridgeResult<VexRun>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    run_with_priority(bin, cwd, args, RepoPriority::Foreground).await
 }
 
 /// Wall-clock cap on a single `vex push`. Push is the only network-bound engine
@@ -134,6 +197,7 @@ async fn run_bounded<I, S>(
     cwd: Option<&Path>,
     args: I,
     timeout: std::time::Duration,
+    priority: RepoPriority,
 ) -> BridgeResult<VexRun>
 where
     I: IntoIterator<Item = S>,
@@ -151,7 +215,7 @@ where
 
     let lock = cwd.map(repo_lock);
     let _guard = match lock.as_ref() {
-        Some(l) => Some(l.lock().await),
+        Some(lock) => Some(lock.acquire(priority).await),
         None => None,
     };
 
@@ -267,7 +331,14 @@ pub async fn commit(
 }
 
 pub async fn push(bin: &str, dir: &Path, remote: &str, branch: &str) -> BridgeResult<()> {
-    let r = run_bounded(bin, Some(dir), ["push", remote, branch], PUSH_TIMEOUT).await?;
+    let r = run_bounded(
+        bin,
+        Some(dir),
+        ["push", remote, branch],
+        PUSH_TIMEOUT,
+        RepoPriority::Foreground,
+    )
+    .await?;
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }
@@ -336,6 +407,25 @@ pub async fn elements_json(
 /// files currently sit on disk — so callers can serve commit-exact geometry
 /// even for historical commits whose original snapshot is gone.
 pub async fn checkout(bin: &str, dir: &Path, reference: &str, out: &Path) -> BridgeResult<u64> {
+    checkout_with_priority(bin, dir, reference, out, RepoPriority::Foreground).await
+}
+
+pub async fn checkout_for_render(
+    bin: &str,
+    dir: &Path,
+    reference: &str,
+    out: &Path,
+) -> BridgeResult<u64> {
+    checkout_with_priority(bin, dir, reference, out, RepoPriority::Background).await
+}
+
+async fn checkout_with_priority(
+    bin: &str,
+    dir: &Path,
+    reference: &str,
+    out: &Path,
+    priority: RepoPriority,
+) -> BridgeResult<u64> {
     let args: Vec<OsString> = vec![
         "--json".into(),
         "checkout".into(),
@@ -343,7 +433,7 @@ pub async fn checkout(bin: &str, dir: &Path, reference: &str, out: &Path) -> Bri
         "-o".into(),
         out.as_os_str().to_os_string(),
     ];
-    let r = run_bounded(bin, Some(dir), args, CHECKOUT_TIMEOUT).await?;
+    let r = run_bounded(bin, Some(dir), args, CHECKOUT_TIMEOUT, priority).await?;
     if !r.ok() {
         return Err(BridgeError::VexCli(r.stderr.trim().to_string()));
     }

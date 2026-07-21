@@ -1130,6 +1130,9 @@ let currentViewMode = 'full';
 let pairPollTimer = null;
 let pendingDeleteProject = null;
 let cloudProjects = [];
+let cloudProjectsFetchedAt = 0;
+let cloudProjectsRequest = null;
+const CLOUD_PROJECT_CACHE_MS = 60000;
 const urlParams = new URLSearchParams(window.location.search);
 const requestedProject = urlParams.get('project');
 const requestedCommit = urlParams.get('commit');
@@ -1818,12 +1821,10 @@ async function openPushPanel() {
   if (!selectedProject || els.syncButton.disabled) return;
   els.pushPanel.classList.add('open');
   els.confirmPush.disabled = true;
-  cloudProjects = [];
   els.cloudProject.innerHTML = '<option value="">Loading projects…</option>';
   els.pushPreview.innerHTML = '<div class="row-meta">Loading preview…</div>';
   try {
-    const projects = await api('/v1/cloud/projects', {headers});
-    cloudProjects = projects || [];
+    await loadCloudProjects();
     const local = currentLocalProject();
     els.cloudProject.innerHTML = '<option value="">Select a cloud project…</option>';
     for (const project of cloudProjects) {
@@ -1844,11 +1845,24 @@ async function openPushPanel() {
         `<div class="preview-warning">Could not load the optional change preview: ${escapeHtml(error.message)}. You can still push.</div>`);
     }
   } catch (error) {
-    cloudProjects = [];
     els.cloudProject.innerHTML = '<option value="">Cloud projects unavailable</option>';
     els.confirmPush.disabled = true;
     els.pushPreview.innerHTML = `<div class="preview-warning">${escapeHtml(error.message)}</div>`;
   }
+}
+
+async function loadCloudProjects() {
+  if (Date.now() - cloudProjectsFetchedAt < CLOUD_PROJECT_CACHE_MS) return cloudProjects;
+  if (!cloudProjectsRequest) {
+    cloudProjectsRequest = api('/v1/cloud/projects', {headers})
+      .then(projects => {
+        cloudProjects = projects || [];
+        cloudProjectsFetchedAt = Date.now();
+        return cloudProjects;
+      })
+      .finally(() => { cloudProjectsRequest = null; });
+  }
+  return cloudProjectsRequest;
 }
 
 function closePushPanel() {
@@ -1899,6 +1913,7 @@ async function pushSelectedProject(event) {
       })
     });
     els.topStatus.textContent = `Pushed ${short(result.commit_hash)}`;
+    cloudProjectsFetchedAt = 0;
     closePushPanel();
     // The push cleared the pending ledger; refresh so the badge/count update.
     await refresh();
@@ -1976,7 +1991,7 @@ async function onAddIfcInput(event) {
     els.topStatus.textContent = previewError
       ? `Uploaded ${result.file_name}; semantic import is running. Preview failed: ${previewError.message}`
       : `Preview ready — importing ${result.file_name} in the background…`;
-    trackImportCompletion(project, result.file_name, importStartedAt).catch(error => {
+    trackImportCompletion(project, result.file_name, result.stored_path, importStartedAt).catch(error => {
       if (selectedProject === project) els.topStatus.textContent = `Import tracking failed: ${error.message}`;
     });
   } catch (error) {
@@ -1988,7 +2003,7 @@ async function onAddIfcInput(event) {
   }
 }
 
-async function trackImportCompletion(projectId, fileName, startedAt) {
+async function trackImportCompletion(projectId, fileName, storedPath, startedAt) {
   const terminalKinds = new Set(['commit_created', 'duplicate_skipped', 'route_skipped', 'no_changes', 'error']);
   const deadline = Date.now() + (2 * 60 * 60 * 1000);
   while (Date.now() < deadline) {
@@ -1996,7 +2011,8 @@ async function trackImportCompletion(projectId, fileName, startedAt) {
     const event = (activity.events || []).find(item =>
       item.project_id === projectId
       && item.caught_at_unix >= startedAt
-      && (!item.source_path || item.source_path.toLowerCase().endsWith(fileName.toLowerCase()))
+      && item.source_path
+      && item.source_path.toLowerCase() === storedPath.toLowerCase()
       && terminalKinds.has(item.kind));
     if (event) {
       if (selectedProject === projectId) {
