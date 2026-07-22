@@ -1144,6 +1144,42 @@ async fn handle_cloud_projects(
 }
 
 fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
+    pair_status_from_pairing(state, local_pairing_key_is_available(&state.pairing))
+}
+
+fn local_pairing_key_is_available(pairing: &PairingState) -> bool {
+    let PairingState::Paired {
+        key_fingerprint, ..
+    } = pairing
+    else {
+        return true;
+    };
+
+    match crate::keychain::load() {
+        Ok(Some(signing_key)) => {
+            let actual_fingerprint = pairing::fingerprint_for(&signing_key);
+            if actual_fingerprint == *key_fingerprint {
+                true
+            } else {
+                warn!("local signing key does not match the persisted pairing record");
+                false
+            }
+        }
+        Ok(None) => {
+            warn!("persisted pairing record has no local signing key");
+            false
+        }
+        Err(error) => {
+            warn!(%error, "could not read the local signing key for persisted pairing record");
+            false
+        }
+    }
+}
+
+fn pair_status_from_pairing(
+    state: &DaemonState,
+    local_key_is_available: bool,
+) -> proto::PairStatus {
     match &state.pairing {
         PairingState::Unpaired => proto::PairStatus::Unpaired,
         PairingState::Pending {
@@ -1164,7 +1200,7 @@ fn pair_status_from_state(state: &DaemonState) -> proto::PairStatus {
             account_email,
             account_name,
             key_id,
-        } if !key_id.trim().is_empty() => proto::PairStatus::Paired {
+        } if !key_id.trim().is_empty() && local_key_is_available => proto::PairStatus::Paired {
             device_label: device_label.clone(),
             key_fingerprint: key_fingerprint.clone(),
             paired_at: rfc3339_from_unix(*paired_at_unix),
@@ -1300,6 +1336,7 @@ async fn handle_setup_status(
     let daemon_state = state.state.read().await.clone();
     let active = active_project_ids(&state).await;
     let watch = watch_status_from(&cfg, &daemon_state, &active);
+    let pair_status = pair_status_from_state(&daemon_state);
     let inbox_root = default_inbox_root().map_err(|error| {
         err_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1307,8 +1344,8 @@ async fn handle_setup_status(
         )
     })?;
     Ok(Json(proto::SetupStatus {
-        paired: daemon_state.has_usable_pairing_record(),
-        pair_status: pair_status_from_state(&daemon_state),
+        paired: matches!(pair_status, proto::PairStatus::Paired { .. }),
+        pair_status,
         default_device_label: default_device_label(),
         inbox_root_path: inbox_root.to_string_lossy().to_string(),
         needs_inbox: cfg.watch.is_empty(),
@@ -4024,6 +4061,27 @@ mod tests {
             classify_error(StatusCode::CONFLICT, &BridgeError::PairingKeyUnavailable);
         assert_eq!(code, "pairing_key_unavailable");
         assert!(!retryable);
+    }
+
+    #[test]
+    fn pairing_with_an_unavailable_local_key_is_reported_as_unpaired() {
+        let state = DaemonState {
+            pairing: PairingState::Paired {
+                device_label: "Vex Atlas".into(),
+                key_fingerprint: "SHA256:expected".into(),
+                key_id: "2cdaa28b-7185-4380-ba7f-f34bd0b819cf".into(),
+                paired_at_unix: 0,
+                account_id: None,
+                account_email: None,
+                account_name: None,
+            },
+            ..DaemonState::default()
+        };
+
+        assert!(matches!(
+            pair_status_from_pairing(&state, false),
+            proto::PairStatus::Unpaired
+        ));
     }
 
     #[test]
